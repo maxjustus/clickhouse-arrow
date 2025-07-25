@@ -154,3 +154,41 @@ The `native_protocol/` folder contains generated documentation about ClickHouse'
 - **CLAUDE.md**: Additional protocol implementation notes
 
 These documents provide detailed insights into the binary wire format and can be referenced when implementing or debugging protocol features, especially for complex types like Variant.
+
+## Variant Type Implementation
+
+### Overview
+The Variant type in ClickHouse is a discriminated union that can hold one of several possible types. The implementation in this codebase handles the multi-stream architecture used by ClickHouse's native protocol.
+
+### Key Implementation Details
+
+1. **Discriminator Mapping**:
+   - Types within a Variant are sorted alphabetically to determine discriminator values
+   - Discriminator 0xFF (255) is reserved for NULL values
+   - Example: `Variant(String, UInt64)` → String=0, UInt64=1 (alphabetical order)
+
+2. **Wire Format**:
+   - 8-byte version prefix (must be 0) - read during deserialize_prefix phase
+   - Discriminators as byte array (one byte per row)
+   - Column data for each type serialized separately (multi-stream architecture)
+   - Data is grouped by discriminator type, not interleaved
+
+3. **Deserialization Process**:
+   - Read version prefix (8 bytes) during prefix phase
+   - Read all discriminators
+   - Count rows per discriminator type
+   - Read column data for each type in discriminator order
+   - Reconstruct values in original row order using offsets
+
+4. **Current Status**:
+   - Deserialization: ✅ Implemented and tested
+   - Serialization: ❌ TODO (stub exists with detailed comments)
+   - Nested Variants: ⚠️ Partially working, needs more work for prefix handling
+
+### Reference Implementation
+The `ctx/clickhouse-go/` directory contains the ClickHouse Go driver source code which has a working Variant implementation. Key files:
+- `ctx/clickhouse-go/lib/column/variant.go` - Main Variant column implementation
+- `ctx/clickhouse-go/lib/chcol/variant.go` - Variant value type
+- `ctx/clickhouse-go/tests/variant_test.go` - Test examples
+
+Use this as a reference when implementing features or debugging issues with the Variant type.

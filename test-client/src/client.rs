@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use clickhouse_arrow::{
-    Client, ClientBuilder, CompressionMethod, NativeFormat, Qid, Type, Value as ChValue,
+    Client, ClientBuilder, CompressionMethod, NativeFormat, Qid, Value as ChValue,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -323,13 +323,9 @@ fn clickhouse_value_to_json(value: ChValue) -> Result<Value> {
             }
         }
         ChValue::Null => Ok(Value::Null),
-        ChValue::Variant(discriminator, inner) => {
-            // Convert the inner value and wrap in an object showing discriminator and value
-            let inner_json = clickhouse_value_to_json(*inner)?;
-            let mut obj = serde_json::Map::new();
-            obj.insert("discriminator".to_string(), Value::Number(discriminator.into()));
-            obj.insert("value".to_string(), inner_json);
-            Ok(Value::Object(obj))
+        ChValue::Variant(_discriminator, inner) => {
+            // Just return the inner value directly
+            clickhouse_value_to_json(*inner)
         }
     }
 }
