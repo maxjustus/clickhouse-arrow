@@ -7,6 +7,7 @@ pub(crate) mod object;
 pub(crate) mod sized;
 pub(crate) mod string;
 pub(crate) mod tuple;
+pub(crate) mod variant;
 
 use super::low_cardinality::LOW_CARDINALITY_VERSION;
 use super::*;

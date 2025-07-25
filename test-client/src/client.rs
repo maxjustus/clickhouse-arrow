@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use clickhouse_arrow::{
-    Client, ClientBuilder, CompressionMethod, NativeFormat, Qid, Value as ChValue,
+    Client, ClientBuilder, CompressionMethod, NativeFormat, Qid, Type, Value as ChValue,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -58,7 +58,6 @@ impl ClickHouseClient {
     ) -> Result<Vec<Value>> {
         tracing::debug!("Executing query: {}", query);
 
-
         let mut stream = self
             .client
             .query_raw(query.to_string(), None::<HashMap<String, String>>, Qid::default())
@@ -68,7 +67,6 @@ impl ClickHouseClient {
         let mut results = Vec::new();
         while let Some(block_result) = stream.next().await {
             let block = block_result.context("Failed to read block")?;
-
 
             let json_result = block_to_json(block)?;
 
@@ -158,7 +156,6 @@ fn block_to_json(block: clickhouse_arrow::native::block::Block) -> Result<Value>
     let mut result_rows = Vec::new();
     let rows = block.rows as usize;
 
-    eprintln!("DEBUG block_to_json: rows={}, columns={}", rows, block.column_data.len());
 
     if rows == 0 {
         return Ok(Value::Array(vec![]));
@@ -167,35 +164,29 @@ fn block_to_json(block: clickhouse_arrow::native::block::Block) -> Result<Value>
     // Extract column names and types
     let column_info: Vec<_> = block.column_types.iter().collect();
 
-    // Debug print column info
-    for ((name, type_), data) in column_info.iter().zip(block.column_data.iter()) {
-        eprintln!("DEBUG column: name={name}, type={type_:?}, data={data:?}");
-    }
 
     // Convert columnar data to row-based JSON
+    // The block.column_data contains all values flattened: 
+    // for each column, it has `rows` consecutive values
     for row_idx in 0..rows {
         let mut json_row = serde_json::Map::new();
 
-        for ((column_name, _column_type), column_data) in
-            column_info.iter().zip(block.column_data.iter())
-        {
-            // Extract the value for this row from the column
-            let value = match column_data {
-                ChValue::Array(values) if row_idx < values.len() => {
-                    clickhouse_value_to_json(values[row_idx].clone())?
-                }
-                single_value if rows == 1 => clickhouse_value_to_json(single_value.clone())?,
-                _ => {
-                    tracing::warn!(
-                        "Column {} has unexpected structure for row {}",
-                        column_name,
-                        row_idx
-                    );
-                    Value::Null
-                }
-            };
-
-            json_row.insert(column_name.clone(), value);
+        for (column_name, _column_type) in column_info.iter() {
+            // Get the value for this column and row
+            let column_start = column_info.iter().position(|(name, _)| name == column_name).unwrap() * rows;
+            let value_idx = column_start + row_idx;
+            
+            if value_idx < block.column_data.len() {
+                let value = clickhouse_value_to_json(block.column_data[value_idx].clone())?;
+                json_row.insert(column_name.clone(), value);
+            } else {
+                tracing::warn!(
+                    "Missing data for column {} row {}",
+                    column_name,
+                    row_idx
+                );
+                json_row.insert(column_name.clone(), Value::Null);
+            }
         }
 
         result_rows.push(Value::Object(json_row));
@@ -332,6 +323,14 @@ fn clickhouse_value_to_json(value: ChValue) -> Result<Value> {
             }
         }
         ChValue::Null => Ok(Value::Null),
+        ChValue::Variant(discriminator, inner) => {
+            // Convert the inner value and wrap in an object showing discriminator and value
+            let inner_json = clickhouse_value_to_json(*inner)?;
+            let mut obj = serde_json::Map::new();
+            obj.insert("discriminator".to_string(), Value::Number(discriminator.into()));
+            obj.insert("value".to_string(), inner_json);
+            Ok(Value::Object(obj))
+        }
     }
 }
 

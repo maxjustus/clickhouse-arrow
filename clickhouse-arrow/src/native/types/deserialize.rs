@@ -94,7 +94,7 @@ impl ClickHouseNativeDeserializer for Type {
                     object::ObjectDeserializer::read_prefix(self, reader, state).await?;
                 }
                 Type::Variant(_) => {
-                    // Variant doesn't have a prefix - discriminators are read inline
+                    variant::VariantDeserializer::read_prefix(self, reader, state).await?;
                 }
             }
             Ok(())
@@ -131,7 +131,13 @@ impl ClickHouseNativeDeserializer for Type {
                 let _ = reader.try_get_i8()?;
             }
             Type::Variant(_) => {
-                // Variant doesn't have a prefix - discriminators are read inline
+                // Read version prefix (8 bytes)
+                let version = reader.try_get_u64_le()?;
+                if version != 0 {
+                    return Err(Error::DeserializeError(format!(
+                        "Unsupported Variant serialization version: {}", version
+                    )));
+                }
             }
             _ => {}
         }
