@@ -81,6 +81,7 @@ pub enum Type {
     Array(Box<Type>),
     Tuple(Vec<Type>),
     Map(Box<Type>, Box<Type>),
+    Variant(Vec<Type>),
 
     Object,
 }
@@ -133,6 +134,23 @@ impl Type {
     pub fn untuple(&self) -> Option<&[Type]> {
         match self {
             Type::Tuple(x) => Some(&x[..]),
+            _ => None,
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Errors if the type is not a variant
+    pub fn unwrap_variant(&self) -> Result<&[Type]> {
+        match self {
+            Type::Variant(x) => Ok(&x[..]),
+            _ => Err(Error::UnexpectedType(self.clone())),
+        }
+    }
+
+    pub fn unvariant(&self) -> Option<&[Type]> {
+        match self {
+            Type::Variant(x) => Some(&x[..]),
             _ => None,
         }
     }
@@ -206,6 +224,7 @@ impl Type {
             Type::Tuple(types) => Value::Tuple(types.iter().map(Type::default_value).collect()),
             Type::Nullable(_) => Value::Null,
             Type::Map(_, _) => Value::Map(vec![], vec![]),
+            Type::Variant(_) => Value::Null, // Default variant value is NULL
             Type::Point => Value::Point(Point::default()),
             Type::Ring => Value::Ring(Ring::default()),
             Type::Polygon => Value::Polygon(Polygon::default()),
@@ -285,6 +304,11 @@ impl Display for Type {
             ),
             Type::Nullable(inner) => write!(f, "Nullable({inner})"),
             Type::Map(key, value) => write!(f, "Map({key},{value})"),
+            Type::Variant(items) => write!(
+                f,
+                "Variant({})",
+                items.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+            ),
             Type::Object => write!(f, "JSON"),
         }
     }
@@ -358,6 +382,7 @@ impl Type {
                         .await?
                 }
                 Type::Object => object::ObjectDeserializer::read(self, reader, rows, state).await?,
+                Type::Variant(_) => variant::VariantDeserializer::read_async(self, reader, rows, state).await?,
             })
         }
         .boxed()
@@ -424,6 +449,7 @@ impl Type {
                 low_cardinality::LowCardinalityDeserializer::read_sync(self, reader, rows, state)?
             }
             Type::Object => object::ObjectDeserializer::read_sync(self, reader, rows, state)?,
+            Type::Variant(_) => variant::VariantDeserializer::read_sync(self, reader, rows, state)?,
         })
     }
 
@@ -496,6 +522,9 @@ impl Type {
                 Type::Object => {
                     object::ObjectSerializer::write(self, values, writer, state).await?;
                 }
+                Type::Variant(_) => {
+                    todo!("Variant serialization not yet implemented");
+                }
             }
             Ok(())
         }
@@ -565,6 +594,9 @@ impl Type {
             }
             Type::Object => {
                 object::ObjectSerializer::write_sync(self, values, writer, state)?;
+            }
+            Type::Variant(_) => {
+                todo!("Variant sync serialization not yet implemented");
             }
         }
         Ok(())
@@ -689,6 +721,16 @@ impl Type {
                 key.validate()?;
                 value.validate()?;
             }
+            Type::Variant(inner) => {
+                if inner.is_empty() {
+                    return Err(Error::TypeParseError(
+                        "Variant must have at least one type".to_string()
+                    ));
+                }
+                for inner_type in inner {
+                    inner_type.validate()?;
+                }
+            }
             // TODO: Add Object
             _ => {}
         }
@@ -767,6 +809,12 @@ impl Type {
                     && keys.iter().all(|x| key.inner_validate_value(x))
                     && values.iter().all(|x| value.inner_validate_value(x))
             }
+            (Type::Variant(types), Value::Variant(discriminator, val)) => {
+                // Check if discriminator is within bounds and value matches the type
+                (*discriminator as usize) < types.len() 
+                    && types[*discriminator as usize].inner_validate_value(val)
+            }
+            (Type::Variant(_), Value::Null) => true, // NULL is valid for Variant
             _ => false,
         }
     }
@@ -798,6 +846,15 @@ impl Type {
                 let key_data = key.estimate_capacity();
                 let value_data = value.estimate_capacity();
                 4 + key_data + value_data // 4 bytes for offsets
+            }
+            Type::Variant(types) => {
+                // 1 byte for discriminator + average of all type capacities
+                let avg_capacity: usize = if types.is_empty() {
+                    0
+                } else {
+                    types.iter().map(Type::estimate_capacity).sum::<usize>() / types.len()
+                };
+                1 + avg_capacity
             }
 
             // Placeholder for unsupported types

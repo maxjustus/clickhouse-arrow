@@ -1,0 +1,333 @@
+{
+  "categories": [
+    {
+      "name": "basic_types",
+      "tests": [
+        {
+          "name": "basic_dates",
+          "query": "SELECT toDate('2023-12-25') as christmas, toDate('1900-01-01') as old_date, toDate('2106-02-07') as far_future",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "date32",
+          "query": "SELECT toDate32('1900-01-01') as date32_old, toDate32('2023-12-25') as date32_recent, toDate32('2299-12-31') as date32_future",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "datetime",
+          "query": "SELECT toDateTime('2023-12-25 15:30:45') as dt, toDateTime('2023-01-01 00:00:00') as dt_start, toDateTime('2023-12-31 23:59:59') as dt_end",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "datetime_with_timezone",
+          "query": "SELECT toDateTime('2023-12-25 15:30:45', 'UTC') as dt_utc, toDateTime('2023-12-25 15:30:45', 'America/New_York') as dt_ny",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "datetime64",
+          "query": "SELECT toDateTime64('2023-12-25 15:30:45.123456', 6) as dt64_micro, toDateTime64('2023-12-25 15:30:45.123', 3) as dt64_milli",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "basic_strings",
+          "query": "SELECT 'hello world' as simple_string, '' as empty_string, 'Hello, \u4e16\u754c!' as unicode_string",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "special_characters",
+          "query": "SELECT 'line1\\nline2' as newline, 'tab\\there' as tab, 'quote\"here' as quote, 'apostrophe\\'here' as apostrophe",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "long_strings",
+          "query": "SELECT repeat('a', 1000) as long_string, repeat('\u6d4b\u8bd5', 500) as long_unicode",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "fixed_strings",
+          "query": "SELECT toFixedString('hello', 10) as fixed_str, toFixedString('\u4e16\u754c', 10) as fixed_unicode",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "binary_data",
+          "query": "SELECT unhex('48656c6c6f') as binary_hello, unhex('00010203FF') as binary_bytes",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": true,
+            "test_client_error": true,
+            "clickhouse_output": "Error: 'utf-8' codec can't decode byte 0xff in position 64: invalid start byte",
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "signed_integers",
+          "query": "SELECT -128::Int8 as int8_min, 127::Int8 as int8_max, -32768::Int16 as int16_min, 32767::Int16 as int16_max, -2147483648::Int32 as int32_min, 2147483647::Int32 as int32_max",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "unsigned_integers",
+          "query": "SELECT 255::UInt8 as uint8_max, 65535::UInt16 as uint16_max, 4294967295::UInt32 as uint32_max",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "large_integers",
+          "query": "SELECT -9223372036854775808::Int64 as int64_min, 9223372036854775807::Int64 as int64_max, 18446744073709551615::UInt64 as uint64_max",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "big_integers",
+          "query": "SELECT toInt128('-170141183460469231731687303715884105728') as int128_min, toUInt128('340282366920938463463374607431768211455') as uint128_max",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "256bit_integers",
+          "query": "SELECT toInt256('-57896044618658097711785492504343953926634992332820282019728792003956564819968') as int256_min, toUInt256('115792089237316195423570985008687907853269984665640564039457584007913129639935') as uint256_max",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "float32",
+          "query": "SELECT 3.14159::Float32 as pi_f32, -1.5::Float32 as negative_f32, 0.0::Float32 as zero_f32",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "float64",
+          "query": "SELECT 3.141592653589793::Float64 as pi_f64, -2.718281828459045::Float64 as e_negative, 1.7976931348623157e308::Float64 as max_f64",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "special_values",
+          "query": "SELECT nan::Float32 as nan_f32, inf::Float32 as inf_f32, -inf::Float32 as neg_inf_f32, nan::Float64 as nan_f64, inf::Float64 as inf_f64",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "decimals",
+          "query": "SELECT toDecimal32(123.45, 2) as dec32, toDecimal64(123.456789, 6) as dec64, toDecimal128(12345.6789012345, 10) as dec128",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "uuid",
+          "query": "SELECT toUUID('550e8400-e29b-41d4-a716-446655440000') as uuid_val, generateUUIDv4() as random_uuid",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "ipv4",
+          "query": "SELECT toIPv4('127.0.0.1') as localhost, toIPv4('192.168.1.1') as private_ip, toIPv4('8.8.8.8') as public_ip",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "ipv6",
+          "query": "SELECT toIPv6('::1') as ipv6_localhost, toIPv6('2001:db8::1') as ipv6_example, toIPv6('fe80::1') as ipv6_link_local",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "enum8",
+          "query": "SELECT CAST('Red', 'Enum8(\\'Red\\' = 1, \\'Green\\' = 2, \\'Blue\\' = 3)') as color8",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "enum16",
+          "query": "SELECT CAST('Success', 'Enum16(\\'Success\\' = 200, \\'NotFound\\' = 404, \\'InternalError\\' = 500)') as status16",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "simple_integers",
+          "query": "SELECT 42 as answer, -123 as negative",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        },
+        {
+          "name": "simple_strings",
+          "query": "SELECT 'hello' as greeting, 'world' as noun",
+          "status": "ERROR",
+          "passed": false,
+          "details": {
+            "clickhouse_error": false,
+            "test_client_error": true,
+            "clickhouse_output": null,
+            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+          }
+        }
+      ],
+      "summary": {
+        "total": 26,
+        "passed": 0,
+        "failed": 0,
+        "errors": 26
+      }
+    }
+  ],
+  "summary": {
+    "total": 26,
+    "passed": 0,
+    "failed": 0,
+    "errors": 26
+  }
+}

@@ -70,6 +70,14 @@ cargo bench --bench insert --features test-utils
 cargo bench --bench query --features test-utils
 ```
 
+### Protocol Debugging
+```bash
+# Analyze raw TCP binary data for ClickHouse protocol debugging
+python3 chc-tcp.py "SELECT if(number % 2 = 0, 'yes', number) as v FROM system.numbers LIMIT 3"
+
+# Use this tool to inspect binary wire format when implementing complex types like Variant
+```
+
 ## Architecture
 
 ### Core Components
@@ -132,3 +140,17 @@ cargo bench --bench query --features test-utils
 - Extensive clippy lints are configured in the workspace Cargo.toml
 - Custom disallowed methods are defined in clippy.toml
 - Test containers are automatically managed, set `DISABLE_CLEANUP=true` to keep containers running
+
+## Native Protocol Documentation
+
+The `native_protocol/` folder contains generated documentation about ClickHouse's native wire protocol implementation:
+
+- **01-core-protocol.md**: Core protocol concepts, handshake, and basic packet structure
+- **02-packet-types.md**: Detailed packet types (Hello, Data, Query, etc.) and their formats
+- **03-data-serialization.md**: Data type serialization/deserialization, including complex types like Arrays, Maps, Tuples, and Variants
+- **04-state-management.md**: Connection state, query state, and error handling
+- **05-advanced-features.md**: Compression, query parameters, progress reporting, and profiling
+- **TODO.md**: Implementation status and pending tasks
+- **CLAUDE.md**: Additional protocol implementation notes
+
+These documents provide detailed insights into the binary wire format and can be referenced when implementing or debugging protocol features, especially for complex types like Variant.

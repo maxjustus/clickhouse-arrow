@@ -1,0 +1,17 @@
+name: "Integer Types"
+description: "Test all integer data types"
+tests:
+  - name: "signed_integers"
+    query: "SELECT -128::Int8 as int8_min, 127::Int8 as int8_max, -32768::Int16 as int16_min, 32767::Int16 as int16_max, -2147483648::Int32 as int32_min, 2147483647::Int32 as int32_max"
+    
+  - name: "unsigned_integers"
+    query: "SELECT 255::UInt8 as uint8_max, 65535::UInt16 as uint16_max, 4294967295::UInt32 as uint32_max"
+    
+  - name: "large_integers"
+    query: "SELECT -9223372036854775808::Int64 as int64_min, 9223372036854775807::Int64 as int64_max, 18446744073709551615::UInt64 as uint64_max"
+    
+  - name: "big_integers"
+    query: "SELECT toInt128('-170141183460469231731687303715884105728') as int128_min, toUInt128('340282366920938463463374607431768211455') as uint128_max"
+    
+  - name: "256bit_integers"  
+    query: "SELECT toInt256('-57896044618658097711785492504343953926634992332820282019728792003956564819968') as int256_min, toUInt256('115792089237316195423570985008687907853269984665640564039457584007913129639935') as uint256_max"

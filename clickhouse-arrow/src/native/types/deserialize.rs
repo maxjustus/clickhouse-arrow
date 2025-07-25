@@ -7,6 +7,7 @@ pub(crate) mod object;
 pub(crate) mod sized;
 pub(crate) mod string;
 pub(crate) mod tuple;
+pub(crate) mod variant;
 
 use super::low_cardinality::LOW_CARDINALITY_VERSION;
 use super::*;
@@ -92,6 +93,9 @@ impl ClickHouseNativeDeserializer for Type {
                 Type::Object => {
                     object::ObjectDeserializer::read_prefix(self, reader, state).await?;
                 }
+                Type::Variant(_) => {
+                    // Variant doesn't have a prefix - discriminators are read inline
+                }
             }
             Ok(())
         }
@@ -125,6 +129,9 @@ impl ClickHouseNativeDeserializer for Type {
             }
             Type::Object => {
                 let _ = reader.try_get_i8()?;
+            }
+            Type::Variant(_) => {
+                // Variant doesn't have a prefix - discriminators are read inline
             }
             _ => {}
         }
@@ -471,6 +478,17 @@ impl FromStr for Type {
                         Box::new(Type::from_str(args[0])?),
                         Box::new(Type::from_str(args[1])?),
                     )
+                }
+                "Variant" => {
+                    let args = parse_variable_args(following)?;
+                    if args.is_empty() {
+                        return Err(Error::TypeParseError(
+                            "Variant expects at least one type argument".to_string()
+                        ));
+                    }
+                    let inner: Vec<Type> =
+                        args.into_iter().map(Type::from_str).collect::<Result<_, _>>()?;
+                    Type::Variant(inner)
                 }
                 // Unsupported
                 "Nested" => {
@@ -914,5 +932,205 @@ mod tests {
         assert!(Type::from_str("Nested(String)").is_err()); // Unsupported Nested
         assert!(Type::from_str("Int8(").is_err()); // Unclosed paren
         assert!(Type::from_str("Tuple(String,)").is_err()); // Trailing comma
+    }
+
+    /// Tests parsing of simple Variant types
+    #[test]
+    fn test_parse_simple_variant() {
+        let variant = Type::from_str("Variant(String, UInt64, Date)").unwrap();
+        match variant {
+            Type::Variant(types) => {
+                assert_eq!(types.len(), 3);
+                assert_eq!(types[0], Type::String);
+                assert_eq!(types[1], Type::UInt64);
+                assert_eq!(types[2], Type::Date);
+            }
+            _ => panic!("Expected Variant type"),
+        }
+    }
+
+    /// Tests parsing of nested Variant types
+    #[test]
+    fn test_parse_nested_variant() {
+        let variant = Type::from_str("Variant(String, Variant(UInt64, Date))").unwrap();
+        match variant {
+            Type::Variant(types) => {
+                assert_eq!(types.len(), 2);
+                assert_eq!(types[0], Type::String);
+                
+                // Check the nested variant
+                match &types[1] {
+                    Type::Variant(inner_types) => {
+                        assert_eq!(inner_types.len(), 2);
+                        assert_eq!(inner_types[0], Type::UInt64);
+                        assert_eq!(inner_types[1], Type::Date);
+                    }
+                    _ => panic!("Expected nested Variant type"),
+                }
+            }
+            _ => panic!("Expected Variant type"),
+        }
+    }
+
+    /// Tests parsing of deeply nested Variant types
+    #[test]
+    fn test_parse_deeply_nested_variant() {
+        let variant = Type::from_str("Variant(String, Variant(UInt64, Variant(Date, Float32)))").unwrap();
+        match variant {
+            Type::Variant(types) => {
+                assert_eq!(types.len(), 2);
+                assert_eq!(types[0], Type::String);
+                
+                // Check the first level nested variant
+                match &types[1] {
+                    Type::Variant(inner_types) => {
+                        assert_eq!(inner_types.len(), 2);
+                        assert_eq!(inner_types[0], Type::UInt64);
+                        
+                        // Check the second level nested variant
+                        match &inner_types[1] {
+                            Type::Variant(deep_types) => {
+                                assert_eq!(deep_types.len(), 2);
+                                assert_eq!(deep_types[0], Type::Date);
+                                assert_eq!(deep_types[1], Type::Float32);
+                            }
+                            _ => panic!("Expected deeply nested Variant type"),
+                        }
+                    }
+                    _ => panic!("Expected nested Variant type"),
+                }
+            }
+            _ => panic!("Expected Variant type"),
+        }
+    }
+
+    /// Tests parsing of Variant with other complex types
+    #[test]
+    fn test_parse_variant_with_other_complex_types() {
+        // Variant containing Array and Nullable types
+        let variant = Type::from_str("Variant(String, Array(UInt64), Nullable(Date))").unwrap();
+        match variant {
+            Type::Variant(types) => {
+                assert_eq!(types.len(), 3);
+                assert_eq!(types[0], Type::String);
+                
+                match &types[1] {
+                    Type::Array(inner) => {
+                        assert_eq!(**inner, Type::UInt64);
+                    }
+                    _ => panic!("Expected Array type"),
+                }
+                
+                match &types[2] {
+                    Type::Nullable(inner) => {
+                        assert_eq!(**inner, Type::Date);
+                    }
+                    _ => panic!("Expected Nullable type"),
+                }
+            }
+            _ => panic!("Expected Variant type"),
+        }
+    }
+
+    /// Tests parsing of Variant containing a Tuple
+    #[test]
+    fn test_parse_variant_with_tuple() {
+        let variant = Type::from_str("Variant(String, Tuple(UInt64, Date))").unwrap();
+        match variant {
+            Type::Variant(types) => {
+                assert_eq!(types.len(), 2);
+                assert_eq!(types[0], Type::String);
+                
+                match &types[1] {
+                    Type::Tuple(inner_types) => {
+                        assert_eq!(inner_types.len(), 2);
+                        assert_eq!(inner_types[0], Type::UInt64);
+                        assert_eq!(inner_types[1], Type::Date);
+                    }
+                    _ => panic!("Expected Tuple type"),
+                }
+            }
+            _ => panic!("Expected Variant type"),
+        }
+    }
+
+    /// Tests parsing of Variant containing a Map
+    #[test]
+    fn test_parse_variant_with_map() {
+        let variant = Type::from_str("Variant(String, Map(String, UInt64))").unwrap();
+        match variant {
+            Type::Variant(types) => {
+                assert_eq!(types.len(), 2);
+                assert_eq!(types[0], Type::String);
+                
+                match &types[1] {
+                    Type::Map(key, value) => {
+                        assert_eq!(**key, Type::String);
+                        assert_eq!(**value, Type::UInt64);
+                    }
+                    _ => panic!("Expected Map type"),
+                }
+            }
+            _ => panic!("Expected Variant type"),
+        }
+    }
+
+    /// Tests parsing of a complex nested Variant with multiple levels
+    #[test]
+    fn test_parse_complex_nested_variant() {
+        let variant = Type::from_str("Variant(String, Array(Variant(UInt64, Nullable(Date))), Map(String, Variant(Float32, Bool)))").unwrap();
+        match variant {
+            Type::Variant(types) => {
+                assert_eq!(types.len(), 3);
+                assert_eq!(types[0], Type::String);
+                
+                // Check Array of Variant
+                match &types[1] {
+                    Type::Array(inner) => {
+                        match &**inner {
+                            Type::Variant(var_types) => {
+                                assert_eq!(var_types.len(), 2);
+                                assert_eq!(var_types[0], Type::UInt64);
+                                match &var_types[1] {
+                                    Type::Nullable(nullable_inner) => {
+                                        assert_eq!(**nullable_inner, Type::Date);
+                                    }
+                                    _ => panic!("Expected Nullable type"),
+                                }
+                            }
+                            _ => panic!("Expected Variant type inside Array"),
+                        }
+                    }
+                    _ => panic!("Expected Array type"),
+                }
+                
+                // Check Map with Variant value
+                match &types[2] {
+                    Type::Map(key, value) => {
+                        assert_eq!(**key, Type::String);
+                        match &**value {
+                            Type::Variant(var_types) => {
+                                assert_eq!(var_types.len(), 2);
+                                assert_eq!(var_types[0], Type::Float32);
+                                assert_eq!(var_types[1], Type::UInt8); // Bool is UInt8
+                            }
+                            _ => panic!("Expected Variant type as Map value"),
+                        }
+                    }
+                    _ => panic!("Expected Map type"),
+                }
+            }
+            _ => panic!("Expected Variant type"),
+        }
+    }
+
+    /// Tests that empty Variant should fail
+    #[test]
+    fn test_parse_variant_empty_should_fail() {
+        let result = Type::from_str("Variant()");
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("at least one type argument"));
+        }
     }
 }

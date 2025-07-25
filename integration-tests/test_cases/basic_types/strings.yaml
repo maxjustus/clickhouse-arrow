@@ -1,0 +1,17 @@
+name: "String Types"
+description: "Test string and binary data types"
+tests:
+  - name: "basic_strings"
+    query: "SELECT 'hello world' as simple_string, '' as empty_string, 'Hello, 世界!' as unicode_string"
+    
+  - name: "special_characters"
+    query: "SELECT 'line1\\nline2' as newline, 'tab\\there' as tab, 'quote\"here' as quote, 'apostrophe\\'here' as apostrophe"
+    
+  - name: "long_strings"
+    query: "SELECT repeat('a', 1000) as long_string, repeat('测试', 500) as long_unicode"
+    
+  - name: "fixed_strings"
+    query: "SELECT toFixedString('hello', 10) as fixed_str, toFixedString('世界', 10) as fixed_unicode"
+    
+  - name: "binary_data"
+    query: "SELECT unhex('48656c6c6f') as binary_hello, unhex('00010203FF') as binary_bytes"

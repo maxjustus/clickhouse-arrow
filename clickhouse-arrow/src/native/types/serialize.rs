@@ -89,6 +89,9 @@ impl ClickHouseNativeSerializer for Type {
                         .await?;
                 }
                 Type::Object => object::ObjectSerializer::write_prefix(self, writer, state).await?,
+                Type::Variant(_) => {
+                    todo!("Variant prefix serialization not yet implemented");
+                }
             }
             Ok(())
         }

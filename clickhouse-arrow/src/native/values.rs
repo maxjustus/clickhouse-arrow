@@ -77,6 +77,8 @@ pub enum Value {
     Null,
 
     Map(Vec<Value>, Vec<Value>),
+    
+    Variant(u8, Box<Value>), // discriminator and value
 
     Ipv4(Ipv4),
     Ipv6(Ipv6),
@@ -122,6 +124,7 @@ impl PartialEq for Value {
             (Self::Array(l0), Self::Array(r0)) => l0 == r0,
             (Self::Tuple(l0), Self::Tuple(r0)) => l0 == r0,
             (Self::Map(l0, l1), Self::Map(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::Variant(l0, l1), Self::Variant(r0, r1)) => l0 == r0 && l1 == r1,
             (Self::Ipv4(l0), Self::Ipv4(r0)) => l0 == r0,
             (Self::Ipv6(l0), Self::Ipv6(r0)) => l0 == r0,
             (Self::Point(l0), Self::Point(r0)) => l0 == r0,
@@ -184,6 +187,10 @@ impl Hash for Value {
             Value::Map(x, __self_1) => {
                 ::core::hash::Hash::hash(x, state);
                 ::core::hash::Hash::hash(__self_1, state);
+            }
+            Value::Variant(disc, val) => {
+                ::core::hash::Hash::hash(disc, state);
+                ::core::hash::Hash::hash(val, state);
             }
             Value::Ipv4(x) => ::core::hash::Hash::hash(x, state),
             Value::Ipv6(x) => ::core::hash::Hash::hash(x, state),
@@ -308,6 +315,10 @@ impl Value {
                 Box::new(k.first().map_or(Type::String, Value::guess_type)),
                 Box::new(v.first().map_or(Type::String, Value::guess_type)),
             ),
+            Value::Variant(_, val) => {
+                // For Variant, we can only guess a single-type variant based on the value
+                Type::Variant(vec![val.guess_type()])
+            }
             Value::Ipv4(_) => Type::Ipv4,
             Value::Ipv6(_) => Type::Ipv6,
 
@@ -476,6 +487,9 @@ impl fmt::Display for Value {
                     write!(f, ",{key}:{value}")?;
                 }
                 write!(f, "}}")
+            }
+            Value::Variant(discriminator, value) => {
+                write!(f, "variant({discriminator},{value})")
             }
             Value::Ipv4(ipv4) => write!(f, "'{ipv4}'"),
             Value::Ipv6(ipv6) => write!(f, "'{ipv6}'"),

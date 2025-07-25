@@ -1,0 +1,17 @@
+name: "Date and Time Types"
+description: "Test date, datetime, and timestamp types"
+tests:
+  - name: "basic_dates"
+    query: "SELECT toDate('2023-12-25') as christmas, toDate('1900-01-01') as old_date, toDate('2106-02-07') as far_future"
+    
+  - name: "date32"
+    query: "SELECT toDate32('1900-01-01') as date32_old, toDate32('2023-12-25') as date32_recent, toDate32('2299-12-31') as date32_future"
+    
+  - name: "datetime"
+    query: "SELECT toDateTime('2023-12-25 15:30:45') as dt, toDateTime('2023-01-01 00:00:00') as dt_start, toDateTime('2023-12-31 23:59:59') as dt_end"
+    
+  - name: "datetime_with_timezone"
+    query: "SELECT toDateTime('2023-12-25 15:30:45', 'UTC') as dt_utc, toDateTime('2023-12-25 15:30:45', 'America/New_York') as dt_ny"
+    
+  - name: "datetime64"
+    query: "SELECT toDateTime64('2023-12-25 15:30:45.123456', 6) as dt64_micro, toDateTime64('2023-12-25 15:30:45.123', 3) as dt64_milli"

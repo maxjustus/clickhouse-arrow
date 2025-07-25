@@ -1,0 +1,8 @@
+name: "Simple Test"
+description: "Basic functionality test"
+tests:
+  - name: "simple_integers"
+    query: "SELECT 42 as answer, -123 as negative"
+    
+  - name: "simple_strings"
+    query: "SELECT 'hello' as greeting, 'world' as noun"

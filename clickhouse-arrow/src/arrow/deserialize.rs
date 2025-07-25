@@ -387,6 +387,10 @@ impl ClickHouseArrowDeserializer for Type {
                     rbuffer
                 )).await?
             }
+            // Variant
+            Type::Variant(_) => {
+                todo!("Variant deserialization not yet implemented");
+            }
         })
     }
 
@@ -542,6 +546,10 @@ impl ClickHouseArrowDeserializer for Type {
                 nulls,
                 rbuffer
             )},
+            // Variant
+            (_, Type::Variant(_)) => {
+                Err(Error::ArrowDeserialize("Variant deserialization not yet implemented".into()))
+            },
             (builder, _) => {
                 // Finish the builder and return an ArrayRef
                 Ok(deser!(() => builder => {

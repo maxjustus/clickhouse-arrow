@@ -472,6 +472,11 @@ pub fn ch_to_arrow_type(ch_type: &Type, options: Option<ArrowOptions>) -> Result
             let normalized = normalize_geo_type(ch_type).unwrap();
             return ch_to_arrow_type(&normalized, options);
         }
+        Type::Variant(_) => {
+            return Err(Error::ArrowUnsupportedType(
+                "Variant type is not yet supported in Arrow conversion".to_string()
+            ));
+        }
         // Unwrapped above
         Type::Nullable(_) => unreachable!(),
     };
