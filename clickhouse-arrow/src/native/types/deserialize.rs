@@ -96,6 +96,10 @@ impl ClickHouseNativeDeserializer for Type {
                 Type::Variant(_) => {
                     variant::VariantDeserializer::read_prefix(self, reader, state).await?;
                 }
+                Type::Dynamic(_) => {
+                    // TODO: Implement Dynamic prefix reading
+                    todo!("Dynamic prefix reading not implemented");
+                }
             }
             Ok(())
         }
