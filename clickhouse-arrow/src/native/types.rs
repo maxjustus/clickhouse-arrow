@@ -422,6 +422,7 @@ impl Type {
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
         use deserialize::*;
+        // eprintln!("DEBUG: deserialize_column_sync called for type: {:?}, rows: {}", self, rows);
 
         if rows > MAX_STRING_SIZE {
             return Err(Error::Protocol(format!(
@@ -477,7 +478,10 @@ impl Type {
             }
             Type::Object => object::ObjectDeserializer::read_sync(self, reader, rows, state)?,
             Type::Variant(_) => variant::VariantDeserializer::read_sync(self, reader, rows, state)?,
-            Type::Dynamic(_) => dynamic::DynamicDeserializer::read_sync(self, reader, rows, state)?,
+            Type::Dynamic(_) => {
+                // eprintln!("DEBUG: Type::Dynamic deserialize_column_sync called for {} rows", rows);
+                dynamic::DynamicDeserializer::read_sync(self, reader, rows, state)?
+            },
         })
     }
 

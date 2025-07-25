@@ -155,6 +155,7 @@ impl ClickHouseClient {
 fn block_to_json(block: clickhouse_arrow::native::block::Block) -> Result<Value> {
     let mut result_rows = Vec::new();
     let rows = block.rows as usize;
+    
 
 
     if rows == 0 {

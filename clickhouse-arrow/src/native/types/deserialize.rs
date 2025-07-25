@@ -143,6 +143,11 @@ impl ClickHouseNativeDeserializer for Type {
                     )));
                 }
             }
+            Type::Dynamic(_) => {
+                // eprintln!("DEBUG: Type::Dynamic deserialize_prefix called");
+                use crate::native::types::deserialize::dynamic::DynamicDeserializer;
+                DynamicDeserializer::read_prefix_sync(self, reader, &mut DeserializerState::default())?;
+            }
             _ => {}
         }
         Ok(())

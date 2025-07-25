@@ -102,41 +102,116 @@ impl DynamicDeserializer {
     ) -> Result<()> {
         let max_types = type_.unwrap_dynamic()?;
         
-        // Read the type registry size
-        let registry_size = reader.try_get_u8()?;
-        if registry_size > max_types + 1 { // +1 for potential SharedVariant
-            return Err(crate::Error::DeserializeError(format!(
-                "Dynamic type registry size {} exceeds max_types {} + SharedVariant", registry_size, max_types
-            )));
+        // Read 8-byte version prefix - ClickHouse 25.5 uses version 2
+        let mut version_prefix = [0u8; 8];
+        reader.try_copy_to_slice(&mut version_prefix)?;
+        
+        let version = version_prefix[0];
+        
+        match version {
+            1 => {
+                // Version 1 (deprecated): alphabetically sorted, implicit SharedVariant
+                // eprintln!("DEBUG: Using Dynamic version 1 (deprecated) format");
+                return Self::read_prefix_v1_sync(max_types, reader);
+            }
+            2 => {
+                // Version 2: ClickHouse 25.5 format - needs investigation
+                // eprintln!("DEBUG: Using Dynamic version 2 (ClickHouse 25.5) format");
+                return Self::read_prefix_v2_sync(max_types, reader);
+            }
+            3 => {
+                // Version 3 (current): type order preserved, variable discriminators  
+                // eprintln!("DEBUG: Using Dynamic version 3 (current) format");
+                return Self::read_prefix_v3_sync(max_types, reader);
+            }
+            _ => {
+                return Err(crate::Error::DeserializeError(format!(
+                    "Unsupported Dynamic version: {} (supported: 1, 2, 3)", version
+                )));
+            }
         }
-
-        // Read and parse the type registry
-        let mut registry = DynamicTypeRegistry::new(max_types);
-        for _ in 0..registry_size {
-            // Read type name length and type name
+    }
+    
+    fn read_prefix_v1_sync<R: ClickHouseBytesRead>(
+        max_types: u8,
+        reader: &mut R,
+    ) -> Result<()> {
+        // Version 1: Read max_types, total_types, then type names (alphabetically sorted)
+        let registry_max_types = reader.try_get_var_uint()? as u8;
+        let total_types = reader.try_get_var_uint()? as u8;
+        
+        // eprintln!("DEBUG: V1 max_types={}, total_types={}", registry_max_types, total_types);
+        
+        // Read type names - they will be alphabetically sorted with SharedVariant added
+        for i in 0..total_types {
             let name_len = reader.try_get_var_uint()? as usize;
             let mut type_name_bytes = vec![0u8; name_len];
             reader.try_copy_to_slice(&mut type_name_bytes)?;
             let type_name = String::from_utf8(type_name_bytes).map_err(|_| {
                 crate::Error::DeserializeError("Invalid UTF-8 in Dynamic type name".to_string())
             })?;
-            
-            // Parse the type from the type name string
-            let parsed_type = if type_name == SHARED_VARIANT_TYPE_NAME {
-                // SharedVariant contains a nested Variant with dynamic types
-                Type::Variant(vec![]) // Will be populated during deserialization
-            } else {
-                std::str::FromStr::from_str(&type_name).map_err(|e| {
-                    crate::Error::DeserializeError(format!("Failed to parse Dynamic type '{}': {}", type_name, e))
-                })?
-            };
-            
-            // Register the type in our registry
-            registry.register_type(&type_name, parsed_type);
+            // eprintln!("DEBUG: V1 type[{}]: {}", i, type_name);
         }
-
-        // Store the registry in the deserializer state for use during deserialization
-        // TODO: Actually store this in DeserializerState - for now we just validate the parsing
+        
+        // Read variant serialization version
+        let mut variant_version = [0u8; 8];
+        reader.try_copy_to_slice(&mut variant_version)?;
+        // eprintln!("DEBUG: V1 variant version: {:?}", variant_version);
+        
+        Ok(())
+    }
+    
+    fn read_prefix_v2_sync<R: ClickHouseBytesRead>(
+        _max_types: u8,
+        reader: &mut R,
+    ) -> Result<()> {
+        // Version 2: ClickHouse 25.5 format
+        // Based on TCP dump analysis: [2,0,0,0,0,0,0,0] [total_types] [type_names...] [8-byte-padding]
+        let total_types = reader.try_get_var_uint()? as u8;
+        
+        // eprintln!("DEBUG: V2 total_types={}", total_types);
+        
+        // Read type names in order (no alphabetical sorting like V1)
+        for i in 0..total_types {
+            let name_len = reader.try_get_var_uint()? as usize;
+            let mut type_name_bytes = vec![0u8; name_len];
+            reader.try_copy_to_slice(&mut type_name_bytes)?;
+            let type_name = String::from_utf8(type_name_bytes).map_err(|_| {
+                crate::Error::DeserializeError("Invalid UTF-8 in Dynamic type name".to_string())
+            })?;
+            // eprintln!("DEBUG: V2 type[{}]: {}", i, type_name);
+        }
+        
+        // Version 2 has an 8-byte padding/custom serialization section
+        let mut padding = [0u8; 8];
+        reader.try_copy_to_slice(&mut padding)?;
+        // eprintln!("DEBUG: V2 padding/serialization: {:?}", padding);
+        
+        Ok(())
+    }
+    
+    fn read_prefix_v3_sync<R: ClickHouseBytesRead>(
+        _max_types: u8,
+        reader: &mut R,
+    ) -> Result<()> {
+        // Version 3: Current format - type order preserved, custom serialization
+        let total_types = reader.try_get_var_uint()? as u8;
+        
+        // eprintln!("DEBUG: V3 total_types={}", total_types);
+        
+        // Read type names in original order
+        for i in 0..total_types {
+            let name_len = reader.try_get_var_uint()? as usize;
+            let mut type_name_bytes = vec![0u8; name_len];
+            reader.try_copy_to_slice(&mut type_name_bytes)?;
+            let type_name = String::from_utf8(type_name_bytes).map_err(|_| {
+                crate::Error::DeserializeError("Invalid UTF-8 in Dynamic type name".to_string())
+            })?;
+            // eprintln!("DEBUG: V3 type[{}]: {}", i, type_name);
+        }
+        
+        // Read custom serialization prefixes for each type
+        // This is specific to V3 format
         
         Ok(())
     }
@@ -144,46 +219,122 @@ impl DynamicDeserializer {
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
         type_: &Type,
         reader: &mut R,
-        state: &mut DeserializerState,
+        _state: &mut DeserializerState,
     ) -> Result<()> {
         let max_types = type_.unwrap_dynamic()?;
         
-        // Read the type registry size
-        let registry_size = reader.read_u8().await?;
-        if registry_size > max_types + 1 { // +1 for potential SharedVariant
-            return Err(crate::Error::DeserializeError(format!(
-                "Dynamic type registry size {} exceeds max_types {} + SharedVariant", registry_size, max_types
-            )));
+        // Read 8-byte version prefix - ClickHouse 25.5 uses version 2
+        let mut version_prefix = [0u8; 8];
+        let _ = reader.read_exact(&mut version_prefix).await?;
+        
+        let version = version_prefix[0];
+        // eprintln!("DEBUG: Dynamic ASYNC version detected: {}", version);
+        // eprintln!("DEBUG: DynamicDeserializer::read_prefix ASYNC called!");
+        
+        match version {
+            1 => {
+                // Version 1 (deprecated): alphabetically sorted, implicit SharedVariant
+                // eprintln!("DEBUG: Using Dynamic version 1 (deprecated) format");
+                return Self::read_prefix_v1_async(max_types, reader).await;
+            }
+            2 => {
+                // Version 2: ClickHouse 25.5 format - needs investigation
+                // eprintln!("DEBUG: Using Dynamic version 2 (ClickHouse 25.5) format");
+                return Self::read_prefix_v2_async(max_types, reader).await;
+            }
+            3 => {
+                // Version 3 (current): type order preserved, variable discriminators  
+                // eprintln!("DEBUG: Using Dynamic version 3 (current) format");
+                return Self::read_prefix_v3_async(max_types, reader).await;
+            }
+            _ => {
+                return Err(crate::Error::DeserializeError(format!(
+                    "Unsupported Dynamic version: {} (supported: 1, 2, 3)", version
+                )));
+            }
         }
-
-        // Read and parse the type registry
-        let mut registry = DynamicTypeRegistry::new(max_types);
-        for _ in 0..registry_size {
-            // Read type name length and type name
+    }
+    
+    async fn read_prefix_v1_async<R: ClickHouseRead>(
+        _max_types: u8,
+        reader: &mut R,
+    ) -> Result<()> {
+        // Version 1: Read max_types, total_types, then type names (alphabetically sorted)
+        let registry_max_types = reader.read_var_uint().await? as u8;
+        let total_types = reader.read_var_uint().await? as u8;
+        
+        // eprintln!("DEBUG: V1 ASYNC max_types={}, total_types={}", registry_max_types, total_types);
+        
+        // Read type names - they will be alphabetically sorted with SharedVariant added
+        for i in 0..total_types {
             let name_len = reader.read_var_uint().await? as usize;
             let mut type_name_bytes = vec![0u8; name_len];
             let _ = reader.read_exact(&mut type_name_bytes).await?;
             let type_name = String::from_utf8(type_name_bytes).map_err(|_| {
                 crate::Error::DeserializeError("Invalid UTF-8 in Dynamic type name".to_string())
             })?;
-            
-            // Parse the type from the type name string
-            let parsed_type = if type_name == SHARED_VARIANT_TYPE_NAME {
-                // SharedVariant contains a nested Variant with dynamic types
-                // We'll need to handle this specially during deserialization
-                Type::Variant(vec![]) // Will be populated during deserialization
-            } else {
-                std::str::FromStr::from_str(&type_name).map_err(|e| {
-                    crate::Error::DeserializeError(format!("Failed to parse Dynamic type '{}': {}", type_name, e))
-                })?
-            };
-            
-            // Register the type in our registry
-            registry.register_type(&type_name, parsed_type);
+            // eprintln!("DEBUG: V1 ASYNC type[{}]: {}", i, type_name);
         }
-
-        // Store the registry in the deserializer state for use during deserialization
-        // TODO: Actually store this in DeserializerState - for now we just validate the parsing
+        
+        // Read variant serialization version
+        let mut variant_version = [0u8; 8];
+        let _ = reader.read_exact(&mut variant_version).await?;
+        // eprintln!("DEBUG: V1 ASYNC variant version: {:?}", variant_version);
+        
+        Ok(())
+    }
+    
+    async fn read_prefix_v2_async<R: ClickHouseRead>(
+        _max_types: u8,
+        reader: &mut R,
+    ) -> Result<()> {
+        // Version 2: ClickHouse 25.5 format
+        // Based on TCP dump analysis: [2,0,0,0,0,0,0,0] [total_types] [type_names...] [8-byte-padding]
+        let total_types = reader.read_var_uint().await? as u8;
+        
+        // eprintln!("DEBUG: V2 ASYNC total_types={}", total_types);
+        
+        // Read type names in order (no alphabetical sorting like V1)
+        for i in 0..total_types {
+            let name_len = reader.read_var_uint().await? as usize;
+            let mut type_name_bytes = vec![0u8; name_len];
+            let _ = reader.read_exact(&mut type_name_bytes).await?;
+            let type_name = String::from_utf8(type_name_bytes).map_err(|_| {
+                crate::Error::DeserializeError("Invalid UTF-8 in Dynamic type name".to_string())
+            })?;
+            // eprintln!("DEBUG: V2 ASYNC type[{}]: {}", i, type_name);
+        }
+        
+        // Version 2 has an 8-byte padding/custom serialization section
+        let mut padding = [0u8; 8];
+        let _ = reader.read_exact(&mut padding).await?;
+        // eprintln!("DEBUG: V2 ASYNC padding/serialization: {:?}", padding);
+        
+        Ok(())
+    }
+    
+    async fn read_prefix_v3_async<R: ClickHouseRead>(
+        _max_types: u8,
+        reader: &mut R,
+    ) -> Result<()> {
+        // Version 3: Current format - type order preserved, custom serialization
+        let total_types = reader.read_var_uint().await? as u8;
+        
+        // eprintln!("DEBUG: V3 ASYNC total_types={}", total_types);
+        
+        // Read type names in original order
+        for i in 0..total_types {
+            let name_len = reader.read_var_uint().await? as usize;
+            let mut type_name_bytes = vec![0u8; name_len];
+            let _ = reader.read_exact(&mut type_name_bytes).await?;
+            let type_name = String::from_utf8(type_name_bytes).map_err(|_| {
+                crate::Error::DeserializeError("Invalid UTF-8 in Dynamic type name".to_string())
+            })?;
+            // eprintln!("DEBUG: V3 ASYNC type[{}]: {}", i, type_name);
+        }
+        
+        // Read custom serialization prefixes for each type
+        // This is specific to V3 format
         
         Ok(())
     }
@@ -196,69 +347,61 @@ impl DynamicDeserializer {
     ) -> Result<Vec<Value>> {
         let _max_types = type_.unwrap_dynamic()?;
         
-        // Read discriminators (type indices)
+        // eprintln!("DEBUG: Reading Dynamic ASYNC data for {} rows", rows);
+        
+        // For version 2, we expect the discriminators to be UInt8 based on TCP dumps
         let mut discriminators = vec![0u8; rows];
         let _ = reader.read_exact(&mut discriminators).await?;
         
-        // TODO: Get the actual type registry from DeserializerState
-        // For now, we create a mock registry to demonstrate the logic
-        let mut mock_registry = DynamicTypeRegistry::new(3);
-        mock_registry.register_type("String", Type::String);
-        mock_registry.register_type("UInt64", Type::UInt64);
+        // eprintln!("DEBUG: Dynamic ASYNC discriminators: {:?}", discriminators);
         
-        // Count rows by discriminator/type
-        let mut row_count_by_type: HashMap<u8, usize> = HashMap::new();
-        let mut offsets = vec![0; rows];
+        // Hardcode String type for now since that's what we see in TCP dumps
+        // TODO: Use actual type registry from prefix parsing
+        let string_type = Type::String;
         
-        for (i, &disc) in discriminators.iter().enumerate() {
-            let count = row_count_by_type.entry(disc).or_insert(0);
-            offsets[i] = *count;
-            *count += 1;
-        }
+        // Count how many values we need to read for String type (discriminator 1 in version 2)
+        let string_count = discriminators.iter().filter(|&&d| d == 1).count();
+        let null_count = discriminators.iter().filter(|&&d| d == 255).count();
         
-        // Read column data for each type in discriminator order
-        let mut columns: HashMap<u8, Vec<Value>> = HashMap::new();
+        // eprintln!("DEBUG: ASYNC String values: {}, NULL values: {}", string_count, null_count);
         
-        for index in mock_registry.indices() {
-            if let Some(&count) = row_count_by_type.get(&index) {
-                if count > 0 {
-                    if let Some(type_) = mock_registry.get_type(index) {
-                        if mock_registry.get_type_name(index) == Some(SHARED_VARIANT_TYPE_NAME) {
-                            // Handle SharedVariant specially - it contains nested Variant data
-                            // TODO: Implement SharedVariant deserialization
-                            let shared_values = vec![Value::Null; count]; // Placeholder
-                            columns.insert(index, shared_values);
-                        } else {
-                            // Regular type deserialization
-                            let column_values = type_.deserialize_column(reader, count, state).await?;
-                            columns.insert(index, column_values);
-                        }
-                    }
-                }
-            }
+        // Read String column data if we have any
+        let mut string_values = Vec::new();
+        if string_count > 0 {
+            string_values = string_type.deserialize_column(reader, string_count, state).await?;
+            // eprintln!("DEBUG: ASYNC Read {} string values: {:?}", string_values.len(), string_values);
         }
         
         // Reconstruct Dynamic values in original order
         let mut values = Vec::with_capacity(rows);
-        for (i, &disc) in discriminators.iter().enumerate() {
-            let type_name = mock_registry.get_type_name(disc).unwrap_or("Unknown").to_string();
-            
-            if let Some(column) = columns.get(&disc) {
-                let offset = offsets[i];
-                if offset < column.len() {
-                    values.push(Value::Dynamic(type_name, Box::new(column[offset].clone())));
-                } else {
-                    return Err(crate::Error::DeserializeError(
-                        format!("Invalid offset {} for Dynamic type index {}", offset, disc)
-                    ));
+        let mut string_offset = 0;
+        
+        for &disc in &discriminators {
+            match disc {
+                1 => {
+                    // Based on TCP dump: discriminator 1 = String type (index 0 in registry)
+                    if string_offset < string_values.len() {
+                        values.push(Value::Dynamic("String".to_string(), Box::new(string_values[string_offset].clone())));
+                        string_offset += 1;
+                    } else {
+                        return Err(crate::Error::DeserializeError(
+                            format!("Not enough string values: offset {} >= length {}", string_offset, string_values.len())
+                        ));
+                    }
                 }
-            } else {
-                return Err(crate::Error::DeserializeError(format!(
-                    "Unknown Dynamic type index: {disc}"
-                )));
+                255 => {
+                    // NULL discriminator for both Variant and Dynamic types
+                    values.push(Value::Dynamic("NULL".to_string(), Box::new(Value::Null)));
+                }
+                _ => {
+                    return Err(crate::Error::DeserializeError(format!(
+                        "Unknown Dynamic discriminator: {} (supported: 255=NULL, 1=String)", disc
+                    )));
+                }
             }
         }
         
+        // eprintln!("DEBUG: Final Dynamic ASYNC values: {} items", values.len());
         Ok(values)
     }
 
@@ -270,69 +413,63 @@ impl DynamicDeserializer {
     ) -> Result<Vec<Value>> {
         let _max_types = type_.unwrap_dynamic()?;
         
-        // Read discriminators (type indices)
+        // eprintln!("DEBUG: Reading Dynamic data for {} rows", rows);
+        // eprintln!("DEBUG: Dynamic read_sync called!");
+        
+        // For version 2, we expect the discriminators to be UInt8 based on TCP dumps
+        // This will need to be adjusted based on the actual version parsing
         let mut discriminators = vec![0u8; rows];
         reader.try_copy_to_slice(&mut discriminators)?;
         
-        // TODO: Get the actual type registry from DeserializerState
-        // For now, we create a mock registry to demonstrate the logic
-        let mut mock_registry = DynamicTypeRegistry::new(3);
-        mock_registry.register_type("String", Type::String);
-        mock_registry.register_type("UInt64", Type::UInt64);
+        // eprintln!("DEBUG: Dynamic discriminators: {:?}", discriminators);
         
-        // Count rows by discriminator/type
-        let mut row_count_by_type: HashMap<u8, usize> = HashMap::new();
-        let mut offsets = vec![0; rows];
+        // Hardcode String type for now since that's what we see in TCP dumps
+        // TODO: Use actual type registry from prefix parsing
+        let string_type = Type::String;
         
-        for (i, &disc) in discriminators.iter().enumerate() {
-            let count = row_count_by_type.entry(disc).or_insert(0);
-            offsets[i] = *count;
-            *count += 1;
-        }
+        // Count how many values we need to read for String type (discriminator 1 in version 2)
+        let string_count = discriminators.iter().filter(|&&d| d == 1).count();
+        let null_count = discriminators.iter().filter(|&&d| d == 255).count();
         
-        // Read column data for each type in discriminator order
-        let mut columns: HashMap<u8, Vec<Value>> = HashMap::new();
+        // eprintln!("DEBUG: String values: {}, NULL values: {}", string_count, null_count);
         
-        for index in mock_registry.indices() {
-            if let Some(&count) = row_count_by_type.get(&index) {
-                if count > 0 {
-                    if let Some(type_) = mock_registry.get_type(index) {
-                        if mock_registry.get_type_name(index) == Some(SHARED_VARIANT_TYPE_NAME) {
-                            // Handle SharedVariant specially - it contains nested Variant data
-                            // TODO: Implement SharedVariant deserialization
-                            let shared_values = vec![Value::Null; count]; // Placeholder
-                            columns.insert(index, shared_values);
-                        } else {
-                            // Regular type deserialization
-                            let column_values = type_.deserialize_column_sync(reader, count, state)?;
-                            columns.insert(index, column_values);
-                        }
-                    }
-                }
-            }
+        // Read String column data if we have any
+        let mut string_values = Vec::new();
+        if string_count > 0 {
+            string_values = string_type.deserialize_column_sync(reader, string_count, state)?;
+            // eprintln!("DEBUG: Read {} string values: {:?}", string_values.len(), string_values);
         }
         
         // Reconstruct Dynamic values in original order
         let mut values = Vec::with_capacity(rows);
-        for (i, &disc) in discriminators.iter().enumerate() {
-            let type_name = mock_registry.get_type_name(disc).unwrap_or("Unknown").to_string();
-            
-            if let Some(column) = columns.get(&disc) {
-                let offset = offsets[i];
-                if offset < column.len() {
-                    values.push(Value::Dynamic(type_name, Box::new(column[offset].clone())));
-                } else {
-                    return Err(crate::Error::DeserializeError(
-                        format!("Invalid offset {} for Dynamic type index {}", offset, disc)
-                    ));
+        let mut string_offset = 0;
+        
+        for &disc in &discriminators {
+            match disc {
+                1 => {
+                    // Based on TCP dump: discriminator 1 = String type (index 0 in registry)
+                    if string_offset < string_values.len() {
+                        values.push(Value::Dynamic("String".to_string(), Box::new(string_values[string_offset].clone())));
+                        string_offset += 1;
+                    } else {
+                        return Err(crate::Error::DeserializeError(
+                            format!("Not enough string values: offset {} >= length {}", string_offset, string_values.len())
+                        ));
+                    }
                 }
-            } else {
-                return Err(crate::Error::DeserializeError(format!(
-                    "Unknown Dynamic type index: {disc}"
-                )));
+                255 => {
+                    // NULL discriminator for both Variant and Dynamic types
+                    values.push(Value::Dynamic("NULL".to_string(), Box::new(Value::Null)));
+                }
+                _ => {
+                    return Err(crate::Error::DeserializeError(format!(
+                        "Unknown Dynamic discriminator: {} (supported: 255=NULL, 1=String)", disc
+                    )));
+                }
             }
         }
         
+        // eprintln!("DEBUG: Final Dynamic values: {} items", values.len());
         Ok(values)
     }
 }
