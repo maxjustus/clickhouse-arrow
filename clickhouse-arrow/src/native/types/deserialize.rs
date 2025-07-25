@@ -8,6 +8,7 @@ pub(crate) mod sized;
 pub(crate) mod string;
 pub(crate) mod tuple;
 pub(crate) mod variant;
+pub(crate) mod dynamic;
 
 use super::low_cardinality::LOW_CARDINALITY_VERSION;
 use super::*;
@@ -97,8 +98,7 @@ impl ClickHouseNativeDeserializer for Type {
                     variant::VariantDeserializer::read_prefix(self, reader, state).await?;
                 }
                 Type::Dynamic(_) => {
-                    // TODO: Implement Dynamic prefix reading
-                    todo!("Dynamic prefix reading not implemented");
+                    dynamic::DynamicDeserializer::read_prefix(self, reader, state).await?;
                 }
             }
             Ok(())
@@ -500,6 +500,32 @@ impl FromStr for Type {
                         args.into_iter().map(Type::from_str).collect::<Result<_, _>>()?;
                     Type::Variant(inner)
                 }
+                "Dynamic" => {
+                    // Dynamic can have optional max_types parameter: Dynamic(max_types=N)
+                    if following.starts_with('(') && following.ends_with(')') {
+                        let params_str = &following[1..following.len()-1].trim();
+                        if params_str.starts_with("max_types=") {
+                            let max_types_str = &params_str[10..]; // Skip "max_types="
+                            let max_types: u8 = max_types_str.parse().map_err(|_| {
+                                Error::TypeParseError(format!("Invalid max_types value: {}", max_types_str))
+                            })?;
+                            if max_types == 0 {
+                                return Err(Error::TypeParseError(
+                                    "Dynamic max_types must be greater than 0".to_string()
+                                ));
+                            }
+                            Type::Dynamic(max_types)
+                        } else {
+                            return Err(Error::TypeParseError(
+                                format!("Invalid Dynamic parameter: {}", params_str)
+                            ));
+                        }
+                    } else {
+                        return Err(Error::TypeParseError(
+                            "Dynamic with arguments must use format Dynamic(max_types=N)".to_string()
+                        ));
+                    }
+                }
                 // Unsupported
                 "Nested" => {
                     return Err(Error::TypeParseError("unsupported Nested type".to_string()));
@@ -540,6 +566,7 @@ impl FromStr for Type {
             "Polygon" => Type::Polygon,
             "MultiPolygon" => Type::MultiPolygon,
             "Object" | "Json" | "OBJECT" | "JSON" => Type::Object,
+            "Dynamic" => Type::Dynamic(255), // Default max_types
             _ => {
                 return Err(Error::TypeParseError(format!("invalid type name: '{ident}'")));
             }

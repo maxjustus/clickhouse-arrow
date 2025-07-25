@@ -409,7 +409,7 @@ impl Type {
                 }
                 Type::Object => object::ObjectDeserializer::read(self, reader, rows, state).await?,
                 Type::Variant(_) => variant::VariantDeserializer::read_async(self, reader, rows, state).await?,
-                Type::Dynamic(_) => todo!("Dynamic deserialization not implemented"),
+                Type::Dynamic(_) => dynamic::DynamicDeserializer::read_async(self, reader, rows, state).await?,
             })
         }
         .boxed()
@@ -477,7 +477,7 @@ impl Type {
             }
             Type::Object => object::ObjectDeserializer::read_sync(self, reader, rows, state)?,
             Type::Variant(_) => variant::VariantDeserializer::read_sync(self, reader, rows, state)?,
-            Type::Dynamic(_) => todo!("Dynamic deserialization not implemented"),
+            Type::Dynamic(_) => dynamic::DynamicDeserializer::read_sync(self, reader, rows, state)?,
         })
     }
 
