@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tokio::io::AsyncWriteExt;
 
 use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
-use crate::native::types::serialize::SerializerState;
+use crate::native::types::serialize::{SerializerState, ClickHouseNativeSerializer};
 use crate::native::types::{Type, Value};
 use crate::Result;
 
@@ -39,22 +39,36 @@ impl VariantSerializer {
     }
     
     pub(crate) async fn write_prefix<W: ClickHouseWrite>(
-        _type_: &Type,
+        type_: &Type,
         writer: &mut W,
-        _state: &mut SerializerState,
+        state: &mut SerializerState,
     ) -> Result<()> {
         // Write version prefix (8 bytes of 0)
         writer.write_u64_le(0).await?;
+        
+        // Write prefixes for nested types that require them
+        let variant_types = type_.unwrap_variant()?;
+        for inner_type in variant_types {
+            inner_type.serialize_prefix_async(writer, state).await?;
+        }
+        
         Ok(())
     }
     
     pub(crate) fn write_sync_prefix<W: ClickHouseBytesWrite>(
-        _type_: &Type,
+        type_: &Type,
         writer: &mut W,
-        _state: &mut SerializerState,
+        state: &mut SerializerState,
     ) -> Result<()> {
         // Write version prefix (8 bytes of 0)
         writer.put_u64_le(0);
+        
+        // Write prefixes for nested types that require them
+        let variant_types = type_.unwrap_variant()?;
+        for inner_type in variant_types {
+            inner_type.serialize_prefix(writer, state);
+        }
+        
         Ok(())
     }
     

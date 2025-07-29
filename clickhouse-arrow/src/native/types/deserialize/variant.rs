@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tokio::io::AsyncReadExt;
 
 use crate::io::{ClickHouseBytesRead, ClickHouseRead};
-use crate::native::types::deserialize::DeserializerState;
+use crate::native::types::deserialize::{DeserializerState, ClickHouseNativeDeserializer};
 use crate::native::types::{Type, Value};
 use crate::Result;
 
@@ -101,9 +101,9 @@ impl VariantDeserializer {
         Ok(values)
     }
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
-        _type_: &Type,
+        type_: &Type,
         reader: &mut R,
-        _state: &mut DeserializerState,
+        state: &mut DeserializerState,
     ) -> Result<()> {
         // Read version prefix (8 bytes, should be 0)
         let version = reader.read_u64_le().await?;
@@ -112,6 +112,13 @@ impl VariantDeserializer {
                 "Unsupported Variant serialization version: {}", version
             )));
         }
+        
+        // Read prefixes for nested types that require them
+        let variant_types = type_.unwrap_variant()?;
+        for inner_type in variant_types {
+            inner_type.deserialize_prefix_async(reader, state).await?;
+        }
+        
         Ok(())
     }
     
@@ -147,6 +154,27 @@ impl VariantDeserializer {
         
         // Reconstruct the values in original order
         Self::reconstruct_values(&discriminators, &offsets, &columns)
+    }
+    
+    pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
+        type_: &Type,
+        reader: &mut R,
+    ) -> Result<()> {
+        // Read version prefix (8 bytes, should be 0)
+        let version = reader.get_u64_le();
+        if version != 0 {
+            return Err(crate::Error::DeserializeError(format!(
+                "Unsupported Variant serialization version: {}", version
+            )));
+        }
+        
+        // Read prefixes for nested types that require them
+        let variant_types = type_.unwrap_variant()?;
+        for inner_type in variant_types {
+            inner_type.deserialize_prefix(reader)?;
+        }
+        
+        Ok(())
     }
     
     pub(crate) fn read_sync<R: ClickHouseBytesRead>(

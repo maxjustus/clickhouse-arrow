@@ -136,13 +136,7 @@ impl ClickHouseNativeDeserializer for Type {
                 let _ = reader.try_get_i8()?;
             }
             Type::Variant(_) => {
-                // Read version prefix (8 bytes)
-                let version = reader.try_get_u64_le()?;
-                if version != 0 {
-                    return Err(Error::DeserializeError(format!(
-                        "Unsupported Variant serialization version: {}", version
-                    )));
-                }
+                variant::VariantDeserializer::read_prefix_sync(self, reader)?;
             }
             // TODO: Dynamic type not yet implemented
             // Type::Dynamic(_) => {
