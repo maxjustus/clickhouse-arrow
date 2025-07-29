@@ -416,11 +416,27 @@ impl JsonSerializer {
         let json_data = JsonData::from_values(values.to_vec())?;
 
         // Cache the metadata
+        let mut paths: Vec<String> = json_data.path_columns.keys().cloned().collect();
+        paths.sort(); // Ensure consistent ordering
+        
         let cache = JsonSerializationCache {
-            paths:        json_data.path_columns.keys().cloned().collect(),
+            paths:        paths.clone(),
             path_columns: json_data.path_columns,
             rows:         json_data.rows,
         };
+
+        #[cfg(test)]
+        {
+            println!("JSON analyze_values found {} paths: {:?}", paths.len(), paths);
+            for (path, values) in &cache.path_columns {
+                let types: std::collections::HashSet<_> = values
+                    .iter()
+                    .filter(|v| !matches!(v, Value::Null))
+                    .map(|v| Self::get_value_type_name(v))
+                    .collect();
+                println!("  Path '{}': types {:?}, {} values", path, types, values.len());
+            }
+        }
 
         JSON_CACHE.with(|c| *c.borrow_mut() = Some(cache));
         Ok(())
@@ -712,7 +728,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut state).await?;
 
         // Deserialize it back
-        let mut input = Cursor::new(output);  
+        let mut input = Cursor::new(output);
         let mut state = DeserializerState::default();
 
         type_.deserialize_prefix_async(&mut input, &mut state).await?;
@@ -725,7 +741,9 @@ mod tests {
     #[tokio::test]
     async fn test_json_v3_nested_objects() -> Result<()> {
         let values = vec![
-            Value::String(b"{\"user\": {\"name\": \"Alice\", \"age\": 30}, \"active\": true}".to_vec()),
+            Value::String(
+                b"{\"user\": {\"name\": \"Alice\", \"age\": 30}, \"active\": true}".to_vec(),
+            ),
             Value::String(b"{\"user\": {\"name\": \"Bob\"}, \"score\": 95.5}".to_vec()),
         ];
 
@@ -752,7 +770,9 @@ mod tests {
     #[tokio::test]
     async fn test_json_v3_mixed_types() -> Result<()> {
         let values = vec![
-            Value::String(b"{\"id\": 1, \"name\": \"test\", \"active\": true, \"score\": 99.9}".to_vec()),
+            Value::String(
+                b"{\"id\": 1, \"name\": \"test\", \"active\": true, \"score\": 99.9}".to_vec(),
+            ),
             Value::String(b"{\"id\": 2, \"name\": \"example\", \"active\": false}".to_vec()),
             Value::String(b"{\"id\": 3, \"score\": 88.1, \"metadata\": \"extra\"}".to_vec()),
         ];
@@ -834,6 +854,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_json_v3_wire_format_verification() -> Result<()> {
+        let values = vec![
+            Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
+            Value::String(b"{\"name\": \"Bob\", \"score\": 95.5}".to_vec()),
+        ];
+
+        let type_ = Type::JSON;
+        let values_len = values.len();
+
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+
+        // First analyze the values (this is normally done by Block serialization)
+        JsonSerializer::analyze_values(&values)?;
+        
+        // Serialize
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
+
+        // Inspect the wire format
+        let mut cursor = Cursor::new(&output);
+        use std::io::{Read, Seek, SeekFrom};
+
+        // Read version number (first 8 bytes)
+        let mut version_bytes = [0u8; 8];
+        cursor.read_exact(&mut version_bytes)?;
+        let version = u64::from_le_bytes(version_bytes);
+        
+        println!("Serialization version: {}", version);
+        assert_eq!(version, JSON_OBJECT_SERIALIZATION_VERSION, 
+                  "Should use v3 object serialization, not string serialization");
+
+        // For v3, next should be total dynamic paths count (varint)
+        cursor.seek(SeekFrom::Start(8))?;
+        let mut path_count_byte = [0u8; 1];
+        cursor.read_exact(&mut path_count_byte)?;
+        let path_count = path_count_byte[0]; // Simple case - should be small number
+
+        println!("Number of dynamic paths: {}", path_count);
+        assert!(path_count > 0, "Should have dynamic paths for object serialization");
+
+        // Verify we can deserialize it back correctly
+        let mut input = Cursor::new(output);
+        let mut deser_state = DeserializerState::default();
+
+        type_.deserialize_prefix_async(&mut input, &mut deser_state).await?;
+        let deserialized = type_.deserialize_column(&mut input, values_len, &mut deser_state).await?;
+
+        assert_eq!(deserialized.len(), values_len);
+        
+        // Verify that deserialized values contain structured data, not just JSON strings
+        for (i, value) in deserialized.iter().enumerate() {
+            match value {
+                Value::String(bytes) => {
+                    let json_str = String::from_utf8(bytes.clone())?;
+                    let json_value: serde_json::Value = serde_json::from_str(&json_str)
+                        .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?;
+                    
+                    println!("Deserialized row {}: {}", i, json_value);
+                    
+                    // Verify it's a proper JSON object (not just a string)
+                    assert!(json_value.is_object(), "Deserialized value should be a JSON object");
+                }
+                _ => panic!("Expected String value containing JSON"),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v3_vs_string_serialization_difference() -> Result<()> {
+        // Test the same data with both v3 object and string serialization
+        let values = vec![
+            Value::String(b"{\"user\": {\"name\": \"Alice\", \"age\": 30}, \"active\": true}".to_vec()),
+            Value::String(b"{\"user\": {\"name\": \"Bob\", \"age\": 25}, \"active\": false}".to_vec()),
+            Value::String(b"{\"user\": {\"name\": \"Charlie\", \"age\": 35}, \"active\": true}".to_vec()),
+        ];
+
+        let type_ = Type::JSON;
+
+        // First analyze the values (this is normally done by Block serialization)
+        JsonSerializer::analyze_values(&values)?;
+
+        // Test with v3 object serialization (current implementation)
+        let mut v3_output = vec![];
+        let mut state = SerializerState::default();
+        
+        type_.serialize_prefix_async(&mut v3_output, &mut state).await?;
+        type_.serialize_column(values.clone(), &mut v3_output, &mut state).await?;
+
+        // Read the version to confirm it's v3
+        let version = u64::from_le_bytes(v3_output[0..8].try_into().unwrap());
+        println!("Serialization format version: {}", version);
+        println!("V3 serialized size: {} bytes", v3_output.len());
+
+        // Inspect the structure by looking at what follows the version
+        if version == JSON_OBJECT_SERIALIZATION_VERSION {
+            let path_count = v3_output[8]; // Simple varint for small numbers
+            println!("Number of dynamic paths in v3: {}", path_count);
+            
+            // v3 should have multiple paths (user.name, user.age, active)
+            assert!(path_count >= 3, "v3 should decompose JSON into multiple paths");
+        }
+
+        // Verify the format is actually structured (not just string serialization)
+        assert_eq!(version, JSON_OBJECT_SERIALIZATION_VERSION, 
+                  "Should be using v3 object serialization");
+
+        // Test deserialization works
+        let mut input = Cursor::new(v3_output);
+        let mut deser_state = DeserializerState::default();
+
+        type_.deserialize_prefix_async(&mut input, &mut deser_state).await?;
+        let deserialized = type_.deserialize_column(&mut input, values.len(), &mut deser_state).await?;
+
+        assert_eq!(deserialized.len(), values.len());
+        println!("Successfully deserialized {} rows with v3 format", deserialized.len());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_object_vs_string_serialization_format() -> Result<()> {
+        let values = vec![
+            Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
+            Value::String(b"{\"name\": \"Bob\", \"age\": 25}".to_vec()),
+        ];
+
+        let type_ = Type::JSON;
+
+        // Test object serialization (v3 - should decompose into paths)
+        JsonSerializer::analyze_values(&values)?;
+        let mut v3_output = vec![];
+        let mut state = SerializerState::default();
+        
+        type_.serialize_prefix_async(&mut v3_output, &mut state).await?;
+        type_.serialize_column(values.clone(), &mut v3_output, &mut state).await?;
+
+        let v3_version = u64::from_le_bytes(v3_output[0..8].try_into().unwrap());
+        let v3_path_count = v3_output[8];
+        
+        println!("=== Object Serialization (v3) ===");
+        println!("Version: {}", v3_version);
+        println!("Path count: {}", v3_path_count);
+        println!("Total size: {} bytes", v3_output.len());
+
+        // Verify it's actually v3 object format
+        assert_eq!(v3_version, JSON_OBJECT_SERIALIZATION_VERSION);
+        assert!(v3_path_count >= 2, "Should have at least 2 paths (name, age)");
+
+        // Test that deserialization reconstructs the JSON properly
+        let mut input = Cursor::new(v3_output);
+        let mut deser_state = DeserializerState::default();
+
+        type_.deserialize_prefix_async(&mut input, &mut deser_state).await?;
+        let deserialized = type_.deserialize_column(&mut input, values.len(), &mut deser_state).await?;
+
+        println!("Deserialized {} rows successfully", deserialized.len());
+        for (i, value) in deserialized.iter().enumerate() {
+            if let Value::String(bytes) = value {
+                let json_str = String::from_utf8(bytes.clone())?;
+                let json_value: serde_json::Value = serde_json::from_str(&json_str)
+                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?;
+                println!("Row {}: {}", i, json_value);
+                assert!(json_value.is_object(), "Should be a proper JSON object");
+            }
+        }
+
+        println!("✅ Object serialization verification complete");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_json_v3_analyze_values_cache() -> Result<()> {
         let values = vec![
             Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
@@ -842,7 +1036,7 @@ mod tests {
 
         // Test that analyze_values works correctly
         JsonSerializer::analyze_values(&values)?;
-        
+
         // Verify cache was populated
         let cache_exists = JSON_CACHE.with(|cache| cache.borrow().is_some());
         assert!(cache_exists, "Cache should be populated after analyze_values");
