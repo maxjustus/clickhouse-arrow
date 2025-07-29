@@ -7,6 +7,89 @@ use crate::{Error, Result};
 
 pub(crate) struct JsonDeserializer;
 
+impl JsonDeserializer {
+    /// Set a value at a nested path in a JSON object map
+    /// Path format: "user.name" -> creates nested structure {user: {name: value}}
+    fn set_nested_value(
+        object: &mut serde_json::Map<String, serde_json::Value>,
+        path: &str,
+        value: Value,
+    ) -> Result<()> {
+        let parts: Vec<&str> = path.split('.').collect();
+        if parts.is_empty() {
+            return Err(Error::DeserializeError("Empty path".to_string()));
+        }
+        
+        let mut current = object;
+        
+        // Navigate to the nested location, creating objects as needed
+        for part in &parts[..parts.len() - 1] {
+            let entry = current.entry(part.to_string()).or_insert_with(|| {
+                serde_json::Value::Object(serde_json::Map::new())
+            });
+            
+            match entry {
+                serde_json::Value::Object(map) => current = map,
+                _ => {
+                    return Err(Error::DeserializeError(format!(
+                        "Path conflict: '{}' is not an object",
+                        part
+                    )));
+                }
+            }
+        }
+        
+        // Set the final value
+        let final_key = parts[parts.len() - 1];
+        let json_value = Self::value_to_json_value(value)?;
+        current.insert(final_key.to_string(), json_value);
+        
+        Ok(())
+    }
+    
+    /// Convert a ClickHouse Value to a serde_json::Value
+    fn value_to_json_value(value: Value) -> Result<serde_json::Value> {
+        let json_value = match value {
+            Value::Null => serde_json::Value::Null,
+            Value::Int8(i) => serde_json::Value::Number(serde_json::Number::from(i)),
+            Value::Int16(i) => serde_json::Value::Number(serde_json::Number::from(i)),
+            Value::Int32(i) => serde_json::Value::Number(serde_json::Number::from(i)),
+            Value::Int64(i) => serde_json::Value::Number(serde_json::Number::from(i)),
+            Value::Int128(i) => serde_json::Value::String(i.to_string()), // Too large for JSON number
+            Value::Int256(i) => serde_json::Value::String(i.to_string()), // Too large for JSON number
+            Value::UInt8(i) => serde_json::Value::Number(serde_json::Number::from(i)),
+            Value::UInt16(i) => serde_json::Value::Number(serde_json::Number::from(i)),
+            Value::UInt32(i) => serde_json::Value::Number(serde_json::Number::from(i)),
+            Value::UInt64(i) => serde_json::Value::Number(serde_json::Number::from(i)),
+            Value::UInt128(i) => serde_json::Value::String(i.to_string()), // Too large for JSON number
+            Value::UInt256(i) => serde_json::Value::String(i.to_string()), // Too large for JSON number
+            Value::Float32(f) => {
+                serde_json::Number::from_f64(f as f64)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
+            }
+            Value::Float64(f) => {
+                serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
+            }
+            Value::String(bytes) => {
+                let s = String::from_utf8(bytes).map_err(|e| {
+                    Error::DeserializeError(format!("Invalid UTF-8 string: {}", e))
+                })?;
+                serde_json::Value::String(s)
+            }
+            Value::Decimal32(_, _) | Value::Decimal64(_, _) | Value::Decimal128(_, _) | Value::Decimal256(_, _) => {
+                // Convert decimals to strings for now
+                serde_json::Value::String(format!("{:?}", value))
+            }
+            // For complex types, convert to string representation for now
+            _ => serde_json::Value::String(format!("{:?}", value)),
+        };
+        Ok(json_value)
+    }
+}
+
 // JSON serialization versions from ClickHouse
 const JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION: u64 = 0;
 const JSON_STRING_SERIALIZATION_VERSION: u64 = 1;
@@ -146,7 +229,7 @@ impl Deserializer for JsonDeserializer {
             }
             JSON_OBJECT_SERIALIZATION_VERSION_2 | JSON_OBJECT_SERIALIZATION_VERSION => {
                 // Get the stored JSON format data from prefix phase
-                let (total_dynamic_paths, path_names, dynamic_data) = JSON_DYNAMIC_DATA.with(|data| {
+                let (_total_dynamic_paths, path_names, dynamic_data) = JSON_DYNAMIC_DATA.with(|data| {
                     data.borrow().clone().ok_or_else(|| {
                         Error::DeserializeError("JSON object data not set in state".to_string())
                     })
@@ -223,21 +306,35 @@ impl Deserializer for JsonDeserializer {
                     path_values.insert(path_name.clone(), path_column_values);
                 }
                 
-                // For now, if there's only one path, return its values directly
-                // TODO: Build proper JSON objects when there are multiple paths
-                if total_dynamic_paths == 1 && !path_names.is_empty() {
-                    let first_path = &path_names[0];
-                    if let Some(values) = path_values.get(first_path) {
-                        return Ok(values.clone());
+                // Build JSON objects for each row by combining all paths
+                let mut result_values = Vec::with_capacity(rows);
+                
+                for row_idx in 0..rows {
+                    // Create a nested map for this row using all paths
+                    let mut row_object = serde_json::Map::new();
+                    
+                    for path_name in &path_names {
+                        if let Some(path_column) = path_values.get(path_name) {
+                            if row_idx < path_column.len() {
+                                let value = &path_column[row_idx];
+                                if !matches!(value, Value::Null) {
+                                    // Split path by '.' and build nested structure
+                                    Self::set_nested_value(&mut row_object, path_name, value.clone())?;
+                                }
+                            }
+                        }
                     }
+                    
+                    // Convert the nested map to a JSON Value, then to our Value type
+                    let json_value = serde_json::Value::Object(row_object);
+                    let json_string = serde_json::to_string(&json_value).map_err(|e| {
+                        Error::DeserializeError(format!("Failed to serialize JSON object: {}", e))
+                    })?;
+                    
+                    result_values.push(Value::String(json_string.into_bytes()));
                 }
                 
-                // If multiple paths, we need to construct JSON objects
-                // For now, return an error as this is more complex
-                Err(Error::DeserializeError(format!(
-                    "Multiple JSON paths not yet implemented: {} paths",
-                    total_dynamic_paths
-                )))
+                Ok(result_values)
             }
             _ => Err(Error::DeserializeError(format!(
                 "Unsupported JSON serialization version during read: {}",
@@ -267,7 +364,7 @@ impl Deserializer for JsonDeserializer {
             }
             JSON_OBJECT_SERIALIZATION_VERSION_2 | JSON_OBJECT_SERIALIZATION_VERSION => {
                 // Get the stored JSON format data from prefix phase
-                let (total_dynamic_paths, path_names, dynamic_data) = JSON_DYNAMIC_DATA.with(|data| {
+                let (_total_dynamic_paths, path_names, dynamic_data) = JSON_DYNAMIC_DATA.with(|data| {
                     data.borrow().clone().ok_or_else(|| {
                         Error::DeserializeError("JSON object data not set in state".to_string())
                     })
@@ -344,20 +441,35 @@ impl Deserializer for JsonDeserializer {
                     path_values.insert(path_name.clone(), path_column_values);
                 }
                 
-                // For now, if there's only one path, return its values directly
-                // TODO: Build proper JSON objects when there are multiple paths
-                if total_dynamic_paths == 1 && !path_names.is_empty() {
-                    let first_path = &path_names[0];
-                    if let Some(values) = path_values.get(first_path) {
-                        return Ok(values.clone());
+                // Build JSON objects for each row by combining all paths
+                let mut result_values = Vec::with_capacity(rows);
+                
+                for row_idx in 0..rows {
+                    // Create a nested map for this row using all paths
+                    let mut row_object = serde_json::Map::new();
+                    
+                    for path_name in &path_names {
+                        if let Some(path_column) = path_values.get(path_name) {
+                            if row_idx < path_column.len() {
+                                let value = &path_column[row_idx];
+                                if !matches!(value, Value::Null) {
+                                    // Split path by '.' and build nested structure
+                                    Self::set_nested_value(&mut row_object, path_name, value.clone())?;
+                                }
+                            }
+                        }
                     }
+                    
+                    // Convert the nested map to a JSON Value, then to our Value type
+                    let json_value = serde_json::Value::Object(row_object);
+                    let json_string = serde_json::to_string(&json_value).map_err(|e| {
+                        Error::DeserializeError(format!("Failed to serialize JSON object: {}", e))
+                    })?;
+                    
+                    result_values.push(Value::String(json_string.into_bytes()));
                 }
                 
-                // If multiple paths, we need to construct JSON objects
-                Err(Error::DeserializeError(format!(
-                    "Multiple JSON paths not yet implemented: {} paths",
-                    total_dynamic_paths
-                )))
+                Ok(result_values)
             }
             _ => Err(Error::DeserializeError(format!(
                 "Unsupported JSON serialization version during sync read: {}",
