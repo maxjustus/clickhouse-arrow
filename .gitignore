@@ -66,3 +66,7 @@ venv.bak/
 # Context files for development
 ctx/
 dynamic-containers-technical-spec.md
+
+# Network capture files
+*.pcap
+*.pcapng
