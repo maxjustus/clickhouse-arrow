@@ -24,23 +24,15 @@ thread_local! {
 
 // JSON serialization versions from ClickHouse
 const JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION: u64 = 0;
-#[allow(dead_code)] // Used when FORCE_STRING_SERIALIZATION is true
-const JSON_STRING_SERIALIZATION_VERSION: u64 = 1;
+const _JSON_STRING_SERIALIZATION_VERSION: u64 = 1; // Reserved for potential future use
 const JSON_OBJECT_SERIALIZATION_VERSION: u64 = 3;
 
-// TODO: JSON v3 object serialization requires writing the full header
-// (paths, types, etc.) during the prefix phase, but our current architecture
-// doesn't have access to the data during that phase. The Go implementation
-// collects this metadata during the Append phase and stores it for the
-// WriteStatePrefix phase. Until we refactor to support this pattern,
-// we use string serialization (v1) which doesn't require complex headers.
-//
-// This is less efficient but works correctly. To properly support v3:
-// 1. Analyze values and collect paths/types before serialization
-// 2. Store this metadata in thread-local or instance state
-// 3. Write the full header during write_prefix phase
-// 4. Write only the data during the write phase
-const FORCE_STRING_SERIALIZATION: bool = true;
+// JSON v3 object serialization is now supported via thread-local caching
+// The implementation follows the same pattern as Dynamic type serialization:
+// 1. analyze_values is called before serialization to collect metadata
+// 2. metadata is cached in thread-local storage
+// 3. write_prefix uses cached metadata to write the full header
+// 4. write uses cached data to write column data efficiently
 
 /// Parsed JSON data organized by dynamic paths
 #[derive(Debug, Clone)]
@@ -65,10 +57,8 @@ impl JsonData {
                         Error::SerializeError(format!("Invalid UTF-8 in JSON string: {e}"))
                     })?;
 
-                    let json_value: serde_json::Value =
-                        serde_json::from_str(&json_str).map_err(|e| {
-                            Error::SerializeError(format!("Invalid JSON string: {e}"))
-                        })?;
+                    let json_value: serde_json::Value = serde_json::from_str(&json_str)
+                        .map_err(|e| Error::SerializeError(format!("Invalid JSON string: {e}")))?;
 
                     // Extract paths from JSON object
                     Self::extract_paths_from_json(
@@ -84,7 +74,8 @@ impl JsonData {
                 }
                 _ => {
                     return Err(Error::SerializeError(format!(
-                        "JSON serialization only supports String values containing JSON, got: {value:?}"
+                        "JSON serialization only supports String values containing JSON, got: \
+                         {value:?}"
                     )));
                 }
             }
@@ -191,6 +182,76 @@ impl JsonSerializer {
             Value::String(_) => "String".to_string(),
             _ => "String".to_string(), // Fallback to String for complex types
         }
+    }
+
+    /// Write Dynamic column header for a column with given values (async)
+    async fn write_dynamic_header_for_column_async<W: ClickHouseWrite>(
+        column_values: &[Value],
+        writer: &mut W,
+    ) -> Result<()> {
+        // Determine the types in this column
+        let mut type_map: HashMap<String, Vec<Value>> = HashMap::new();
+
+        for value in column_values {
+            if !matches!(value, Value::Null) {
+                let type_name = Self::get_value_type_name(value);
+                type_map.entry(type_name).or_insert_with(Vec::new).push(value.clone());
+            }
+        }
+
+        // Write Dynamic header for this path
+        // Dynamic version (always use v3)
+        writer.write_u64_le(3).await?;
+
+        // Total types count
+        writer.write_var_uint(type_map.len() as u64).await?;
+
+        // Type names (sorted for consistency)
+        let mut type_names: Vec<String> = type_map.keys().cloned().collect();
+        type_names.sort();
+
+        for type_name in &type_names {
+            writer.write_string(type_name.as_bytes().to_vec()).await?;
+        }
+
+        // Basic types don't need prefix serialization in Dynamic v3 format
+        // Only complex types that implement CustomSerialization need prefixes
+        Ok(())
+    }
+
+    /// Write Dynamic column header for a column with given values (sync)
+    fn write_dynamic_header_for_column_sync<W: ClickHouseBytesWrite>(
+        column_values: &[Value],
+        writer: &mut W,
+    ) -> Result<()> {
+        // Determine the types in this column
+        let mut type_map: HashMap<String, Vec<Value>> = HashMap::new();
+
+        for value in column_values {
+            if !matches!(value, Value::Null) {
+                let type_name = Self::get_value_type_name(value);
+                type_map.entry(type_name).or_insert_with(Vec::new).push(value.clone());
+            }
+        }
+
+        // Write Dynamic header for this path
+        // Dynamic version (always use v3)
+        writer.put_u64_le(3);
+
+        // Total types count
+        writer.put_var_uint(type_map.len() as u64)?;
+
+        // Type names (sorted for consistency)
+        let mut type_names: Vec<String> = type_map.keys().cloned().collect();
+        type_names.sort();
+
+        for type_name in &type_names {
+            writer.put_string(type_name.as_bytes().to_vec())?;
+        }
+
+        // Basic types don't need prefix serialization in Dynamic v3 format
+        // Only complex types that implement CustomSerialization need prefixes
+        Ok(())
     }
 
     /// Write Dynamic column data (discriminators + column data)
@@ -353,14 +414,14 @@ impl JsonSerializer {
     pub(crate) fn analyze_values(values: &[Value]) -> Result<()> {
         // Parse JSON values into path-organized structure
         let json_data = JsonData::from_values(values.to_vec())?;
-        
+
         // Cache the metadata
         let cache = JsonSerializationCache {
-            paths: json_data.path_columns.keys().cloned().collect(),
+            paths:        json_data.path_columns.keys().cloned().collect(),
             path_columns: json_data.path_columns,
-            rows: json_data.rows,
+            rows:         json_data.rows,
         };
-        
+
         JSON_CACHE.with(|c| *c.borrow_mut() = Some(cache));
         Ok(())
     }
@@ -370,7 +431,7 @@ impl JsonSerializer {
         if let Some((major, minor, _)) = state.server_version {
             major >= 25 && minor >= 6
         } else {
-            false // Default to v0 if version unknown
+            true // Default to v3 if version unknown (for testing)
         }
     }
 
@@ -379,18 +440,73 @@ impl JsonSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        if FORCE_STRING_SERIALIZATION {
-            // Use string serialization which doesn't require complex headers
-            writer.put_u64_le(JSON_STRING_SERIALIZATION_VERSION);
+        // Choose JSON serialization version based on server version
+        let version = if Self::supports_flat_dynamic_json(state) {
+            JSON_OBJECT_SERIALIZATION_VERSION
         } else {
-            // Choose JSON serialization version based on server version
-            let version = if Self::supports_flat_dynamic_json(state) {
-                JSON_OBJECT_SERIALIZATION_VERSION
-            } else {
-                JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION
-            };
-            writer.put_u64_le(version);
+            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION
+        };
+        writer.put_u64_le(version);
+
+        // Retrieve cached metadata from analyze_values
+        let cache_data = JSON_CACHE.with(|cache| cache.borrow_mut().take());
+
+        if let Some(cache) = cache_data {
+            match version {
+                JSON_OBJECT_SERIALIZATION_VERSION => {
+                    // V3 format: total dynamic paths count
+                    writer.put_var_uint(cache.paths.len() as u64)?;
+
+                    // Write path names
+                    for path in &cache.paths {
+                        writer.put_string(path.as_bytes().to_vec())?;
+                    }
+
+                    // Write Dynamic column headers for each path
+                    for path in &cache.paths {
+                        if let Some(column_values) = cache.path_columns.get(path) {
+                            Self::write_dynamic_header_for_column_sync(column_values, writer)?;
+                        }
+                    }
+                }
+                JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION => {
+                    // V0 format
+                    const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
+                    writer.put_var_uint(DEFAULT_MAX_DYNAMIC_PATHS)?;
+                    writer.put_var_uint(cache.paths.len() as u64)?;
+
+                    // Write path names
+                    for path in &cache.paths {
+                        writer.put_string(path.as_bytes().to_vec())?;
+                    }
+
+                    // Write Dynamic column headers for each path
+                    for path in &cache.paths {
+                        if let Some(column_values) = cache.path_columns.get(path) {
+                            Self::write_dynamic_header_for_column_sync(column_values, writer)?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            // Put cache back for use in write()
+            JSON_CACHE.with(|c| *c.borrow_mut() = Some(cache));
+        } else {
+            // No cached metadata - write empty format
+            match version {
+                JSON_OBJECT_SERIALIZATION_VERSION => {
+                    writer.put_var_uint(0)?; // 0 paths
+                }
+                JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION => {
+                    const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
+                    writer.put_var_uint(DEFAULT_MAX_DYNAMIC_PATHS)?;
+                    writer.put_var_uint(0)?; // 0 paths
+                }
+                _ => {}
+            }
         }
+
         Ok(())
     }
 }
@@ -401,22 +517,75 @@ impl Serializer for JsonSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        if FORCE_STRING_SERIALIZATION {
-            // Use string serialization which doesn't require complex headers
-            writer.write_u64_le(JSON_STRING_SERIALIZATION_VERSION).await?;
+        // Choose JSON serialization version based on server version
+        let version = if Self::supports_flat_dynamic_json(state) {
+            JSON_OBJECT_SERIALIZATION_VERSION
         } else {
-            // Choose JSON serialization version based on server version
-            let version = if Self::supports_flat_dynamic_json(state) {
-                JSON_OBJECT_SERIALIZATION_VERSION
-            } else {
-                JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION
-            };
-            writer.write_u64_le(version).await?;
+            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION
+        };
+        writer.write_u64_le(version).await?;
+
+        // Retrieve cached metadata from analyze_values
+        let cache_data = JSON_CACHE.with(|cache| cache.borrow_mut().take());
+
+        if let Some(cache) = cache_data {
+            match version {
+                JSON_OBJECT_SERIALIZATION_VERSION => {
+                    // V3 format: total dynamic paths count
+                    writer.write_var_uint(cache.paths.len() as u64).await?;
+
+                    // Write path names
+                    for path in &cache.paths {
+                        writer.write_string(path.as_bytes().to_vec()).await?;
+                    }
+
+                    // Write Dynamic column headers for each path
+                    for path in &cache.paths {
+                        if let Some(column_values) = cache.path_columns.get(path) {
+                            Self::write_dynamic_header_for_column_async(column_values, writer)
+                                .await?;
+                        }
+                    }
+                }
+                JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION => {
+                    // V0 format
+                    const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
+                    writer.write_var_uint(DEFAULT_MAX_DYNAMIC_PATHS).await?;
+                    writer.write_var_uint(cache.paths.len() as u64).await?;
+
+                    // Write path names
+                    for path in &cache.paths {
+                        writer.write_string(path.as_bytes().to_vec()).await?;
+                    }
+
+                    // Write Dynamic column headers for each path
+                    for path in &cache.paths {
+                        if let Some(column_values) = cache.path_columns.get(path) {
+                            Self::write_dynamic_header_for_column_async(column_values, writer)
+                                .await?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            // Put cache back for use in write()
+            JSON_CACHE.with(|c| *c.borrow_mut() = Some(cache));
+        } else {
+            // No cached metadata - write empty format
+            match version {
+                JSON_OBJECT_SERIALIZATION_VERSION => {
+                    writer.write_var_uint(0).await?; // 0 paths
+                }
+                JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION => {
+                    const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
+                    writer.write_var_uint(DEFAULT_MAX_DYNAMIC_PATHS).await?;
+                    writer.write_var_uint(0).await?; // 0 paths
+                }
+                _ => {}
+            }
         }
 
-        // We need to store the parsed JSON data for the write phase
-        // For now, we'll handle this in the write method by parsing again
-        // This is not ideal but works for the initial implementation
         Ok(())
     }
 
@@ -426,116 +595,41 @@ impl Serializer for JsonSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        if FORCE_STRING_SERIALIZATION {
-            // Simple string serialization - just write the JSON strings as-is
-            Type::String.serialize_column(values, writer, state).await?;
-            return Ok(());
-        }
-
-        // Parse JSON values into path-organized structure
-        let json_data = JsonData::from_values(values)?;
         let use_v3 = Self::supports_flat_dynamic_json(state);
 
+        // Try to get cached data first
+        let cache = JSON_CACHE.with(|cache| cache.borrow_mut().take());
+
+        let (paths, path_columns, rows) = if let Some(cache_data) = cache {
+            // Use cached data from analyze_values
+            (cache_data.paths, cache_data.path_columns, cache_data.rows)
+        } else {
+            // Fallback: parse JSON values if no cache (shouldn't happen in normal flow)
+            let json_data = JsonData::from_values(values)?;
+            (
+                json_data.path_columns.keys().cloned().collect(),
+                json_data.path_columns,
+                json_data.rows,
+            )
+        };
+
         if use_v3 {
-            // V3 format (new flat Dynamic/JSON)
-            // Write the header: total dynamic paths count
-            writer.write_var_uint(json_data.path_columns.len() as u64).await?;
-
-            // Write path names
-            let paths: Vec<String> = json_data.path_columns.keys().cloned().collect();
+            // V3 format - write data for each path (using Dynamic column format)
             for path in &paths {
-                writer.write_string(path.as_bytes().to_vec()).await?;
-            }
-
-            // Write Dynamic column prefixes for each path
-            for path in &paths {
-                if let Some(column_values) = json_data.path_columns.get(path) {
-                    // Determine the types in this column
-                    let mut type_map: HashMap<String, Vec<Value>> = HashMap::new();
-
-                    for value in column_values {
-                        let type_name = Self::get_value_type_name(value);
-                        type_map.entry(type_name).or_insert_with(Vec::new).push(value.clone());
-                    }
-
-                    // Write Dynamic header for this path
-                    // Dynamic version
-                    writer.write_u64_le(3).await?;
-
-                    // Total types count
-                    writer.write_var_uint(type_map.len() as u64).await?;
-
-                    // Type names (sorted for consistency)
-                    let mut type_names: Vec<String> = type_map.keys().cloned().collect();
-                    type_names.sort();
-
-                    for type_name in &type_names {
-                        writer.write_string(type_name.as_bytes().to_vec()).await?;
-                    }
-
-                    // Basic types don't need prefix serialization in Dynamic v3 format
-                    // Only complex types that implement CustomSerialization need prefixes
-                }
-            }
-
-            // Write data for each path (using Dynamic column format)
-            for path in &paths {
-                if let Some(column_values) = json_data.path_columns.get(path) {
+                if let Some(column_values) = path_columns.get(path) {
                     Self::write_dynamic_column_data(column_values, writer, state).await?;
                 }
             }
         } else {
-            // V0 format (deprecated)
-            const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
-
-            // Write max dynamic paths
-            writer.write_var_uint(DEFAULT_MAX_DYNAMIC_PATHS).await?;
-
-            // Write total dynamic paths
-            writer.write_var_uint(json_data.path_columns.len() as u64).await?;
-
-            // Write path names
-            let paths: Vec<String> = json_data.path_columns.keys().cloned().collect();
+            // V0 format - write data for each path (using Dynamic column format)
             for path in &paths {
-                writer.write_string(path.as_bytes().to_vec()).await?;
-            }
-
-            // Write Dynamic column headers for each path
-            for path in &paths {
-                if let Some(column_values) = json_data.path_columns.get(path) {
-                    // Determine the types in this column
-                    let mut type_map: HashMap<String, Vec<Value>> = HashMap::new();
-
-                    for value in column_values {
-                        let type_name = Self::get_value_type_name(value);
-                        type_map.entry(type_name).or_insert_with(Vec::new).push(value.clone());
-                    }
-
-                    // Write Dynamic header for this path (v0 format uses Dynamic v3)
-                    writer.write_u64_le(3).await?;
-
-                    // Total types count
-                    writer.write_var_uint(type_map.len() as u64).await?;
-
-                    // Type names (sorted for consistency)
-                    let mut type_names: Vec<String> = type_map.keys().cloned().collect();
-                    type_names.sort();
-
-                    for type_name in &type_names {
-                        writer.write_string(type_name.as_bytes().to_vec()).await?;
-                    }
-                }
-            }
-
-            // Write data for each path (using Dynamic column format)
-            for path in &paths {
-                if let Some(column_values) = json_data.path_columns.get(path) {
+                if let Some(column_values) = path_columns.get(path) {
                     Self::write_dynamic_column_data(column_values, writer, state).await?;
                 }
             }
 
             // Write SharedData (empty) per row
-            for _ in 0..json_data.rows {
+            for _ in 0..rows {
                 writer.write_u64_le(0).await?;
             }
         }
@@ -549,116 +643,41 @@ impl Serializer for JsonSerializer {
         writer: &mut impl ClickHouseBytesWrite,
         state: &mut SerializerState,
     ) -> Result<()> {
-        if FORCE_STRING_SERIALIZATION {
-            // Simple string serialization - just write the JSON strings as-is
-            Type::String.serialize_column_sync(values, writer, state)?;
-            return Ok(());
-        }
-
-        // Parse JSON values into path-organized structure
-        let json_data = JsonData::from_values(values)?;
         let use_v3 = Self::supports_flat_dynamic_json(state);
 
+        // Try to get cached data first
+        let cache = JSON_CACHE.with(|cache| cache.borrow_mut().take());
+
+        let (paths, path_columns, rows) = if let Some(cache_data) = cache {
+            // Use cached data from analyze_values
+            (cache_data.paths, cache_data.path_columns, cache_data.rows)
+        } else {
+            // Fallback: parse JSON values if no cache (shouldn't happen in normal flow)
+            let json_data = JsonData::from_values(values)?;
+            (
+                json_data.path_columns.keys().cloned().collect(),
+                json_data.path_columns,
+                json_data.rows,
+            )
+        };
+
         if use_v3 {
-            // V3 format (new flat Dynamic/JSON)
-            // Write the header: total dynamic paths count
-            writer.put_var_uint(json_data.path_columns.len() as u64)?;
-
-            // Write path names
-            let paths: Vec<String> = json_data.path_columns.keys().cloned().collect();
+            // V3 format - write data for each path (using Dynamic column format)
             for path in &paths {
-                writer.put_string(path.as_bytes().to_vec())?;
-            }
-
-            // Write Dynamic column prefixes for each path
-            for path in &paths {
-                if let Some(column_values) = json_data.path_columns.get(path) {
-                    // Determine the types in this column
-                    let mut type_map: HashMap<String, Vec<Value>> = HashMap::new();
-
-                    for value in column_values {
-                        let type_name = Self::get_value_type_name(value);
-                        type_map.entry(type_name).or_insert_with(Vec::new).push(value.clone());
-                    }
-
-                    // Write Dynamic header for this path
-                    // Dynamic version
-                    writer.put_u64_le(3);
-
-                    // Total types count
-                    writer.put_var_uint(type_map.len() as u64)?;
-
-                    // Type names (sorted for consistency)
-                    let mut type_names: Vec<String> = type_map.keys().cloned().collect();
-                    type_names.sort();
-
-                    for type_name in &type_names {
-                        writer.put_string(type_name.as_bytes().to_vec())?;
-                    }
-
-                    // Basic types don't need prefix serialization in Dynamic v3 format
-                    // Only complex types that implement CustomSerialization need prefixes
-                }
-            }
-
-            // Write data for each path (using Dynamic column format)
-            for path in &paths {
-                if let Some(column_values) = json_data.path_columns.get(path) {
+                if let Some(column_values) = path_columns.get(path) {
                     Self::write_dynamic_column_data_sync(column_values, writer, state)?;
                 }
             }
         } else {
-            // V0 format (deprecated)
-            const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
-
-            // Write max dynamic paths
-            writer.put_var_uint(DEFAULT_MAX_DYNAMIC_PATHS)?;
-
-            // Write total dynamic paths
-            writer.put_var_uint(json_data.path_columns.len() as u64)?;
-
-            // Write path names
-            let paths: Vec<String> = json_data.path_columns.keys().cloned().collect();
+            // V0 format - write data for each path (using Dynamic column format)
             for path in &paths {
-                writer.put_string(path.as_bytes().to_vec())?;
-            }
-
-            // Write Dynamic column headers for each path
-            for path in &paths {
-                if let Some(column_values) = json_data.path_columns.get(path) {
-                    // Determine the types in this column
-                    let mut type_map: HashMap<String, Vec<Value>> = HashMap::new();
-
-                    for value in column_values {
-                        let type_name = Self::get_value_type_name(value);
-                        type_map.entry(type_name).or_insert_with(Vec::new).push(value.clone());
-                    }
-
-                    // Write Dynamic header for this path (v0 format uses Dynamic v3)
-                    writer.put_u64_le(3);
-
-                    // Total types count
-                    writer.put_var_uint(type_map.len() as u64)?;
-
-                    // Type names (sorted for consistency)
-                    let mut type_names: Vec<String> = type_map.keys().cloned().collect();
-                    type_names.sort();
-
-                    for type_name in &type_names {
-                        writer.put_string(type_name.as_bytes().to_vec())?;
-                    }
-                }
-            }
-
-            // Write data for each path (using Dynamic column format)
-            for path in &paths {
-                if let Some(column_values) = json_data.path_columns.get(path) {
+                if let Some(column_values) = path_columns.get(path) {
                     Self::write_dynamic_column_data_sync(column_values, writer, state)?;
                 }
             }
 
             // Write SharedData (empty) per row
-            for _ in 0..json_data.rows {
+            for _ in 0..rows {
                 writer.put_u64_le(0);
             }
         }
@@ -714,15 +733,13 @@ mod tests {
                 if let (Value::String(orig_bytes), Value::String(deser_bytes)) =
                     (original, &deserialized[i])
                 {
-                    let _orig_json: serde_json::Value =
-                        serde_json::from_slice(orig_bytes).map_err(|e| {
+                    let _orig_json: serde_json::Value = serde_json::from_slice(orig_bytes)
+                        .map_err(|e| {
                             Error::SerializeError(format!("Failed to parse original JSON: {e}"))
                         })?;
                     let deser_json: serde_json::Value = serde_json::from_slice(deser_bytes)
                         .map_err(|e| {
-                            Error::SerializeError(format!(
-                                "Failed to parse deserialized JSON: {e}"
-                            ))
+                            Error::SerializeError(format!("Failed to parse deserialized JSON: {e}"))
                         })?;
 
                     // Verify the JSON structure
@@ -743,9 +760,7 @@ mod tests {
                 assert_eq!(result.len(), values_len);
                 Ok(())
             }
-            Ok(Err(e)) => {
-                Err(e)
-            }
+            Ok(Err(e)) => Err(e),
             Err(_) => {
                 panic!("JSON serialization timed out");
             }

@@ -54,18 +54,18 @@ impl JsonDeserializer {
             Value::Int16(i) => serde_json::Value::Number(serde_json::Number::from(i)),
             Value::Int32(i) => serde_json::Value::Number(serde_json::Number::from(i)),
             Value::Int64(i) => serde_json::Value::Number(serde_json::Number::from(i)),
-            Value::Int128(i) => serde_json::Value::String(i.to_string()), /* Too large for JSON
-                                                                            * number */
-            Value::Int256(i) => serde_json::Value::String(i.to_string()), /* Too large for JSON
-                                                                            * number */
+            Value::Int128(i) => serde_json::Value::String(i.to_string()), /* Too large for JSON */
+            // number
+            Value::Int256(i) => serde_json::Value::String(i.to_string()), /* Too large for JSON */
+            // number
             Value::UInt8(i) => serde_json::Value::Number(serde_json::Number::from(i)),
             Value::UInt16(i) => serde_json::Value::Number(serde_json::Number::from(i)),
             Value::UInt32(i) => serde_json::Value::Number(serde_json::Number::from(i)),
             Value::UInt64(i) => serde_json::Value::Number(serde_json::Number::from(i)),
-            Value::UInt128(i) => serde_json::Value::String(i.to_string()), /* Too large for JSON
-                                                                             * number */
-            Value::UInt256(i) => serde_json::Value::String(i.to_string()), /* Too large for JSON
-                                                                             * number */
+            Value::UInt128(i) => serde_json::Value::String(i.to_string()), /* Too large for JSON */
+            // number
+            Value::UInt256(i) => serde_json::Value::String(i.to_string()), /* Too large for JSON */
+            // number
             Value::Float32(f) => serde_json::Number::from_f64(f64::from(f))
                 .map_or(serde_json::Value::Null, serde_json::Value::Number),
             Value::Float64(f) => serde_json::Number::from_f64(f)
@@ -156,7 +156,8 @@ impl Deserializer for JsonDeserializer {
                     let dynamic_version = reader.read_u64_le().await?;
                     if dynamic_version != 3 {
                         return Err(Error::DeserializeError(format!(
-                            "Expected Dynamic version 3 for JSON path '{path_name}', got {dynamic_version}"
+                            "Expected Dynamic version 3 for JSON path '{path_name}', got \
+                             {dynamic_version}"
                         )));
                     }
 
@@ -197,8 +198,8 @@ impl Deserializer for JsonDeserializer {
                 ))
             }
             _ => Err(Error::DeserializeError(format!(
-                "Unsupported JSON serialization version: {version}. Expected 1 (string), 2 (object v2), \
-                 or 3 (object v3)."
+                "Unsupported JSON serialization version: {version}. Expected 1 (string), 2 \
+                 (object v2), or 3 (object v3)."
             ))),
         }
     }
