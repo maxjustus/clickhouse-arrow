@@ -405,7 +405,7 @@ mod tests {
         let values = vec![
             Value::Variant(3, Box::new(Value::String(b"test".to_vec()))), // String
             Value::Variant(4, Box::new(Value::UInt64(42))),               // UInt64
-            Value::Variant(2, Box::new(Value::Float64(std::f64::consts::PI))),            // Float64
+            Value::Variant(2, Box::new(Value::Float64(std::f64::consts::PI))), // Float64
             Value::Variant(1, Box::new(Value::Date(Date(19723)))),        // Date
             Value::Variant(
                 0,

@@ -243,13 +243,7 @@ pub(crate) async fn deserialize_async<R: ClickHouseRead>(
                 }
                 Arc::new(b.finish())
             },
-            Type::Uuid => {
-                for i in 0..rows {
-                   super::opt_value!(ok => b, i, nulls, binary_async!(Fixed(16) => reader));
-                }
-                Arc::new(b.finish())
-            },
-            Type::Int128 | Type::UInt128 => {
+            Type::Uuid | Type::Int128 | Type::UInt128 => {
                 for i in 0..rows {
                    super::opt_value!(ok => b, i, nulls, binary_async!(Fixed(16) => reader));
                 }

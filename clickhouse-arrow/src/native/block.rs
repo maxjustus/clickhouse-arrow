@@ -200,10 +200,10 @@ impl ProtocolData<Self, ()> for Block {
                 }
 
                 let mut state = SerializerState::default();
-                if let Some(metadata) = options {
-                    if let Some(version) = metadata.server_version {
-                        state = state.with_server_version(version);
-                    }
+                if let Some(metadata) = options
+                    && let Some(version) = metadata.server_version
+                {
+                    state = state.with_server_version(version);
                 }
 
                 // For Dynamic type, we need to analyze values before writing prefix
@@ -266,10 +266,10 @@ impl ProtocolData<Self, ()> for Block {
                 }
 
                 let mut state = SerializerState::default();
-                if let Some(metadata) = options {
-                    if let Some(version) = metadata.server_version {
-                        state = state.with_server_version(version);
-                    }
+                if let Some(metadata) = options
+                    && let Some(version) = metadata.server_version
+                {
+                    state = state.with_server_version(version);
                 }
 
                 // For Dynamic type, we need to analyze values before writing prefix

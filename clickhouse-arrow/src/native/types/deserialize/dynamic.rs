@@ -43,9 +43,9 @@ impl DynamicDeserializer {
         total_types: u64,
     ) -> Result<u64> {
         Ok(match total_types {
-            0..=255 => reader.read_u8().await? as u64,
-            256..=65535 => reader.read_u16_le().await? as u64,
-            65536..=4_294_967_295 => reader.read_u32_le().await? as u64,
+            0..=255 => u64::from(reader.read_u8().await?),
+            256..=65535 => u64::from(reader.read_u16_le().await?),
+            65536..=4_294_967_295 => u64::from(reader.read_u32_le().await?),
             _ => reader.read_u64_le().await?,
         })
     }
@@ -56,9 +56,9 @@ impl DynamicDeserializer {
         total_types: u64,
     ) -> Result<u64> {
         Ok(match total_types {
-            0..=255 => reader.get_u8() as u64,
-            256..=65535 => reader.get_u16_le() as u64,
-            65536..=4_294_967_295 => reader.get_u32_le() as u64,
+            0..=255 => u64::from(reader.get_u8()),
+            256..=65535 => u64::from(reader.get_u16_le()),
+            65536..=4_294_967_295 => u64::from(reader.get_u32_le()),
             _ => reader.get_u64_le(),
         })
     }
@@ -72,14 +72,14 @@ impl DynamicDeserializer {
         let total_types = reader.read_var_uint().await?;
 
         // Read type names and create types
-        let mut types = Vec::with_capacity(total_types as usize);
+        let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
         for _ in 0..total_types {
             let type_name_bytes = reader.read_string().await?;
             let type_name = String::from_utf8(type_name_bytes).map_err(|e| {
-                crate::Error::DeserializeError(format!("Invalid UTF-8 in type name: {}", e))
+                crate::Error::DeserializeError(format!("Invalid UTF-8 in type name: {e}"))
             })?;
             let typ = type_name.parse::<Type>().map_err(|_| {
-                crate::Error::DeserializeError(format!("Unknown type: {}", type_name))
+                crate::Error::DeserializeError(format!("Unknown type: {type_name}"))
             })?;
             types.push((type_name, typ));
         }
@@ -130,10 +130,9 @@ impl DynamicDeserializer {
             }
             _ => {
                 return Err(crate::Error::DeserializeError(format!(
-                    "Unknown Dynamic serialization version: {}. Expected version 3. Use \
+                    "Unknown Dynamic serialization version: {version}. Expected version 3. Use \
                      ClickHouse 25.6+ and enable \
-                     'output_format_native_use_flattened_dynamic_and_json_serialization=1'.",
-                    version
+                     'output_format_native_use_flattened_dynamic_and_json_serialization=1'."
                 )));
             }
         }
@@ -187,11 +186,11 @@ impl DynamicDeserializer {
 
         for (idx, (_, typ)) in types.iter().enumerate() {
             let type_idx = idx as u64;
-            if let Some(&count) = row_count_by_type.get(&type_idx) {
-                if count > 0 {
-                    let column_values = typ.deserialize_column(reader, count, state).await?;
-                    drop(columns.insert(type_idx, column_values));
-                }
+            if let Some(&count) = row_count_by_type.get(&type_idx)
+                && count > 0
+            {
+                let column_values = typ.deserialize_column(reader, count, state).await?;
+                drop(columns.insert(type_idx, column_values));
             }
         }
 
@@ -208,14 +207,12 @@ impl DynamicDeserializer {
                     values.push(column[offset].clone());
                 } else {
                     return Err(crate::Error::DeserializeError(format!(
-                        "Invalid offset {} for discriminator {}",
-                        offset, disc
+                        "Invalid offset {offset} for discriminator {disc}"
                     )));
                 }
             } else {
                 return Err(crate::Error::DeserializeError(format!(
-                    "Unknown discriminator value: {}",
-                    disc
+                    "Unknown discriminator value: {disc}"
                 )));
             }
         }
@@ -238,14 +235,14 @@ impl DynamicDeserializer {
                 let total_types = reader.try_get_var_uint()?;
 
                 // Read type names
-                let mut types = Vec::with_capacity(total_types as usize);
+                let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
                 for _ in 0..total_types {
                     let type_name_bytes = reader.try_get_string()?;
                     let type_name = String::from_utf8(type_name_bytes.to_vec()).map_err(|e| {
-                        crate::Error::DeserializeError(format!("Invalid UTF-8 in type name: {}", e))
+                        crate::Error::DeserializeError(format!("Invalid UTF-8 in type name: {e}"))
                     })?;
                     let typ = type_name.parse::<Type>().map_err(|_| {
-                        crate::Error::DeserializeError(format!("Unknown type: {}", type_name))
+                        crate::Error::DeserializeError(format!("Unknown type: {type_name}"))
                     })?;
                     types.push((type_name, typ));
                 }
@@ -280,10 +277,9 @@ impl DynamicDeserializer {
             }
             _ => {
                 return Err(crate::Error::DeserializeError(format!(
-                    "Unknown Dynamic serialization version: {}. Expected version 3. Use \
+                    "Unknown Dynamic serialization version: {version}. Expected version 3. Use \
                      ClickHouse 25.6+ and enable \
-                     'output_format_native_use_flattened_dynamic_and_json_serialization=1'.",
-                    version
+                     'output_format_native_use_flattened_dynamic_and_json_serialization=1'."
                 )));
             }
         }
@@ -336,11 +332,11 @@ impl DynamicDeserializer {
 
         for (idx, (_, typ)) in types.iter().enumerate() {
             let type_idx = idx as u64;
-            if let Some(&count) = row_count_by_type.get(&type_idx) {
-                if count > 0 {
-                    let column_values = typ.deserialize_column_sync(reader, count, state)?;
-                    drop(columns.insert(type_idx, column_values));
-                }
+            if let Some(&count) = row_count_by_type.get(&type_idx)
+                && count > 0
+            {
+                let column_values = typ.deserialize_column_sync(reader, count, state)?;
+                drop(columns.insert(type_idx, column_values));
             }
         }
 
@@ -355,14 +351,12 @@ impl DynamicDeserializer {
                     values.push(column[offset].clone());
                 } else {
                     return Err(crate::Error::DeserializeError(format!(
-                        "Invalid offset {} for discriminator {}",
-                        offset, disc
+                        "Invalid offset {offset} for discriminator {disc}"
                     )));
                 }
             } else {
                 return Err(crate::Error::DeserializeError(format!(
-                    "Unknown discriminator value: {}",
-                    disc
+                    "Unknown discriminator value: {disc}"
                 )));
             }
         }
