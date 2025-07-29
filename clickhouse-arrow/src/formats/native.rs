@@ -51,12 +51,6 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
         revision: u64,
         metadata: ClientMetadata,
     ) -> Result<()> {
-        eprintln!(
-            "DEBUG: NativeFormat::write called - block rows: {}, columns: {}, compression: {:?}",
-            data.rows,
-            data.column_types.len(),
-            metadata.compression
-        );
         if let CompressionMethod::None = metadata.compression {
             data.write_async(writer, revision, header, Some(metadata))
                 .instrument(trace_span!("serialize_block"))
