@@ -536,9 +536,7 @@ impl Type {
                 Type::Object => {
                     object::ObjectSerializer::write(self, values, writer, state).await?;
                 }
-                Type::Variant(_) => {
-                    todo!("Variant serialization not yet implemented");
-                }
+                Type::Variant(_) => variant::VariantSerializer::write(self, values, writer, state).await?
                 // TODO: Dynamic type not yet implemented
                 // Type::Dynamic(_) => {
                 //     todo!("Dynamic serialization not implemented");
@@ -613,9 +611,7 @@ impl Type {
             Type::Object => {
                 object::ObjectSerializer::write_sync(self, values, writer, state)?;
             }
-            Type::Variant(_) => {
-                todo!("Variant sync serialization not yet implemented");
-            }
+            Type::Variant(_) => variant::VariantSerializer::write_sync(self, values, writer, state)?
             // TODO: Dynamic type not yet implemented
             // Type::Dynamic(_) => {
             //     todo!("Dynamic sync serialization not implemented");
@@ -840,9 +836,23 @@ impl Type {
                     && values.iter().all(|x| value.inner_validate_value(x))
             }
             (Type::Variant(types), Value::Variant(discriminator, val)) => {
-                // Check if discriminator is within bounds and value matches the type
-                (*discriminator as usize) < types.len() 
-                    && types[*discriminator as usize].inner_validate_value(val)
+                // NULL discriminator is always valid
+                if *discriminator == 0xFF {
+                    return matches!(**val, Value::Null);
+                }
+                
+                // Build discriminator map to check if discriminator is valid
+                let discriminator_map = match deserialize::variant::DiscriminatorMap::new(types) {
+                    Ok(map) => map,
+                    Err(_) => return false,
+                };
+                
+                // Check if discriminator maps to a valid type and value matches that type
+                if let Some(expected_type) = discriminator_map.get_type(*discriminator) {
+                    expected_type.inner_validate_value(val)
+                } else {
+                    false
+                }
             }
             (Type::Variant(_), Value::Null) => true, // NULL is valid for Variant
             // TODO: Dynamic type not yet implemented

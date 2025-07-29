@@ -1,333 +1,173 @@
 {
   "categories": [
     {
-      "name": "basic_types",
+      "name": "new_types",
       "tests": [
         {
-          "name": "basic_dates",
-          "query": "SELECT toDate('2023-12-25') as christmas, toDate('1900-01-01') as old_date, toDate('2106-02-07') as far_future",
-          "status": "ERROR",
+          "name": "basic_bool",
+          "query": "SELECT true::Bool as bool_true, false::Bool as bool_false",
+          "status": "FAIL",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "{\"bool_true\":true,\"bool_false\":false}",
+            "test_client_output": "{\n  \"bool_false\": 0,\n  \"bool_true\": 1\n}"
           }
         },
         {
-          "name": "date32",
-          "query": "SELECT toDate32('1900-01-01') as date32_old, toDate32('2023-12-25') as date32_recent, toDate32('2299-12-31') as date32_future",
-          "status": "ERROR",
+          "name": "bool_operations",
+          "query": "SELECT (true::Bool AND false::Bool) as and_result, (true::Bool OR false::Bool) as or_result, NOT true::Bool as not_result",
+          "status": "FAIL",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "{\"and_result\":false,\"or_result\":true,\"not_result\":false}",
+            "test_client_output": "{\n  \"and_result\": 0,\n  \"not_result\": 0,\n  \"or_result\": 1\n}"
           }
         },
         {
-          "name": "datetime",
-          "query": "SELECT toDateTime('2023-12-25 15:30:45') as dt, toDateTime('2023-01-01 00:00:00') as dt_start, toDateTime('2023-12-31 23:59:59') as dt_end",
-          "status": "ERROR",
+          "name": "bool_arrays",
+          "query": "SELECT [true::Bool, false::Bool, true::Bool] as bool_array",
+          "status": "FAIL",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "{\"bool_array\":[true,false,true]}",
+            "test_client_output": "{\n  \"bool_array\": [\n    1,\n    0,\n    1\n  ]\n}"
           }
         },
         {
-          "name": "datetime_with_timezone",
-          "query": "SELECT toDateTime('2023-12-25 15:30:45', 'UTC') as dt_utc, toDateTime('2023-12-25 15:30:45', 'America/New_York') as dt_ny",
-          "status": "ERROR",
+          "name": "bool_in_tuples",
+          "query": "SELECT (true::Bool, 'enabled') as status_tuple, ('feature_flag', false::Bool) as flag_tuple",
+          "status": "FAIL",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "{\"status_tuple\":[true,\"enabled\"],\"flag_tuple\":[\"feature_flag\",false]}",
+            "test_client_output": "{\n  \"flag_tuple\": [\n    \"feature_flag\",\n    0\n  ],\n  \"status_tuple\": [\n    1,\n    \"enabled\"\n  ]\n}"
           }
         },
         {
-          "name": "datetime64",
-          "query": "SELECT toDateTime64('2023-12-25 15:30:45.123456', 6) as dt64_micro, toDateTime64('2023-12-25 15:30:45.123', 3) as dt64_milli",
-          "status": "ERROR",
-          "passed": false,
-          "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
-          }
-        },
-        {
-          "name": "basic_strings",
-          "query": "SELECT 'hello world' as simple_string, '' as empty_string, 'Hello, \u4e16\u754c!' as unicode_string",
-          "status": "ERROR",
-          "passed": false,
-          "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
-          }
-        },
-        {
-          "name": "special_characters",
-          "query": "SELECT 'line1\\nline2' as newline, 'tab\\there' as tab, 'quote\"here' as quote, 'apostrophe\\'here' as apostrophe",
-          "status": "ERROR",
-          "passed": false,
-          "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
-          }
-        },
-        {
-          "name": "long_strings",
-          "query": "SELECT repeat('a', 1000) as long_string, repeat('\u6d4b\u8bd5', 500) as long_unicode",
-          "status": "ERROR",
-          "passed": false,
-          "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
-          }
-        },
-        {
-          "name": "fixed_strings",
-          "query": "SELECT toFixedString('hello', 10) as fixed_str, toFixedString('\u4e16\u754c', 10) as fixed_unicode",
-          "status": "ERROR",
-          "passed": false,
-          "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
-          }
-        },
-        {
-          "name": "binary_data",
-          "query": "SELECT unhex('48656c6c6f') as binary_hello, unhex('00010203FF') as binary_bytes",
+          "name": "basic_aggregate_functions",
+          "query": "SELECT CAST(1, 'AggregateFunction(count, UInt64)') as count_state, CAST(42, 'AggregateFunction(sum, UInt64)') as sum_state",
           "status": "ERROR",
           "passed": false,
           "details": {
             "clickhouse_error": true,
             "test_client_error": true,
-            "clickhouse_output": "Error: 'utf-8' codec can't decode byte 0xff in position 64: invalid start byte",
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "Error: Received exception from server (version 25.5.2):\nCode: 70. DB::Exception: Received from localhost:9000. DB::Exception: Conversion from UInt8 to AggregateFunction(count, UInt64) is not supported: While processing CAST(1, 'AggregateFunction(count, UInt64)') AS count_state, CAST(42, 'AggregateFunction(sum, UInt64)') AS sum_state. (CANNOT_CONVERT_TYPE)\n(query: SELECT CAST(1, 'AggregateFunction(count, UInt64)') as count_state, CAST(42, 'AggregateFunction(sum, UInt64)') as sum_state)\n",
+            "test_client_output": "Error: "
           }
         },
         {
-          "name": "signed_integers",
-          "query": "SELECT -128::Int8 as int8_min, 127::Int8 as int8_max, -32768::Int16 as int16_min, 32767::Int16 as int16_max, -2147483648::Int32 as int32_min, 2147483647::Int32 as int32_max",
-          "status": "ERROR",
+          "name": "simple_aggregate_functions",
+          "query": "SELECT CAST(10, 'SimpleAggregateFunction(max, UInt32)') as max_simple, CAST(5, 'SimpleAggregateFunction(min, UInt32)') as min_simple",
+          "status": "FAIL",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "{\"max_simple\":10,\"min_simple\":5}",
+            "test_client_output": "{\"timestamp\":\"2025-07-29T00:06:21.923414Z\",\"level\":\"ERROR\",\"fields\":{\"message\":\"Type deserialize failed: name=max_simple, type=SimpleAggregateFunction(max, UInt32)\",\"error\":\"TypeParseError(\\\"invalid type with arguments: 'SimpleAggregateFunction' (ident = SimpleAggregateFunction)\\\")\"}}\n{\"timestamp\":\"2025-07-29T00:06:21.923449Z\",\"level\":\"ERROR\",\"fields\":{\"message\":\"Block read fail\",\"error\":\"TypeParseError(\\\"invalid type with arguments: 'SimpleAggregateFunction' (ident = SimpleAggregateFunction)\\\")\",\"clickhouse.client.id\":0}}\n{\"timestamp\":\"2025-07-29T00:06:21.923460Z\",\"level\":\"ERROR\",\"fields\":{\"error\":\"type parse error: invalid type with arguments: 'SimpleAggregateFunction' (ident = SimpleAggregateFunction)\"}}\n{\"timestamp\":\"2025-07-29T00:06:21.923478Z\",\"level\":\"ERROR\",\"fields\":{\"message\":\"Fatal error\",\"error\":\"TypeParseError(\\\"invalid type with arguments: 'SimpleAggregateFunction' (ident = SimpleAggregateFunction)\\\")\",\"clickhouse.client.id\":\"0.0\"}}\n{\"timestamp\":\"2025-07-29T00:06:21.923505Z\",\"level\":\"ERROR\",\"fields\":{\"error\":\"type parse error: invalid type with arguments: 'SimpleAggregateFunction' (ident = SimpleAggregateFunction)\"}}\n{\"timestamp\":\"2025-07-29T00:06:21.923512Z\",\"level\":\"ERROR\",\"fields\":{\"message\":\"Internal connection lost\",\"error\":\"TypeParseError(\\\"invalid type with arguments: 'SimpleAggregateFunction' (ident = SimpleAggregateFunction)\\\")\"}}"
           }
         },
         {
-          "name": "unsigned_integers",
-          "query": "SELECT 255::UInt8 as uint8_max, 65535::UInt16 as uint16_max, 4294967295::UInt32 as uint32_max",
+          "name": "complex_aggregate_functions",
+          "query": "SELECT CAST('test', 'AggregateFunction(uniq, String)') as uniq_state",
           "status": "ERROR",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
+            "clickhouse_error": true,
             "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "Error: Received exception from server (version 25.5.2):\nCode: 33. DB::Exception: Received from localhost:9000. DB::Exception: Cannot read all data. Bytes read: 2. Bytes expected: 404.: While processing CAST('test', 'AggregateFunction(uniq, String)') AS uniq_state. (CANNOT_READ_ALL_DATA)\n(query: SELECT CAST('test', 'AggregateFunction(uniq, String)') as uniq_state)\n",
+            "test_client_output": "Error: "
           }
         },
         {
-          "name": "large_integers",
-          "query": "SELECT -9223372036854775808::Int64 as int64_min, 9223372036854775807::Int64 as int64_max, 18446744073709551615::UInt64 as uint64_max",
+          "name": "basic_nothing",
+          "query": "SELECT NULL::Nothing as nothing_val",
           "status": "ERROR",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
+            "clickhouse_error": true,
             "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "Error: Received exception from server (version 25.5.2):\nCode: 70. DB::Exception: Received from localhost:9000. DB::Exception: Cannot convert NULL to a non-nullable type: While processing CAST(NULL, 'Nothing') AS nothing_val. (CANNOT_CONVERT_TYPE)\n(query: SELECT NULL::Nothing as nothing_val)\n",
+            "test_client_output": "Error: "
           }
         },
         {
-          "name": "big_integers",
-          "query": "SELECT toInt128('-170141183460469231731687303715884105728') as int128_min, toUInt128('340282366920938463463374607431768211455') as uint128_max",
+          "name": "nothing_arrays",
+          "query": "SELECT [NULL::Nothing, NULL::Nothing] as nothing_array",
           "status": "ERROR",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
+            "clickhouse_error": true,
             "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "Error: Received exception from server (version 25.5.2):\nCode: 70. DB::Exception: Received from localhost:9000. DB::Exception: Cannot convert NULL to a non-nullable type: While processing [CAST(NULL, 'Nothing'), CAST(NULL, 'Nothing')] AS nothing_array. (CANNOT_CONVERT_TYPE)\n(query: SELECT [NULL::Nothing, NULL::Nothing] as nothing_array)\n",
+            "test_client_output": "Error: "
           }
         },
         {
-          "name": "256bit_integers",
-          "query": "SELECT toInt256('-57896044618658097711785492504343953926634992332820282019728792003956564819968') as int256_min, toUInt256('115792089237316195423570985008687907853269984665640564039457584007913129639935') as uint256_max",
+          "name": "nothing_in_tuples",
+          "query": "SELECT (NULL::Nothing, 'placeholder') as nothing_tuple",
           "status": "ERROR",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
+            "clickhouse_error": true,
             "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "Error: Received exception from server (version 25.5.2):\nCode: 70. DB::Exception: Received from localhost:9000. DB::Exception: Cannot convert NULL to a non-nullable type: While processing (CAST(NULL, 'Nothing'), 'placeholder') AS nothing_tuple. (CANNOT_CONVERT_TYPE)\n(query: SELECT (NULL::Nothing, 'placeholder') as nothing_tuple)\n",
+            "test_client_output": "Error: "
           }
         },
         {
-          "name": "float32",
-          "query": "SELECT 3.14159::Float32 as pi_f32, -1.5::Float32 as negative_f32, 0.0::Float32 as zero_f32",
-          "status": "ERROR",
+          "name": "basic_variant",
+          "query": "SELECT 'hello'::Variant(String, UInt64) as string_variant, 42::Variant(String, UInt64) as int_variant",
+          "status": "FAIL",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "{\"string_variant\":\"hello\",\"int_variant\":\"42\"}",
+            "test_client_output": "{\n  \"int_variant\": 42,\n  \"string_variant\": \"hello\"\n}"
           }
         },
         {
-          "name": "float64",
-          "query": "SELECT 3.141592653589793::Float64 as pi_f64, -2.718281828459045::Float64 as e_negative, 1.7976931348623157e308::Float64 as max_f64",
-          "status": "ERROR",
+          "name": "complex_variant",
+          "query": "SELECT [1, 2, 3]::Variant(String, Array(UInt32)) as array_variant, 'text'::Variant(String, Array(UInt32)) as string_variant",
+          "status": "FAIL",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "{\"array_variant\":[1,2,3],\"string_variant\":\"text\"}",
+            "test_client_output": "{\n  \"array_variant\": [\n    1,\n    2,\n    3\n  ],\n  \"string_variant\": \"text\"\n}"
           }
         },
         {
-          "name": "special_values",
-          "query": "SELECT nan::Float32 as nan_f32, inf::Float32 as inf_f32, -inf::Float32 as neg_inf_f32, nan::Float64 as nan_f64, inf::Float64 as inf_f64",
+          "name": "nested_variant",
+          "query": "SELECT 'nested_string'::Variant(UUID, Array(Variant(String, UInt64))) as nested_variant",
           "status": "ERROR",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
+            "clickhouse_error": true,
             "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "Error: Received exception from server (version 25.5.2):\nCode: 117. DB::Exception: Received from localhost:9000. DB::Exception: Cannot parse text value of type Variant(Array(Variant(String, UInt64)), UUID) here: nested_string: While processing CAST('nested_string', 'Variant(UUID, Array(Variant(String, UInt64)))') AS nested_variant. (INCORRECT_DATA)\n(query: SELECT 'nested_string'::Variant(UUID, Array(Variant(String, UInt64))) as nested_variant)\n",
+            "test_client_output": "Error: "
           }
         },
         {
-          "name": "decimals",
-          "query": "SELECT toDecimal32(123.45, 2) as dec32, toDecimal64(123.456789, 6) as dec64, toDecimal128(12345.6789012345, 10) as dec128",
-          "status": "ERROR",
+          "name": "variant_arrays",
+          "query": "SELECT ['a'::Variant(String, UInt32), 123::Variant(String, UInt32)] as variant_array",
+          "status": "FAIL",
           "passed": false,
           "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
-          }
-        },
-        {
-          "name": "uuid",
-          "query": "SELECT toUUID('550e8400-e29b-41d4-a716-446655440000') as uuid_val, generateUUIDv4() as random_uuid",
-          "status": "ERROR",
-          "passed": false,
-          "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
-          }
-        },
-        {
-          "name": "ipv4",
-          "query": "SELECT toIPv4('127.0.0.1') as localhost, toIPv4('192.168.1.1') as private_ip, toIPv4('8.8.8.8') as public_ip",
-          "status": "ERROR",
-          "passed": false,
-          "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
-          }
-        },
-        {
-          "name": "ipv6",
-          "query": "SELECT toIPv6('::1') as ipv6_localhost, toIPv6('2001:db8::1') as ipv6_example, toIPv6('fe80::1') as ipv6_link_local",
-          "status": "ERROR",
-          "passed": false,
-          "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
-          }
-        },
-        {
-          "name": "enum8",
-          "query": "SELECT CAST('Red', 'Enum8(\\'Red\\' = 1, \\'Green\\' = 2, \\'Blue\\' = 3)') as color8",
-          "status": "ERROR",
-          "passed": false,
-          "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
-          }
-        },
-        {
-          "name": "enum16",
-          "query": "SELECT CAST('Success', 'Enum16(\\'Success\\' = 200, \\'NotFound\\' = 404, \\'InternalError\\' = 500)') as status16",
-          "status": "ERROR",
-          "passed": false,
-          "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
-          }
-        },
-        {
-          "name": "simple_integers",
-          "query": "SELECT 42 as answer, -123 as negative",
-          "status": "ERROR",
-          "passed": false,
-          "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
-          }
-        },
-        {
-          "name": "simple_strings",
-          "query": "SELECT 'hello' as greeting, 'world' as noun",
-          "status": "ERROR",
-          "passed": false,
-          "details": {
-            "clickhouse_error": false,
-            "test_client_error": true,
-            "clickhouse_output": null,
-            "test_client_output": "Error: [Errno 2] No such file or directory: '/Users/audio/dev/clickhouse-arrow/test-client/target/debug/clickhouse-test-client'"
+            "clickhouse_output": "{\"variant_array\":[\"a\",123]}",
+            "test_client_output": "{\n  \"variant_array\": [\n    \"a\",\n    123\n  ]\n}"
           }
         }
       ],
       "summary": {
-        "total": 26,
+        "total": 14,
         "passed": 0,
-        "failed": 0,
-        "errors": 26
+        "failed": 8,
+        "errors": 6
       }
     }
   ],
   "summary": {
-    "total": 26,
+    "total": 14,
     "passed": 0,
-    "failed": 0,
-    "errors": 26
+    "failed": 8,
+    "errors": 6
   }
 }

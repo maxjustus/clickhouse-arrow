@@ -72,7 +72,7 @@ pub async fn round_trip<T: Row + std::fmt::Debug + PartialEq + Clone + Send + Sy
     let query_id = Qid::new();
     header(query_id, format!("Creating table: {db_name}.{table_name}"));
     client
-        .create_table::<TestRowAll>(Some(&db_name), &table_name, options, Some(table_qid))
+        .create_table::<T>(Some(&db_name), &table_name, options, Some(table_qid))
         .await?;
 
     // Insert data
@@ -129,4 +129,32 @@ pub async fn round_trip<T: Row + std::fmt::Debug + PartialEq + Clone + Send + Sy
     header(query_id, "Round-trip test completed successfully");
 
     Ok(())
+}
+
+/// # Panics
+pub async fn test_variant_round_trip(ch: Arc<ClickHouseContainer>) {
+    let native_url = ch.get_native_url();
+    debug!("ClickHouse Native URL: {native_url}");
+
+    // Table create options
+    let options = CreateOptions::new("MergeTree").with_order_by(&["id".to_string()]);
+
+    // Create ClientBuilder and ConnectionManager
+    let client: NativeClient = ClientBuilder::new()
+        .with_endpoint(native_url)
+        .with_username(&ch.user)
+        .with_password(&ch.password)
+        .with_ipv4_only(true)
+        .with_compression(CompressionMethod::LZ4)
+        .build()
+        .await
+        .expect("Building client");
+    
+    let test_data = generate_variant_test_block();
+    round_trip(client, test_data, &options)
+        .await
+        .inspect_err(|error| {
+            error!("Round trip for Variant Native failed: {error:?}");
+        })
+        .expect("Variant round trip failed");
 }

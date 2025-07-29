@@ -90,9 +90,7 @@ impl ClickHouseNativeSerializer for Type {
                         .await?;
                 }
                 Type::Object => object::ObjectSerializer::write_prefix(self, writer, state).await?,
-                Type::Variant(_) => {
-                    todo!("Variant prefix serialization not yet implemented");
-                }
+                Type::Variant(_) => variant::VariantSerializer::write_prefix(self, writer, state).await?,
                 // TODO: Dynamic type not yet implemented
                 // Type::Dynamic(_) => {
                 //     todo!("Dynamic prefix serialization not implemented");
@@ -129,6 +127,10 @@ impl ClickHouseNativeSerializer for Type {
             }
             Type::Object => {
                 writer.put_i8(1);
+                return;
+            }
+            Type::Variant(_) => {
+                variant::VariantSerializer::write_sync_prefix(self, writer, state).unwrap();
                 return;
             }
             _ => return,

@@ -52,6 +52,54 @@ impl DiscriminatorMap {
 pub(crate) struct VariantDeserializer;
 
 impl VariantDeserializer {
+    /// Build offsets and count rows for each discriminator type
+    fn build_offsets_and_counts(
+        discriminators: &[u8],
+        rows: usize,
+    ) -> (Vec<usize>, HashMap<u8, usize>) {
+        let mut offsets = vec![0; rows];
+        let mut row_count_by_type: HashMap<u8, usize> = HashMap::new();
+        
+        for (i, &disc) in discriminators.iter().enumerate() {
+            if disc != 0xFF {
+                let count = row_count_by_type.entry(disc).or_insert(0);
+                offsets[i] = *count;
+                *count += 1;
+            }
+        }
+        
+        (offsets, row_count_by_type)
+    }
+    
+    /// Reconstruct values in original order from column data
+    fn reconstruct_values(
+        discriminators: &[u8],
+        offsets: &[usize],
+        columns: &HashMap<u8, Vec<Value>>,
+    ) -> Result<Vec<Value>> {
+        let mut values = Vec::with_capacity(discriminators.len());
+        
+        for (i, &disc) in discriminators.iter().enumerate() {
+            if disc == 0xFF {
+                values.push(Value::Variant(disc, Box::new(Value::Null)));
+            } else if let Some(column) = columns.get(&disc) {
+                let offset = offsets[i];
+                if offset < column.len() {
+                    values.push(Value::Variant(disc, Box::new(column[offset].clone())));
+                } else {
+                    return Err(crate::Error::DeserializeError(
+                        format!("Invalid offset {} for discriminator {}", offset, disc)
+                    ));
+                }
+            } else {
+                return Err(crate::Error::DeserializeError(format!(
+                    "Unknown discriminator value: {disc}"
+                )));
+            }
+        }
+        
+        Ok(values)
+    }
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
         _type_: &Type,
         reader: &mut R,
@@ -80,19 +128,10 @@ impl VariantDeserializer {
         let mut discriminators = vec![0u8; rows];
         let _ = reader.read_exact(&mut discriminators).await?;
         
-        // Build offsets for each discriminator type
-        let mut offsets = vec![0; rows];
-        let mut row_count_by_type: HashMap<u8, usize> = HashMap::new();
+        // Build offsets and count rows per type
+        let (offsets, row_count_by_type) = Self::build_offsets_and_counts(&discriminators, rows);
         
-        for (i, &disc) in discriminators.iter().enumerate() {
-            if disc != 0xFF {
-                let count = row_count_by_type.entry(disc).or_insert(0);
-                offsets[i] = *count;
-                *count += 1;
-            }
-        }
-        
-        // Now read the column data for each type in discriminator order
+        // Read the column data for each type in discriminator order
         let mut columns: HashMap<u8, Vec<Value>> = HashMap::new();
         
         for discriminator in discriminator_map.discriminators() {
@@ -107,27 +146,7 @@ impl VariantDeserializer {
         }
         
         // Reconstruct the values in original order
-        let mut values = Vec::with_capacity(rows);
-        for (i, &disc) in discriminators.iter().enumerate() {
-            if disc == 0xFF {
-                values.push(Value::Variant(disc, Box::new(Value::Null)));
-            } else if let Some(column) = columns.get_mut(&disc) {
-                let offset = offsets[i];
-                if offset < column.len() {
-                    values.push(Value::Variant(disc, Box::new(column[offset].clone())));
-                } else {
-                    return Err(crate::Error::DeserializeError(
-                        format!("Invalid offset {} for discriminator {}", offset, disc)
-                    ));
-                }
-            } else {
-                return Err(crate::Error::DeserializeError(format!(
-                    "Unknown discriminator value: {disc}"
-                )));
-            }
-        }
-        
-        Ok(values)
+        Self::reconstruct_values(&discriminators, &offsets, &columns)
     }
     
     pub(crate) fn read_sync<R: ClickHouseBytesRead>(
@@ -136,7 +155,6 @@ impl VariantDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        
         // Sanity check
         if rows > 1_000_000 {
             return Err(crate::Error::DeserializeError(format!(
@@ -151,20 +169,10 @@ impl VariantDeserializer {
         let mut discriminators = vec![0u8; rows];
         reader.try_copy_to_slice(&mut discriminators)?;
         
-        // Build offsets for each discriminator type
-        let mut offsets = vec![0; rows];
-        let mut row_count_by_type: HashMap<u8, usize> = HashMap::new();
+        // Build offsets and count rows per type
+        let (offsets, row_count_by_type) = Self::build_offsets_and_counts(&discriminators, rows);
         
-        for (i, &disc) in discriminators.iter().enumerate() {
-            if disc != 0xFF {
-                let count = row_count_by_type.entry(disc).or_insert(0);
-                offsets[i] = *count;
-                *count += 1;
-            }
-        }
-        
-        
-        // Now read the column data for each type in discriminator order
+        // Read the column data for each type in discriminator order
         let mut columns: HashMap<u8, Vec<Value>> = HashMap::new();
         
         for discriminator in discriminator_map.discriminators() {
@@ -179,27 +187,7 @@ impl VariantDeserializer {
         }
         
         // Reconstruct the values in original order
-        let mut values = Vec::with_capacity(rows);
-        for (i, &disc) in discriminators.iter().enumerate() {
-            if disc == 0xFF {
-                values.push(Value::Variant(disc, Box::new(Value::Null)));
-            } else if let Some(column) = columns.get(&disc) {
-                let offset = offsets[i];
-                if offset < column.len() {
-                    values.push(Value::Variant(disc, Box::new(column[offset].clone())));
-                } else {
-                    return Err(crate::Error::DeserializeError(
-                        format!("Invalid offset {} for discriminator {}", offset, disc)
-                    ));
-                }
-            } else {
-                return Err(crate::Error::DeserializeError(format!(
-                    "Unknown discriminator value: {disc}"
-                )));
-            }
-        }
-        
-        Ok(values)
+        Self::reconstruct_values(&discriminators, &offsets, &columns)
     }
 }
 
