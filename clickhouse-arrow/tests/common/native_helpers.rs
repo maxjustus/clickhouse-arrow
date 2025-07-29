@@ -389,10 +389,10 @@ pub fn generate_dynamic_test_block() -> Block {
 
 pub fn generate_json_test_block() -> Block {
     let rows = vec![
-        // Test simple types first for debugging
-        Value::Int32(42),
-        Value::String(b"hello".to_vec()),
-        Value::Float64(3.141_592_653_589_793),
+        // Test simple JSON objects
+        Value::String(b"{\"id\": 42, \"name\": \"Alice\"}".to_vec()),
+        Value::String(b"{\"id\": 99, \"name\": \"Bob\", \"metadata\": {\"active\": true}}".to_vec()),
+        Value::String(b"{\"count\": 123.45, \"tags\": [\"rust\", \"clickhouse\"]}".to_vec()),
     ];
 
     Block {
