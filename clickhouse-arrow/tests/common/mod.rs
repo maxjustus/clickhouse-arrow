@@ -1,6 +1,7 @@
 pub mod arrow_helpers;
 pub mod constants;
 pub mod native_helpers;
+pub mod version_compat;
 
 pub const SEP: &str = "\n-------------------------------\n";
 

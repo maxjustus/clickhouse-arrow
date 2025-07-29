@@ -8,6 +8,7 @@ use tracing::{debug, warn};
 
 use crate::common::header;
 use crate::common::native_helpers::*;
+use crate::common::version_compat::VersionChecker;
 
 // Helper struct for version query
 #[derive(Debug, Clone, Row)]
@@ -214,29 +215,23 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
         .await
         .expect("Building client");
 
-    // Check if the server supports Dynamic type (requires 25.5+)
-    // We'll skip the test if the server is too old - since 24.x is still commonly used
+    // Check if the server supports Dynamic type
     let version_check_query = "SELECT version() as version";
     let mut stream =
         client.query::<VersionRow>(version_check_query, None).await.expect("version query failed");
 
-    if let Some(Ok(row)) = stream.next().await {
-        let version = row.version;
-        debug!("ClickHouse version: {}", version);
-        // Parse major.minor version
-        let parts: Vec<&str> = version.split('.').collect();
-        if parts.len() >= 2 {
-            if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                if major < 25 || (major == 25 && minor < 5) {
-                    warn!(
-                        "Skipping Dynamic type test - requires ClickHouse 25.5+ (found {})",
-                        version
-                    );
-                    return;
-                }
-            }
+    let _version_checker = if let Some(Ok(row)) = stream.next().await {
+        let version_checker = VersionChecker::new(Some(&row.version));
+        version_checker.log_compatibility_info();
+
+        if !version_checker.require_dynamic_support("Dynamic type test") {
+            return;
         }
-    }
+        version_checker
+    } else {
+        warn!("Could not determine ClickHouse version, skipping Dynamic type test");
+        return;
+    };
 
     // Test Dynamic type with direct block operations
     let test_data = generate_dynamic_test_block();
@@ -341,29 +336,23 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
         .await
         .expect("Building client");
 
-    // Check if the server supports JSON type (requires 25.5+)
-    // We'll skip the test if the server is too old - since 24.x is still commonly used
+    // Check if the server supports JSON type
     let version_check_query = "SELECT version() as version";
     let mut stream =
         client.query::<VersionRow>(version_check_query, None).await.expect("version query failed");
 
-    if let Some(Ok(row)) = stream.next().await {
-        let version = row.version;
-        debug!("ClickHouse version: {}", version);
-        // Parse major.minor version
-        let parts: Vec<&str> = version.split('.').collect();
-        if parts.len() >= 2 {
-            if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                if major < 25 || (major == 25 && minor < 5) {
-                    warn!(
-                        "Skipping JSON type test - requires ClickHouse 25.5+ (found {})",
-                        version
-                    );
-                    return;
-                }
-            }
+    let _version_checker = if let Some(Ok(row)) = stream.next().await {
+        let version_checker = VersionChecker::new(Some(&row.version));
+        version_checker.log_compatibility_info();
+
+        if !version_checker.require_json_support("JSON type test") {
+            return;
         }
-    }
+        version_checker
+    } else {
+        warn!("Could not determine ClickHouse version, skipping JSON type test");
+        return;
+    };
 
     // Test JSON type with direct block operations
     let test_data = generate_json_test_block();
