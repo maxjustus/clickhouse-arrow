@@ -182,8 +182,9 @@ The Variant type in ClickHouse is a discriminated union that can hold one of sev
 
 4. **Current Status**:
    - Deserialization: ✅ Implemented and tested
-   - Serialization: ❌ TODO (stub exists with detailed comments)
-   - Nested Variants: ⚠️ Partially working, needs more work for prefix handling
+   - Serialization: ✅ Implemented with comprehensive tests
+   - COMPACT mode: ❌ TODO (BASIC mode implemented)
+   - Nested Variants: ⚠️ Partially working (prefix handling implemented)
 
 ### Reference Implementation
 The `ctx/clickhouse-go/` directory contains the ClickHouse Go driver source code which has a working Variant implementation. Key files:
@@ -192,3 +193,13 @@ The `ctx/clickhouse-go/` directory contains the ClickHouse Go driver source code
 - `ctx/clickhouse-go/tests/variant_test.go` - Test examples
 
 Use this as a reference when implementing features or debugging issues with the Variant type.
+
+### Technical Specifications
+The `dynamic-containers-technical-spec.md` file contains the official ClickHouse technical specification for Dynamic and Variant types, including:
+- Detailed wire format descriptions
+- Serialization/deserialization algorithms
+- Type registry and discriminator mapping rules
+- SharedVariant handling for Dynamic type overflow
+- Examples and edge cases
+
+This specification should be consulted when implementing or debugging Dynamic and Variant type features.
