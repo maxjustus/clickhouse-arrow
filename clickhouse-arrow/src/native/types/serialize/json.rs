@@ -696,6 +696,179 @@ mod tests {
     use crate::native::types::serialize::ClickHouseNativeSerializer;
 
     #[tokio::test]
+    async fn test_json_v3_simple_objects() -> Result<()> {
+        let values = vec![
+            Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
+            Value::String(b"{\"name\": \"Bob\", \"age\": 25}".to_vec()),
+        ];
+
+        let type_ = Type::JSON;
+        let values_len = values.len();
+
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
+
+        // Deserialize it back
+        let mut input = Cursor::new(output);  
+        let mut state = DeserializerState::default();
+
+        type_.deserialize_prefix_async(&mut input, &mut state).await?;
+        let deserialized = type_.deserialize_column(&mut input, values_len, &mut state).await?;
+
+        assert_eq!(deserialized.len(), values_len);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v3_nested_objects() -> Result<()> {
+        let values = vec![
+            Value::String(b"{\"user\": {\"name\": \"Alice\", \"age\": 30}, \"active\": true}".to_vec()),
+            Value::String(b"{\"user\": {\"name\": \"Bob\"}, \"score\": 95.5}".to_vec()),
+        ];
+
+        let type_ = Type::JSON;
+        let values_len = values.len();
+
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
+
+        // Deserialize it back
+        let mut input = Cursor::new(output);
+        let mut state = DeserializerState::default();
+
+        type_.deserialize_prefix_async(&mut input, &mut state).await?;
+        let deserialized = type_.deserialize_column(&mut input, values_len, &mut state).await?;
+
+        assert_eq!(deserialized.len(), values_len);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v3_mixed_types() -> Result<()> {
+        let values = vec![
+            Value::String(b"{\"id\": 1, \"name\": \"test\", \"active\": true, \"score\": 99.9}".to_vec()),
+            Value::String(b"{\"id\": 2, \"name\": \"example\", \"active\": false}".to_vec()),
+            Value::String(b"{\"id\": 3, \"score\": 88.1, \"metadata\": \"extra\"}".to_vec()),
+        ];
+
+        let type_ = Type::JSON;
+        let values_len = values.len();
+
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
+
+        // Deserialize it back
+        let mut input = Cursor::new(output);
+        let mut state = DeserializerState::default();
+
+        type_.deserialize_prefix_async(&mut input, &mut state).await?;
+        let deserialized = type_.deserialize_column(&mut input, values_len, &mut state).await?;
+
+        assert_eq!(deserialized.len(), values_len);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v3_with_nulls() -> Result<()> {
+        let values = vec![
+            Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
+            Value::Null,
+            Value::String(b"{\"name\": \"Bob\", \"active\": true}".to_vec()),
+        ];
+
+        let type_ = Type::JSON;
+        let values_len = values.len();
+
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
+
+        // Deserialize it back
+        let mut input = Cursor::new(output);
+        let mut state = DeserializerState::default();
+
+        type_.deserialize_prefix_async(&mut input, &mut state).await?;
+        let deserialized = type_.deserialize_column(&mut input, values_len, &mut state).await?;
+
+        assert_eq!(deserialized.len(), values_len);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v3_empty_objects() -> Result<()> {
+        let values = vec![
+            Value::String(b"{}".to_vec()),
+            Value::String(b"{\"name\": \"test\"}".to_vec()),
+            Value::String(b"{}".to_vec()),
+        ];
+
+        let type_ = Type::JSON;
+        let values_len = values.len();
+
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
+
+        // Deserialize it back
+        let mut input = Cursor::new(output);
+        let mut state = DeserializerState::default();
+
+        type_.deserialize_prefix_async(&mut input, &mut state).await?;
+        let deserialized = type_.deserialize_column(&mut input, values_len, &mut state).await?;
+
+        assert_eq!(deserialized.len(), values_len);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v3_analyze_values_cache() -> Result<()> {
+        let values = vec![
+            Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
+            Value::String(b"{\"name\": \"Bob\", \"score\": 95.5}".to_vec()),
+        ];
+
+        // Test that analyze_values works correctly
+        JsonSerializer::analyze_values(&values)?;
+        
+        // Verify cache was populated
+        let cache_exists = JSON_CACHE.with(|cache| cache.borrow().is_some());
+        assert!(cache_exists, "Cache should be populated after analyze_values");
+
+        let type_ = Type::JSON;
+        let values_len = values.len();
+
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+
+        // This should use the cached data
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
+
+        // Deserialize it back
+        let mut input = Cursor::new(output);
+        let mut state = DeserializerState::default();
+
+        type_.deserialize_prefix_async(&mut input, &mut state).await?;
+        let deserialized = type_.deserialize_column(&mut input, values_len, &mut state).await?;
+
+        assert_eq!(deserialized.len(), values_len);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_json_v3_serialization_roundtrip() -> Result<()> {
         // Test with original failing case but only 2 rows
         let values = vec![
