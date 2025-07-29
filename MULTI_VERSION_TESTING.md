@@ -71,19 +71,33 @@ The `scripts/test-multi-version.sh` script allows local testing:
 ./scripts/test-multi-version.sh latest
 ```
 
+**Important:** This script requires bash 4.0+ for associative arrays. On macOS:
+```bash
+# Install modern bash
+brew install bash
+
+# Run the script with modern bash
+/opt/homebrew/bin/bash ./scripts/test-multi-version.sh
+```
+
 ## Running Multi-Version Tests
 
 ### Prerequisites
 
 - Docker installed and running
 - Rust toolchain with cargo
-- Ports 18123 and 19000 available (non-standard ports to avoid conflicts)
+- Bash 4.0 or later (for test scripts)
+  - macOS system bash is 3.2, install modern bash with: `brew install bash`
 
 ### Local Testing
 
 1. **Run all versions:**
    ```bash
+   # On Linux or with modern bash
    ./scripts/test-multi-version.sh
+   
+   # On macOS with system bash
+   /opt/homebrew/bin/bash ./scripts/test-multi-version.sh
    ```
 
 2. **Run specific versions:**
@@ -91,13 +105,11 @@ The `scripts/test-multi-version.sh` script allows local testing:
    ./scripts/test-multi-version.sh 25.5 latest
    ```
 
-3. **With custom configuration:**
-   ```bash
-   CLICKHOUSE_USER=admin CLICKHOUSE_PASSWORD=secret ./scripts/test-multi-version.sh
-   
-   # Use different ports if 19000/18123 are busy
-   NATIVE_PORT=29000 HTTP_PORT=28123 ./scripts/test-multi-version.sh
-   ```
+3. **How it works:**
+   - The script uses the existing testcontainers infrastructure
+   - Each test creates and manages its own ephemeral ClickHouse container
+   - The `CLICKHOUSE_VERSION` environment variable controls which version is used
+   - No manual container management is required
 
 ### GitHub Actions
 
@@ -171,26 +183,29 @@ When adding support for new ClickHouse features:
 
 ### Common Issues
 
-1. **Port conflicts:**
+1. **Bash version error:**
    ```bash
-   # Kill processes using test ports (if still conflicts with non-standard ports)
-   sudo lsof -ti:19000 | xargs kill -9
-   sudo lsof -ti:18123 | xargs kill -9
+   Error: This script requires bash 4.0 or later (found 3.2.57(1)-release)
+   ```
+   Solution: Use modern bash
+   ```bash
+   # Install on macOS
+   brew install bash
    
-   # Or use different ports
-   NATIVE_PORT=29000 HTTP_PORT=28123 ./scripts/test-multi-version.sh
+   # Run with modern bash
+   /opt/homebrew/bin/bash ./scripts/test-multi-version.sh
    ```
 
-2. **Docker container conflicts:**
-   ```bash
-   # Clean up test containers
-   docker ps -a | grep clickhouse-test | awk '{print $1}' | xargs docker rm -f
-   ```
+2. **Test failures on older versions:**
+   - This is expected! Older versions don't support new features
+   - Version 24.x: Only basic tests should pass
+   - Version 25.1+: All tests should pass
+   - The script will show a feature support matrix at the end
 
-3. **Version detection failures:**
-   - Check ClickHouse container logs
-   - Verify version string format
-   - Ensure container is fully started
+3. **All tests showing as failed:**
+   - Make sure you're using the correct bash version
+   - The script uses testcontainers - each test manages its own container
+   - Check that Docker is running and accessible
 
 ### Debug Mode
 

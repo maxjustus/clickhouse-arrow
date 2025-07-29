@@ -38,6 +38,10 @@ cargo test --test e2e_native --features "test-utils,derive"
 
 # Run with output visible
 cargo test --features test-utils -- --nocapture
+
+# Run multi-version tests (requires bash 4.0+)
+# On macOS: brew install bash && /opt/homebrew/bin/bash ./scripts/test-multi-version.sh
+./scripts/test-multi-version.sh
 ```
 
 ### Linting and Formatting
