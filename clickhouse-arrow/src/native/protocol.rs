@@ -196,7 +196,6 @@ pub(crate) enum ServerPacket<T = Block> {
 pub(crate) struct ServerHello {
     #[expect(unused)]
     pub(crate) server_name:      String,
-    #[expect(unused)]
     pub(crate) version:          (u64, u64, u64),
     pub(crate) revision_version: u64,
     #[expect(unused)]

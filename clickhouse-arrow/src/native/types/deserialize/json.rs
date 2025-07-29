@@ -116,7 +116,7 @@ impl Deserializer for JsonDeserializer {
     ) -> Result<()> {
         // Read the JSON serialization version as bytes for debugging
         let mut version_bytes = [0u8; 8];
-        reader.read_exact(&mut version_bytes).await?;
+        let _ = reader.read_exact(&mut version_bytes).await?;
         let version = u64::from_le_bytes(version_bytes);
 
         // Store the version for use in the read phase
