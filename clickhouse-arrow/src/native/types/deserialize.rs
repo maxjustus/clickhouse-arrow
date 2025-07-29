@@ -1,4 +1,5 @@
 pub(crate) mod array;
+pub(crate) mod dynamic;
 pub(crate) mod geo;
 pub(crate) mod low_cardinality;
 pub(crate) mod map;
@@ -8,7 +9,6 @@ pub(crate) mod sized;
 pub(crate) mod string;
 pub(crate) mod tuple;
 pub(crate) mod variant;
-pub(crate) mod dynamic;
 
 use super::low_cardinality::LOW_CARDINALITY_VERSION;
 use super::*;
@@ -97,10 +97,9 @@ impl ClickHouseNativeDeserializer for Type {
                 Type::Variant(_) => {
                     variant::VariantDeserializer::read_prefix(self, reader, state).await?;
                 }
-                // TODO: Dynamic type not yet implemented
-                // Type::Dynamic(_) => {
-                //     dynamic::DynamicDeserializer::read_prefix(self, reader, state).await?;
-                // }
+                Type::Dynamic => {
+                    dynamic::DynamicDeserializer::read_prefix(self, reader, state).await?;
+                }
             }
             Ok(())
         }
@@ -138,11 +137,13 @@ impl ClickHouseNativeDeserializer for Type {
             Type::Variant(_) => {
                 variant::VariantDeserializer::read_prefix_sync(self, reader)?;
             }
-            // TODO: Dynamic type not yet implemented
-            // Type::Dynamic(_) => {
-            //     use crate::native::types::deserialize::dynamic::DynamicDeserializer;
-            //     DynamicDeserializer::read_prefix_sync(self, reader, &mut DeserializerState::default())?;
-            // }
+            Type::Dynamic => {
+                dynamic::DynamicDeserializer::read_prefix_sync(
+                    self,
+                    reader,
+                    &mut DeserializerState::default(),
+                )?;
+            }
             _ => {}
         }
         Ok(())
@@ -493,17 +494,14 @@ impl FromStr for Type {
                     let args = parse_variable_args(following)?;
                     if args.is_empty() {
                         return Err(Error::TypeParseError(
-                            "Variant expects at least one type argument".to_string()
+                            "Variant expects at least one type argument".to_string(),
                         ));
                     }
                     let inner: Vec<Type> =
                         args.into_iter().map(Type::from_str).collect::<Result<_, _>>()?;
                     Type::Variant(inner)
                 }
-                "Dynamic" => {
-                    // TODO: Dynamic type not yet implemented
-                    return Err(Error::TypeParseError("Dynamic type not yet implemented".to_string()));
-                }
+                "Dynamic" => Type::Dynamic,
                 // Unsupported
                 "Nested" => {
                     return Err(Error::TypeParseError("unsupported Nested type".to_string()));
@@ -544,7 +542,7 @@ impl FromStr for Type {
             "Polygon" => Type::Polygon,
             "MultiPolygon" => Type::MultiPolygon,
             "Object" | "Json" | "OBJECT" | "JSON" => Type::Object,
-            "Dynamic" => return Err(Error::TypeParseError("Dynamic type not yet implemented".to_string())),
+            "Dynamic" => Type::Dynamic,
             _ => {
                 return Err(Error::TypeParseError(format!("invalid type name: '{ident}'")));
             }
@@ -972,7 +970,7 @@ mod tests {
             Type::Variant(types) => {
                 assert_eq!(types.len(), 2);
                 assert_eq!(types[0], Type::String);
-                
+
                 // Check the nested variant
                 match &types[1] {
                     Type::Variant(inner_types) => {
@@ -990,18 +988,19 @@ mod tests {
     /// Tests parsing of deeply nested Variant types
     #[test]
     fn test_parse_deeply_nested_variant() {
-        let variant = Type::from_str("Variant(String, Variant(UInt64, Variant(Date, Float32)))").unwrap();
+        let variant =
+            Type::from_str("Variant(String, Variant(UInt64, Variant(Date, Float32)))").unwrap();
         match variant {
             Type::Variant(types) => {
                 assert_eq!(types.len(), 2);
                 assert_eq!(types[0], Type::String);
-                
+
                 // Check the first level nested variant
                 match &types[1] {
                     Type::Variant(inner_types) => {
                         assert_eq!(inner_types.len(), 2);
                         assert_eq!(inner_types[0], Type::UInt64);
-                        
+
                         // Check the second level nested variant
                         match &inner_types[1] {
                             Type::Variant(deep_types) => {
@@ -1028,14 +1027,14 @@ mod tests {
             Type::Variant(types) => {
                 assert_eq!(types.len(), 3);
                 assert_eq!(types[0], Type::String);
-                
+
                 match &types[1] {
                     Type::Array(inner) => {
                         assert_eq!(**inner, Type::UInt64);
                     }
                     _ => panic!("Expected Array type"),
                 }
-                
+
                 match &types[2] {
                     Type::Nullable(inner) => {
                         assert_eq!(**inner, Type::Date);
@@ -1055,7 +1054,7 @@ mod tests {
             Type::Variant(types) => {
                 assert_eq!(types.len(), 2);
                 assert_eq!(types[0], Type::String);
-                
+
                 match &types[1] {
                     Type::Tuple(inner_types) => {
                         assert_eq!(inner_types.len(), 2);
@@ -1077,7 +1076,7 @@ mod tests {
             Type::Variant(types) => {
                 assert_eq!(types.len(), 2);
                 assert_eq!(types[0], Type::String);
-                
+
                 match &types[1] {
                     Type::Map(key, value) => {
                         assert_eq!(**key, Type::String);
@@ -1093,32 +1092,34 @@ mod tests {
     /// Tests parsing of a complex nested Variant with multiple levels
     #[test]
     fn test_parse_complex_nested_variant() {
-        let variant = Type::from_str("Variant(String, Array(Variant(UInt64, Nullable(Date))), Map(String, Variant(Float32, Bool)))").unwrap();
+        let variant = Type::from_str(
+            "Variant(String, Array(Variant(UInt64, Nullable(Date))), Map(String, Variant(Float32, \
+             Bool)))",
+        )
+        .unwrap();
         match variant {
             Type::Variant(types) => {
                 assert_eq!(types.len(), 3);
                 assert_eq!(types[0], Type::String);
-                
+
                 // Check Array of Variant
                 match &types[1] {
-                    Type::Array(inner) => {
-                        match &**inner {
-                            Type::Variant(var_types) => {
-                                assert_eq!(var_types.len(), 2);
-                                assert_eq!(var_types[0], Type::UInt64);
-                                match &var_types[1] {
-                                    Type::Nullable(nullable_inner) => {
-                                        assert_eq!(**nullable_inner, Type::Date);
-                                    }
-                                    _ => panic!("Expected Nullable type"),
+                    Type::Array(inner) => match &**inner {
+                        Type::Variant(var_types) => {
+                            assert_eq!(var_types.len(), 2);
+                            assert_eq!(var_types[0], Type::UInt64);
+                            match &var_types[1] {
+                                Type::Nullable(nullable_inner) => {
+                                    assert_eq!(**nullable_inner, Type::Date);
                                 }
+                                _ => panic!("Expected Nullable type"),
                             }
-                            _ => panic!("Expected Variant type inside Array"),
                         }
-                    }
+                        _ => panic!("Expected Variant type inside Array"),
+                    },
                     _ => panic!("Expected Array type"),
                 }
-                
+
                 // Check Map with Variant value
                 match &types[2] {
                     Type::Map(key, value) => {

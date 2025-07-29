@@ -71,9 +71,7 @@ pub async fn round_trip<T: Row + std::fmt::Debug + PartialEq + Clone + Send + Sy
     // Create table
     let query_id = Qid::new();
     header(query_id, format!("Creating table: {db_name}.{table_name}"));
-    client
-        .create_table::<T>(Some(&db_name), &table_name, options, Some(table_qid))
-        .await?;
+    client.create_table::<T>(Some(&db_name), &table_name, options, Some(table_qid)).await?;
 
     // Insert data
     let query_id = Qid::new();
@@ -149,7 +147,7 @@ pub async fn test_variant_round_trip(ch: Arc<ClickHouseContainer>) {
         .build()
         .await
         .expect("Building client");
-    
+
     let test_data = generate_variant_test_block();
     round_trip(client, test_data, &options)
         .await

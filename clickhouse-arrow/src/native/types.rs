@@ -82,7 +82,7 @@ pub enum Type {
     Tuple(Vec<Type>),
     Map(Box<Type>, Box<Type>),
     Variant(Vec<Type>),
-    // TODO: Dynamic(u8), // max_types parameter (0-254) - Dynamic type not yet implemented
+    Dynamic,
 
     Object,
 }
@@ -230,7 +230,7 @@ impl Type {
             Type::Nullable(_) => Value::Null,
             Type::Map(_, _) => Value::Map(vec![], vec![]),
             Type::Variant(_) => Value::Null, // Default variant value is NULL
-            // TODO: Type::Dynamic(_) => Value::Null, // Default dynamic value is NULL - Dynamic type not yet implemented
+            Type::Dynamic => Value::Null,    // Default dynamic value is NULL
             Type::Point => Value::Point(Point::default()),
             Type::Ring => Value::Ring(Ring::default()),
             Type::Polygon => Value::Polygon(Polygon::default()),
@@ -315,7 +315,7 @@ impl Display for Type {
                 "Variant({})",
                 items.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
             ),
-            // TODO: Type::Dynamic(max_types) => { ... } - Dynamic type not yet implemented
+            Type::Dynamic => write!(f, "Dynamic"),
             Type::Object => write!(f, "Object"), // TODO: JSON type alias
         }
     }
@@ -389,9 +389,12 @@ impl Type {
                         .await?
                 }
                 Type::Object => object::ObjectDeserializer::read(self, reader, rows, state).await?,
-                Type::Variant(_) => variant::VariantDeserializer::read_async(self, reader, rows, state).await?,
-                // TODO: Dynamic type not yet implemented
-                // Type::Dynamic(_) => dynamic::DynamicDeserializer::read_async(self, reader, rows, state).await?,
+                Type::Variant(_) => {
+                    variant::VariantDeserializer::read_async(self, reader, rows, state).await?
+                }
+                Type::Dynamic => {
+                    dynamic::DynamicDeserializer::read_async(self, reader, rows, state).await?
+                }
             })
         }
         .boxed()
@@ -460,10 +463,7 @@ impl Type {
             }
             Type::Object => object::ObjectDeserializer::read_sync(self, reader, rows, state)?,
             Type::Variant(_) => variant::VariantDeserializer::read_sync(self, reader, rows, state)?,
-            // TODO: Dynamic type not yet implemented
-            // Type::Dynamic(_) => {
-            //     dynamic::DynamicDeserializer::read_sync(self, reader, rows, state)?
-            // },
+            Type::Dynamic => dynamic::DynamicDeserializer::read_sync(self, reader, rows, state)?,
         })
     }
 
@@ -536,11 +536,14 @@ impl Type {
                 Type::Object => {
                     object::ObjectSerializer::write(self, values, writer, state).await?;
                 }
-                Type::Variant(_) => variant::VariantSerializer::write(self, values, writer, state).await?
-                // TODO: Dynamic type not yet implemented
-                // Type::Dynamic(_) => {
-                //     todo!("Dynamic serialization not implemented");
-                // }
+                Type::Variant(_) => {
+                    variant::VariantSerializer::write(self, values, writer, state).await?
+                }
+                Type::Dynamic => {
+                    return Err(Error::SerializeError(
+                        "Dynamic serialization not yet implemented".to_string(),
+                    ));
+                }
             }
             Ok(())
         }
@@ -611,11 +614,14 @@ impl Type {
             Type::Object => {
                 object::ObjectSerializer::write_sync(self, values, writer, state)?;
             }
-            Type::Variant(_) => variant::VariantSerializer::write_sync(self, values, writer, state)?
-            // TODO: Dynamic type not yet implemented
-            // Type::Dynamic(_) => {
-            //     todo!("Dynamic sync serialization not implemented");
-            // }
+            Type::Variant(_) => {
+                variant::VariantSerializer::write_sync(self, values, writer, state)?
+            }
+            Type::Dynamic => {
+                return Err(Error::SerializeError(
+                    "Dynamic sync serialization not yet implemented".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -742,22 +748,15 @@ impl Type {
             Type::Variant(inner) => {
                 if inner.is_empty() {
                     return Err(Error::TypeParseError(
-                        "Variant must have at least one type".to_string()
+                        "Variant must have at least one type".to_string(),
                     ));
                 }
                 for inner_type in inner {
                     inner_type.validate()?;
                 }
             }
-            // TODO: Dynamic type not yet implemented
-            // Type::Dynamic(max_types) => {
-            //     if *max_types == 0 {
-            //         return Err(Error::TypeParseError(
-            //             "Dynamic max_types must be greater than 0".to_string()
-            //         ));
-            //     }
-            // }
-            // TODO: Add Object
+            Type::Dynamic => {} // No validation needed for Dynamic
+            Type::Object => {}  // No validation needed for Object
             _ => {}
         }
         Ok(())
@@ -840,13 +839,13 @@ impl Type {
                 if *discriminator == 0xFF {
                     return matches!(**val, Value::Null);
                 }
-                
+
                 // Build discriminator map to check if discriminator is valid
                 let discriminator_map = match deserialize::variant::DiscriminatorMap::new(types) {
                     Ok(map) => map,
                     Err(_) => return false,
                 };
-                
+
                 // Check if discriminator maps to a valid type and value matches that type
                 if let Some(expected_type) = discriminator_map.get_type(*discriminator) {
                     expected_type.inner_validate_value(val)
@@ -855,9 +854,7 @@ impl Type {
                 }
             }
             (Type::Variant(_), Value::Null) => true, // NULL is valid for Variant
-            // TODO: Dynamic type not yet implemented
-            // (Type::Dynamic(_), Value::Dynamic(_, _)) => true, // TODO: More detailed validation
-            // (Type::Dynamic(_), Value::Null) => true, // NULL is valid for Dynamic
+            (Type::Dynamic, _) => true,              // Dynamic accepts any value
             _ => false,
         }
     }
@@ -899,12 +896,11 @@ impl Type {
                 };
                 1 + avg_capacity
             }
-            // TODO: Dynamic type not yet implemented
-            // Type::Dynamic(_) => {
-            //     // 1 byte for discriminator + some estimated capacity for dynamic data
-            //     // This is a rough estimate since Dynamic can contain any type
-            //     1 + 32
-            // }
+            Type::Dynamic => {
+                // Variable discriminator size + some estimated capacity for dynamic data
+                // This is a rough estimate since Dynamic can contain any type
+                4 + 32
+            }
 
             // Placeholder for unsupported types
             _ => 64, // Default to 8 bytes as a safe estimate

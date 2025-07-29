@@ -73,7 +73,6 @@ struct Args {
     /// Output format: json, pretty
     #[arg(long, default_value = "json")]
     format: String,
-
 }
 
 #[derive(Serialize, Deserialize)]

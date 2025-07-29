@@ -295,20 +295,16 @@ pub fn generate_test_block() -> Vec<TestRowAll> {
 #[cfg_attr(feature = "derive", derive(Row))]
 #[cfg_attr(feature = "derive", clickhouse_arrow(schema = get_variant_schema))]
 pub struct TestRowVariant {
-    id: u64,
-    simple_variant: Value,      // Variant(String, UInt64)
-    complex_variant: Value,     // Variant(Array(String), UUID, Tuple(String, UInt64))
-    multi_type_variant: Value,  // Variant(String, UInt64, Float64, Array(UInt8))
+    id:                 u64,
+    simple_variant:     Value, // Variant(String, UInt64)
+    complex_variant:    Value, // Variant(Array(String), UUID, Tuple(String, UInt64))
+    multi_type_variant: Value, // Variant(String, UInt64, Float64, Array(UInt8))
 }
 
 pub fn get_variant_schema() -> Vec<ColumnDefinition> {
     vec![
         ("id".to_string(), Type::UInt64, None),
-        (
-            "simple_variant".to_string(),
-            Type::Variant(vec![Type::String, Type::UInt64]),
-            None,
-        ),
+        ("simple_variant".to_string(), Type::Variant(vec![Type::String, Type::UInt64]), None),
         (
             "complex_variant".to_string(),
             Type::Variant(vec![
@@ -335,44 +331,40 @@ pub fn generate_variant_test_block() -> Vec<TestRowVariant> {
     vec![
         // Test different variant types
         TestRowVariant {
-            id: 1,
-            simple_variant: Value::Variant(0, Box::new(Value::String(b"hello".to_vec()))), // String (discriminator 0)
-            complex_variant: Value::Variant(
+            id:                 1,
+            simple_variant:     Value::Variant(0, Box::new(Value::String(b"hello".to_vec()))), /* String (discriminator 0) */
+            complex_variant:    Value::Variant(
                 0,
                 Box::new(Value::Array(vec![
                     Value::String(b"a".to_vec()),
                     Value::String(b"b".to_vec()),
                 ])),
-            ), // Array(String) (discriminator 0)
-            multi_type_variant: Value::Variant(1, Box::new(Value::Float64(3.14))), // Float64 (discriminator 1)
+            ), /* Array(String) (discriminator 0) */
+            multi_type_variant: Value::Variant(1, Box::new(Value::Float64(3.14))), /* Float64 (discriminator 1) */
         },
         TestRowVariant {
-            id: 2,
-            simple_variant: Value::Variant(1, Box::new(Value::UInt64(123))), // UInt64
-            complex_variant: Value::Variant(2, Box::new(Value::Uuid(Uuid::new_v4()))), // UUID (discriminator 2)
-            multi_type_variant: Value::Variant(0, Box::new(Value::Array(vec![
-                Value::UInt8(1),
-                Value::UInt8(2),
-                Value::UInt8(3),
-            ]))), // Array(UInt8)
+            id:                 2,
+            simple_variant:     Value::Variant(1, Box::new(Value::UInt64(123))), // UInt64
+            complex_variant:    Value::Variant(2, Box::new(Value::Uuid(Uuid::new_v4()))), /* UUID (discriminator 2) */
+            multi_type_variant: Value::Variant(
+                0,
+                Box::new(Value::Array(vec![Value::UInt8(1), Value::UInt8(2), Value::UInt8(3)])),
+            ), /* Array(UInt8) */
         },
         TestRowVariant {
-            id: 3,
-            simple_variant: Value::Variant(0, Box::new(Value::String(b"world".to_vec()))), // String
-            complex_variant: Value::Variant(
+            id:                 3,
+            simple_variant:     Value::Variant(0, Box::new(Value::String(b"world".to_vec()))), /* String */
+            complex_variant:    Value::Variant(
                 1,
-                Box::new(Value::Tuple(vec![
-                    Value::String(b"test".to_vec()),
-                    Value::UInt64(42),
-                ])),
-            ), // Tuple (discriminator 1)
-            multi_type_variant: Value::Variant(2, Box::new(Value::String(b"test".to_vec()))), // String
+                Box::new(Value::Tuple(vec![Value::String(b"test".to_vec()), Value::UInt64(42)])),
+            ), /* Tuple (discriminator 1) */
+            multi_type_variant: Value::Variant(2, Box::new(Value::String(b"test".to_vec()))), /* String */
         },
         // Test NULL variant values
         TestRowVariant {
-            id: 4,
-            simple_variant: Value::Variant(0xFF, Box::new(Value::Null)), // NULL variant
-            complex_variant: Value::Variant(0xFF, Box::new(Value::Null)), // NULL variant
+            id:                 4,
+            simple_variant:     Value::Variant(0xFF, Box::new(Value::Null)), // NULL variant
+            complex_variant:    Value::Variant(0xFF, Box::new(Value::Null)), // NULL variant
             multi_type_variant: Value::Variant(3, Box::new(Value::UInt64(999))), // UInt64
         },
     ]

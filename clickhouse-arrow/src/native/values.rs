@@ -77,10 +77,10 @@ pub enum Value {
     Null,
 
     Map(Vec<Value>, Vec<Value>),
-    
-    Variant(u8, Box<Value>), // discriminator and value
-    // TODO: Dynamic(String, Box<Value>), // type_name and value - Dynamic type not yet implemented
 
+    Variant(u8, Box<Value>), // discriminator and value
+    // TODO: Dynamic(String, Box<Value>), // type_name and value - Dynamic type not yet
+    // implemented
     Ipv4(Ipv4),
     Ipv6(Ipv6),
 
@@ -132,7 +132,8 @@ impl PartialEq for Value {
             (Self::Ring(l0), Self::Ring(r0)) => l0 == r0,
             (Self::Polygon(l0), Self::Polygon(r0)) => l0 == r0,
             (Self::MultiPolygon(l0), Self::MultiPolygon(r0)) => l0 == r0,
-            // TODO: (Self::Dynamic(l_type, l_val), Self::Dynamic(r_type, r_val)) => l_type == r_type && l_val == r_val, - Dynamic type not yet implemented
+            // TODO: (Self::Dynamic(l_type, l_val), Self::Dynamic(r_type, r_val)) => l_type ==
+            // r_type && l_val == r_val, - Dynamic type not yet implemented
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
     }

@@ -391,6 +391,11 @@ impl ClickHouseArrowDeserializer for Type {
             Type::Variant(_) => {
                 todo!("Variant deserialization not yet implemented");
             }
+            Type::Dynamic => {
+                // Dynamic is not directly representable in Arrow
+                // Return empty Binary array as placeholder
+                Arc::new(BinaryArray::from(vec![] as Vec<Option<&[u8]>>))
+            }
             // TODO: Dynamic type not yet implemented
             // Type::Dynamic(_) => {
             //     todo!("Dynamic deserialization not yet implemented");

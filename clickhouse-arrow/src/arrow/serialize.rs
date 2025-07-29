@@ -177,8 +177,10 @@ impl ClickHouseArrowSerializer for Type {
             // Null stripped above
             Type::Nullable(_) => unreachable!(),
             Type::Variant(_) => todo!("Arrow async serialization for Variant not yet implemented"),
+            Type::Dynamic => todo!("Arrow async serialization for Dynamic not yet implemented"),
             // TODO: Dynamic type not yet implemented
-            // Type::Dynamic(_) => todo!("Arrow async serialization for Dynamic not yet implemented"),
+            // Type::Dynamic(_) => todo!("Arrow async serialization for Dynamic not yet
+            // implemented"),
         }
 
         Ok(())
@@ -263,8 +265,10 @@ impl ClickHouseArrowSerializer for Type {
             // Null stripped above
             Type::Nullable(_) => unreachable!(),
             Type::Variant(_) => todo!("Arrow sync serialization for Variant not yet implemented"),
+            Type::Dynamic => todo!("Arrow sync serialization for Dynamic not yet implemented"),
             // TODO: Dynamic type not yet implemented
-            // Type::Dynamic(_) => todo!("Arrow sync serialization for Dynamic not yet implemented"),
+            // Type::Dynamic(_) => todo!("Arrow sync serialization for Dynamic not yet
+            // implemented"),
         }
 
         Ok(())

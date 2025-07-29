@@ -23,11 +23,8 @@ impl ClickHouseClient {
         secure: bool,
         compression: &str,
     ) -> Result<Self> {
-        let endpoint = if secure {
-            format!("https://{host}:{port}")
-        } else {
-            format!("{host}:{port}")
-        };
+        let endpoint =
+            if secure { format!("https://{host}:{port}") } else { format!("{host}:{port}") };
 
         let mut builder = ClientBuilder::new()
             .with_endpoint(&endpoint)
@@ -42,7 +39,6 @@ impl ClickHouseClient {
             "none" => builder = builder.with_compression(CompressionMethod::None),
             _ => return Err(anyhow::anyhow!("Unsupported compression: {}", compression)),
         }
-
 
         let client = builder.build_native().await.context("Failed to build ClickHouse client")?;
 
@@ -109,7 +105,6 @@ impl ClickHouseClient {
         let values_str = values_parts.join(", ");
         let insert_query = format!("INSERT INTO {table} ({columns_str}) VALUES {values_str}");
 
-
         // Execute the insert
         let mut stream = self
             .client
@@ -131,7 +126,6 @@ impl ClickHouseClient {
     pub async fn get_server_info(&self) -> Result<Value> {
         let query = "SELECT version(), uptime()";
 
-
         let mut stream = self
             .client
             .query_raw(query.to_string(), None::<HashMap<String, String>>, Qid::default())
@@ -140,7 +134,6 @@ impl ClickHouseClient {
 
         if let Some(block_result) = stream.next().await {
             let block = block_result.context("Failed to read server info block")?;
-
 
             let json_result = block_to_json(block)?;
 
@@ -155,8 +148,6 @@ impl ClickHouseClient {
 fn block_to_json(block: clickhouse_arrow::native::block::Block) -> Result<Value> {
     let mut result_rows = Vec::new();
     let rows = block.rows as usize;
-    
-
 
     if rows == 0 {
         return Ok(Value::Array(vec![]));
@@ -165,27 +156,23 @@ fn block_to_json(block: clickhouse_arrow::native::block::Block) -> Result<Value>
     // Extract column names and types
     let column_info: Vec<_> = block.column_types.iter().collect();
 
-
     // Convert columnar data to row-based JSON
-    // The block.column_data contains all values flattened: 
+    // The block.column_data contains all values flattened:
     // for each column, it has `rows` consecutive values
     for row_idx in 0..rows {
         let mut json_row = serde_json::Map::new();
 
         for (column_name, _column_type) in column_info.iter() {
             // Get the value for this column and row
-            let column_start = column_info.iter().position(|(name, _)| name == column_name).unwrap() * rows;
+            let column_start =
+                column_info.iter().position(|(name, _)| name == column_name).unwrap() * rows;
             let value_idx = column_start + row_idx;
-            
+
             if value_idx < block.column_data.len() {
                 let value = clickhouse_value_to_json(block.column_data[value_idx].clone())?;
                 json_row.insert(column_name.clone(), value);
             } else {
-                tracing::warn!(
-                    "Missing data for column {} row {}",
-                    column_name,
-                    row_idx
-                );
+                tracing::warn!("Missing data for column {} row {}", column_name, row_idx);
                 json_row.insert(column_name.clone(), Value::Null);
             }
         }
