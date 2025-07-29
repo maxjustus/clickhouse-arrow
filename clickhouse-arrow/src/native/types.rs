@@ -540,9 +540,7 @@ impl Type {
                     variant::VariantSerializer::write(self, values, writer, state).await?
                 }
                 Type::Dynamic => {
-                    return Err(Error::SerializeError(
-                        "Dynamic serialization not yet implemented".to_string(),
-                    ));
+                    dynamic::DynamicSerializer::write(self, &values, writer, state).await?
                 }
             }
             Ok(())
@@ -618,9 +616,7 @@ impl Type {
                 variant::VariantSerializer::write_sync(self, values, writer, state)?
             }
             Type::Dynamic => {
-                return Err(Error::SerializeError(
-                    "Dynamic sync serialization not yet implemented".to_string(),
-                ));
+                dynamic::DynamicSerializer::write_sync(self, &values, writer, state)?
             }
         }
         Ok(())

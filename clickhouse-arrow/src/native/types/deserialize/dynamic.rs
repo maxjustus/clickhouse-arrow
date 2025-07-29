@@ -116,11 +116,13 @@ impl DynamicDeserializer {
 
         // Read type names and create types
         let mut types = Vec::with_capacity(total_types as usize);
-        for _ in 0..total_types {
+        for i in 0..total_types {
             let type_name_bytes = reader.read_string().await?;
+            eprintln!("DEBUG v3: Read type name bytes[{}]: {:?}", i, type_name_bytes);
             let type_name = String::from_utf8(type_name_bytes).map_err(|e| {
                 crate::Error::DeserializeError(format!("Invalid UTF-8 in type name: {}", e))
             })?;
+            eprintln!("DEBUG v3: Parsed type name[{}]: '{}'", i, type_name);
             let typ = type_name.parse::<Type>().map_err(|_| {
                 crate::Error::DeserializeError(format!("Unknown type: {}", type_name))
             })?;
@@ -142,6 +144,7 @@ impl DynamicDeserializer {
     ) -> Result<()> {
         // Read serialization version
         let version = reader.read_u64_le().await?;
+        eprintln!("DEBUG: Dynamic serialization version: {}", version);
 
         // Store version and header info in state for use during data reading
         match version {

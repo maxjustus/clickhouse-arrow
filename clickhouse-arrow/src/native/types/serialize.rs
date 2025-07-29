@@ -1,4 +1,5 @@
 pub(crate) mod array;
+pub(crate) mod dynamic;
 pub(crate) mod geo;
 pub(crate) mod low_cardinality;
 pub(crate) mod map;
@@ -94,10 +95,7 @@ impl ClickHouseNativeSerializer for Type {
                     variant::VariantSerializer::write_prefix(self, writer, state).await?
                 }
                 Type::Dynamic => {
-                    // TODO: Dynamic serialization not yet implemented
-                    return Err(Error::SerializeError(
-                        "Dynamic serialization not yet implemented".to_string(),
-                    ));
+                    dynamic::DynamicSerializer::write_prefix(self, writer, state).await?
                 } /* TODO: Dynamic type not yet implemented
                    * Type::Dynamic(_) => {
                    *     todo!("Dynamic prefix serialization not implemented");
@@ -138,6 +136,10 @@ impl ClickHouseNativeSerializer for Type {
             }
             Type::Variant(_) => {
                 variant::VariantSerializer::write_sync_prefix(self, writer, state).unwrap();
+                return;
+            }
+            Type::Dynamic => {
+                dynamic::DynamicSerializer::write_prefix_sync(self, writer, state).unwrap();
                 return;
             }
             _ => return,
