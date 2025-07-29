@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 use tokio::io::AsyncWriteExt;
@@ -7,6 +8,19 @@ use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
 use crate::{Error, Result, Value};
 
 pub(crate) struct JsonSerializer;
+
+/// Cache for JSON type metadata during serialization
+#[derive(Debug, Default)]
+struct JsonSerializationCache {
+    paths:        Vec<String>,
+    path_columns: BTreeMap<String, Vec<Value>>,
+    rows:         usize,
+}
+
+// Thread-local cache for JSON type metadata
+thread_local! {
+    static JSON_CACHE: RefCell<Option<JsonSerializationCache>> = RefCell::new(None);
+}
 
 // JSON serialization versions from ClickHouse
 const JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION: u64 = 0;
@@ -335,6 +349,22 @@ impl JsonSerializer {
 }
 
 impl JsonSerializer {
+    /// Analyze JSON values and cache metadata for use in write_prefix
+    pub(crate) fn analyze_values(values: &[Value]) -> Result<()> {
+        // Parse JSON values into path-organized structure
+        let json_data = JsonData::from_values(values.to_vec())?;
+        
+        // Cache the metadata
+        let cache = JsonSerializationCache {
+            paths: json_data.path_columns.keys().cloned().collect(),
+            path_columns: json_data.path_columns,
+            rows: json_data.rows,
+        };
+        
+        JSON_CACHE.with(|c| *c.borrow_mut() = Some(cache));
+        Ok(())
+    }
+
     /// Check if server supports flat Dynamic/JSON serialization (v3)
     fn supports_flat_dynamic_json(state: &SerializerState) -> bool {
         if let Some((major, minor, _)) = state.server_version {

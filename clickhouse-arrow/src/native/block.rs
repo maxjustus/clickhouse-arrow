@@ -212,6 +212,12 @@ impl ProtocolData<Self, ()> for Block {
                     DynamicSerializer::analyze_values(&values)?;
                 }
 
+                // For JSON type, we need to analyze values before writing prefix
+                if matches!(type_, Type::JSON) {
+                    use crate::native::types::serialize::json::JsonSerializer;
+                    JsonSerializer::analyze_values(&values)?;
+                }
+
                 type_.serialize_prefix_async(writer, &mut state).await?;
                 type_.serialize_column(values, writer, &mut state).await?;
             }
@@ -270,6 +276,12 @@ impl ProtocolData<Self, ()> for Block {
                 if matches!(type_, Type::Dynamic) {
                     use crate::native::types::serialize::dynamic::DynamicSerializer;
                     DynamicSerializer::analyze_values(&values)?;
+                }
+
+                // For JSON type, we need to analyze values before writing prefix
+                if matches!(type_, Type::JSON) {
+                    use crate::native::types::serialize::json::JsonSerializer;
+                    JsonSerializer::analyze_values(&values)?;
                 }
 
                 type_.serialize_prefix(writer, &mut state);
