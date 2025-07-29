@@ -146,6 +146,10 @@ impl ClickHouseNativeSerializer for Type {
                 dynamic::DynamicSerializer::write_prefix_sync(self, writer, state).unwrap();
                 return;
             }
+            Type::JSON => {
+                json::JsonSerializer::write_prefix_sync(self, writer, state).unwrap();
+                return;
+            }
             _ => return,
         };
         type_.serialize_prefix(writer, state);

@@ -881,8 +881,9 @@ mod tests {
             Type::from_str("Map(String, Int32)").unwrap(),
             Type::Map(Box::new(Type::String), Box::new(Type::Int32))
         );
-        assert_eq!(Type::from_str("JSON").unwrap(), Type::Object);
+        assert_eq!(Type::from_str("JSON").unwrap(), Type::JSON);
         assert_eq!(Type::from_str("Object").unwrap(), Type::Object);
+        assert_eq!(Type::from_str("Json").unwrap(), Type::Object);
 
         assert!(Type::from_str("LowCardinality()").is_err()); // Missing arg
         assert!(Type::from_str("Array(Int32, String)").is_err()); // Too many args

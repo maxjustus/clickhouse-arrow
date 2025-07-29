@@ -422,10 +422,27 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
     let expected_values = &generate_json_test_block().column_data;
     assert_eq!(received_values.len(), expected_values.len(), "Row count mismatch");
 
-    // Verify each value
+    // Verify each value - for JSON, parse and compare the JSON objects rather than raw strings
     for (i, (expected, received)) in expected_values.iter().zip(received_values.iter()).enumerate()
     {
-        assert_eq!(expected, received, "Value mismatch at index {}", i);
+        // Extract JSON strings from Value::String
+        let expected_str = match expected {
+            Value::String(bytes) => String::from_utf8(bytes.clone()).expect("Valid UTF-8"),
+            _ => panic!("Expected Value::String for expected"),
+        };
+
+        let received_str = match received {
+            Value::String(bytes) => String::from_utf8(bytes.clone()).expect("Valid UTF-8"),
+            _ => panic!("Expected Value::String for received"),
+        };
+
+        // Parse both as JSON to compare semantically rather than textually
+        let expected_json: serde_json::Value =
+            serde_json::from_str(&expected_str).expect("Expected value should be valid JSON");
+        let received_json: serde_json::Value =
+            serde_json::from_str(&received_str).expect("Received value should be valid JSON");
+
+        assert_eq!(expected_json, received_json, "JSON value mismatch at index {}", i);
     }
 
     header(query_id, format!("Dropping table {table_name}"));

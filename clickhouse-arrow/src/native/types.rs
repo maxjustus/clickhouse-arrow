@@ -398,9 +398,7 @@ impl Type {
                 Type::Dynamic => {
                     dynamic::DynamicDeserializer::read_async(self, reader, rows, state).await?
                 }
-                Type::JSON => {
-                    json::JsonDeserializer::read(self, reader, rows, state).await?
-                }
+                Type::JSON => json::JsonDeserializer::read(self, reader, rows, state).await?,
             })
         }
         .boxed()
@@ -548,9 +546,7 @@ impl Type {
                 Type::Dynamic => {
                     dynamic::DynamicSerializer::write(self, &values, writer, state).await?
                 }
-                Type::JSON => {
-                    json::JsonSerializer::write(self, values, writer, state).await?
-                }
+                Type::JSON => json::JsonSerializer::write(self, values, writer, state).await?,
             }
             Ok(())
         }
