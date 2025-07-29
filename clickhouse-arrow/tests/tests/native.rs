@@ -21,6 +21,12 @@ struct DynamicRow {
     dynamic_col: Value,
 }
 
+// Helper struct for JSON queries
+#[derive(Debug, Clone, Row)]
+struct JsonRow {
+    json_col: Value,
+}
+
 // Helper struct for count queries
 #[derive(Debug, Clone, Row)]
 struct CountRow {
@@ -311,4 +317,122 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
         .expect("drop table failed");
 
     header(query_id, "Dynamic type test completed successfully");
+}
+
+/// # Panics
+pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
+    let native_url = ch.get_native_url();
+    debug!("ClickHouse Native URL: {native_url}");
+
+    header("native/json", "Testing JSON type round trip");
+
+    // Table create options
+    let _options = CreateOptions::new("MergeTree");
+
+    // Create ClientBuilder and ConnectionManager with v3 JSON format setting
+    let client: NativeClient = ClientBuilder::new()
+        .with_endpoint(native_url)
+        .with_username(&ch.user)
+        .with_password(&ch.password)
+        .with_ipv4_only(true)
+        .with_compression(CompressionMethod::None)
+        .with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1)
+        .build()
+        .await
+        .expect("Building client");
+
+    // Check if the server supports JSON type (requires 25.5+)
+    // We'll skip the test if the server is too old - since 24.x is still commonly used
+    let version_check_query = "SELECT version() as version";
+    let mut stream =
+        client.query::<VersionRow>(version_check_query, None).await.expect("version query failed");
+
+    if let Some(Ok(row)) = stream.next().await {
+        let version = row.version;
+        debug!("ClickHouse version: {}", version);
+        // Parse major.minor version
+        let parts: Vec<&str> = version.split('.').collect();
+        if parts.len() >= 2 {
+            if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                if major < 25 || (major == 25 && minor < 5) {
+                    warn!(
+                        "Skipping JSON type test - requires ClickHouse 25.5+ (found {})",
+                        version
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    // Test JSON type with direct block operations
+    let test_data = generate_json_test_block();
+
+    // Create a test table with JSON column
+    let query_id = "json_test";
+    let table_name = "test_json";
+
+    header(query_id, format!("Creating table with JSON column"));
+    client
+        .execute(&format!("DROP TABLE IF EXISTS {table_name}"), None)
+        .await
+        .expect("drop table failed");
+
+    client
+        .execute(&format!("CREATE TABLE {table_name} (json_col JSON) ENGINE = Memory"), None)
+        .await
+        .expect("create table failed");
+
+    header(query_id, "Inserting JSON data");
+    let insert_query = format!("INSERT INTO {table_name} VALUES");
+    let mut stream = client.insert(&insert_query, test_data, None).await.expect("insert failed");
+
+    while let Some(result) = stream.next().await {
+        result.expect("insert stream failed");
+    }
+
+    header(query_id, "Checking row count");
+    let count_query = format!("SELECT count() FROM {table_name}");
+    let mut count_stream =
+        client.query::<CountRow>(&count_query, None).await.expect("count query failed");
+
+    if let Some(Ok(row)) = count_stream.next().await {
+        assert!(row.count > 0, "Expected rows in table");
+    }
+
+    header(query_id, "Testing simple query first");
+    let simple_query = format!("SELECT 1 as num");
+    let mut simple_stream =
+        client.query::<SimpleRow>(&simple_query, None).await.expect("simple query failed");
+
+    if let Some(Ok(row)) = simple_stream.next().await {
+        assert_eq!(row.num, 1, "Simple query should return 1");
+    }
+
+    header(query_id, "Querying JSON data");
+    let query = format!("SELECT json_col FROM {table_name}");
+    let mut stream = client.query::<JsonRow>(&query, None).await.expect("query failed");
+
+    let mut received_values = Vec::new();
+    while let Some(Ok(row)) = stream.next().await {
+        received_values.push(row.json_col);
+    }
+
+    header(query_id, "Verifying JSON data");
+    let expected_values = &generate_json_test_block().column_data;
+    assert_eq!(received_values.len(), expected_values.len(), "Row count mismatch");
+
+    // Verify each value
+    for (i, (expected, received)) in expected_values.iter().zip(received_values.iter()).enumerate()
+    {
+        assert_eq!(expected, received, "Value mismatch at index {}", i);
+    }
+
+    header(query_id, format!("Dropping table {table_name}"));
+    client
+        .execute(&format!("DROP TABLE {table_name}"), None)
+        .await
+        .expect("drop table failed");
+
+    header(query_id, "JSON type test completed successfully");
 }

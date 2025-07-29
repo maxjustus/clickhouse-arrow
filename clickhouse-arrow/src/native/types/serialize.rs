@@ -1,6 +1,7 @@
 pub(crate) mod array;
 pub(crate) mod dynamic;
 pub(crate) mod geo;
+pub(crate) mod json;
 pub(crate) mod low_cardinality;
 pub(crate) mod map;
 pub(crate) mod nullable;
@@ -96,6 +97,9 @@ impl ClickHouseNativeSerializer for Type {
                 }
                 Type::Dynamic => {
                     dynamic::DynamicSerializer::write_prefix(self, writer, state).await?
+                }
+                Type::JSON => {
+                    json::JsonSerializer::write_prefix(self, writer, state).await?
                 } /* TODO: Dynamic type not yet implemented
                    * Type::Dynamic(_) => {
                    *     todo!("Dynamic prefix serialization not implemented");

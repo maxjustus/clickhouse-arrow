@@ -386,3 +386,19 @@ pub fn generate_dynamic_test_block() -> Block {
         column_data:  rows,
     }
 }
+
+pub fn generate_json_test_block() -> Block {
+    let rows = vec![
+        // Test simple types first for debugging
+        Value::Int32(42),
+        Value::String(b"hello".to_vec()),
+        Value::Float64(3.141_592_653_589_793),
+    ];
+
+    Block {
+        info:         Default::default(),
+        rows:         rows.len() as u64,
+        column_types: vec![("json_col".to_string(), Type::JSON)],
+        column_data:  rows,
+    }
+}

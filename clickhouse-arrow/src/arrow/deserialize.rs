@@ -396,6 +396,11 @@ impl ClickHouseArrowDeserializer for Type {
                 // Return empty Binary array as placeholder
                 Arc::new(BinaryArray::from(vec![] as Vec<Option<&[u8]>>))
             }
+            Type::JSON => {
+                // JSON uses same serialization as Dynamic
+                // Return empty Binary array as placeholder
+                Arc::new(BinaryArray::from(vec![] as Vec<Option<&[u8]>>))
+            }
             // TODO: Dynamic type not yet implemented
             // Type::Dynamic(_) => {
             //     todo!("Dynamic deserialization not yet implemented");

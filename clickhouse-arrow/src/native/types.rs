@@ -83,6 +83,7 @@ pub enum Type {
     Map(Box<Type>, Box<Type>),
     Variant(Vec<Type>),
     Dynamic,
+    JSON,
 
     Object,
 }
@@ -231,6 +232,7 @@ impl Type {
             Type::Map(_, _) => Value::Map(vec![], vec![]),
             Type::Variant(_) => Value::Null, // Default variant value is NULL
             Type::Dynamic => Value::Null,    // Default dynamic value is NULL
+            Type::JSON => Value::Null,       // Default JSON value is NULL
             Type::Point => Value::Point(Point::default()),
             Type::Ring => Value::Ring(Ring::default()),
             Type::Polygon => Value::Polygon(Polygon::default()),
@@ -316,6 +318,7 @@ impl Display for Type {
                 items.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
             ),
             Type::Dynamic => write!(f, "Dynamic"),
+            Type::JSON => write!(f, "JSON"),
             Type::Object => write!(f, "Object"), // TODO: JSON type alias
         }
     }
@@ -395,6 +398,9 @@ impl Type {
                 Type::Dynamic => {
                     dynamic::DynamicDeserializer::read_async(self, reader, rows, state).await?
                 }
+                Type::JSON => {
+                    json::JsonDeserializer::read(self, reader, rows, state).await?
+                }
             })
         }
         .boxed()
@@ -463,6 +469,7 @@ impl Type {
             Type::Object => object::ObjectDeserializer::read_sync(self, reader, rows, state)?,
             Type::Variant(_) => variant::VariantDeserializer::read_sync(self, reader, rows, state)?,
             Type::Dynamic => dynamic::DynamicDeserializer::read_sync(self, reader, rows, state)?,
+            Type::JSON => json::JsonDeserializer::read_sync(self, reader, rows, state)?,
         })
     }
 
@@ -541,6 +548,9 @@ impl Type {
                 Type::Dynamic => {
                     dynamic::DynamicSerializer::write(self, &values, writer, state).await?
                 }
+                Type::JSON => {
+                    json::JsonSerializer::write(self, values, writer, state).await?
+                }
             }
             Ok(())
         }
@@ -615,6 +625,7 @@ impl Type {
                 variant::VariantSerializer::write_sync(self, values, writer, state)?
             }
             Type::Dynamic => dynamic::DynamicSerializer::write_sync(self, &values, writer, state)?,
+            Type::JSON => json::JsonSerializer::write_sync(self, values, writer, state)?,
         }
         Ok(())
     }
@@ -749,6 +760,7 @@ impl Type {
                 }
             }
             Type::Dynamic => {} // No validation needed for Dynamic
+            Type::JSON => {}    // No validation needed for JSON
             Type::Object => {}  // No validation needed for Object
             _ => {}
         }

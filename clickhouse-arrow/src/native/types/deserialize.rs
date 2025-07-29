@@ -1,6 +1,7 @@
 pub(crate) mod array;
 pub(crate) mod dynamic;
 pub(crate) mod geo;
+pub(crate) mod json;
 pub(crate) mod low_cardinality;
 pub(crate) mod map;
 pub(crate) mod nullable;
@@ -99,6 +100,9 @@ impl ClickHouseNativeDeserializer for Type {
                 }
                 Type::Dynamic => {
                     dynamic::DynamicDeserializer::read_prefix(self, reader, state).await?;
+                }
+                Type::JSON => {
+                    json::JsonDeserializer::read_prefix(self, reader, state).await?;
                 }
             }
             Ok(())
@@ -541,7 +545,8 @@ impl FromStr for Type {
             "Ring" => Type::Ring,
             "Polygon" => Type::Polygon,
             "MultiPolygon" => Type::MultiPolygon,
-            "Object" | "Json" | "OBJECT" | "JSON" => Type::Object,
+            "Object" | "Json" | "OBJECT" => Type::Object,
+            "JSON" => Type::JSON,
             "Dynamic" => Type::Dynamic,
             _ => {
                 return Err(Error::TypeParseError(format!("invalid type name: '{ident}'")));
