@@ -117,7 +117,7 @@ impl<T: ClientFormat> InternalConn<T> {
     pub(super) const CAPACITY: usize = 1024;
 
     pub(super) fn new(
-        metadata: ClientMetadata,
+        mut metadata: ClientMetadata,
         events: Arc<broadcast::Sender<Event>>,
         server_hello: Arc<ServerHello>,
     ) -> Self {
@@ -125,6 +125,10 @@ impl<T: ClientFormat> InternalConn<T> {
         // `inner_pool` it's helpful to distinguish.
         let conn_id = CONN_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let cid = Box::leak(format!("{}.{conn_id}", metadata.client_id).into_boxed_str());
+
+        // Update metadata with server version
+        metadata.server_version = Some(server_hello.version);
+
         let state = DeserializerState::default().with_arrow_options(metadata.arrow_options);
         InternalConn {
             cid,

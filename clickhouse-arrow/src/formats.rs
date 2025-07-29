@@ -80,14 +80,21 @@ impl<T: Default> DeserializerState<T> {
 /// Context maintained during serialization
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SerializerState<T: Default = ()> {
-    pub(crate) options:    Option<ArrowOptions>,
-    pub(crate) serializer: T,
+    pub(crate) options:        Option<ArrowOptions>,
+    pub(crate) serializer:     T,
+    pub(crate) server_version: Option<(u64, u64, u64)>,
 }
 
 impl<T: Default> SerializerState<T> {
     #[must_use]
     pub(crate) fn with_arrow_options(mut self, options: ArrowOptions) -> Self {
         self.options = Some(options);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_server_version(mut self, version: (u64, u64, u64)) -> Self {
+        self.server_version = Some(version);
         self
     }
 

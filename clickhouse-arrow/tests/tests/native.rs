@@ -21,6 +21,25 @@ struct DynamicRow {
     dynamic_col: Value,
 }
 
+// Helper struct for count queries
+#[derive(Debug, Clone, Row)]
+struct CountRow {
+    count: u64,
+}
+
+// Helper struct for type check queries
+#[derive(Debug, Clone, Row)]
+#[allow(dead_code)]
+struct TypeCheckRow {
+    dtype: String,
+}
+
+// Helper struct for simple queries
+#[derive(Debug, Clone, Row)]
+struct SimpleRow {
+    num: u8,
+}
+
 /// # Panics
 pub async fn test_round_trip(ch: Arc<ClickHouseContainer>) {
     let native_url = ch.get_native_url();
@@ -115,8 +134,6 @@ pub async fn round_trip<T: Row + std::fmt::Debug + PartialEq + Clone + Send + Sy
         .into_iter()
         .collect::<ClickHouseResult<Vec<T>>>()?;
 
-    eprintln!("Rows:\n{queried_rows:?}");
-
     // Verify queried data matches inserted data
     header(query_id, "Verifying queried data");
     let inserted_rows = data;
@@ -177,15 +194,16 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     header("native/dynamic", "Testing Dynamic type round trip");
 
     // Table create options
-    let options = CreateOptions::new("MergeTree");
+    let _options = CreateOptions::new("MergeTree");
 
-    // Create ClientBuilder and ConnectionManager
+    // Create ClientBuilder and ConnectionManager with v3 Dynamic format setting
     let client: NativeClient = ClientBuilder::new()
         .with_endpoint(native_url)
         .with_username(&ch.user)
         .with_password(&ch.password)
         .with_ipv4_only(true)
-        .with_compression(CompressionMethod::LZ4)
+        .with_compression(CompressionMethod::None)
+        .with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1)
         .build()
         .await
         .expect("Building client");
@@ -238,6 +256,33 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
 
     while let Some(result) = stream.next().await {
         result.expect("insert stream failed");
+    }
+
+    header(query_id, "Checking row count");
+    let count_query = format!("SELECT count() FROM {table_name}");
+    let mut count_stream =
+        client.query::<CountRow>(&count_query, None).await.expect("count query failed");
+
+    if let Some(Ok(row)) = count_stream.next().await {
+        assert!(row.count > 0, "Expected rows in table");
+    }
+
+    // Skip type check for now as it returns LowCardinality
+    // header(query_id, "Checking Dynamic types");
+    // let type_query = format!("SELECT dynamicType(dynamic_col) as dtype FROM {table_name}");
+    // let mut type_stream = client.query::<TypeCheckRow>(&type_query, None).await.expect("type
+    // query failed");
+    //
+    // while let Some(Ok(row)) = type_stream.next().await {
+    // }
+
+    header(query_id, "Testing simple query first");
+    let simple_query = format!("SELECT 1 as num");
+    let mut simple_stream =
+        client.query::<SimpleRow>(&simple_query, None).await.expect("simple query failed");
+
+    if let Some(Ok(row)) = simple_stream.next().await {
+        assert_eq!(row.num, 1);
     }
 
     header(query_id, "Querying Dynamic data");

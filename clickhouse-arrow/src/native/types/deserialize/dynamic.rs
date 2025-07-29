@@ -26,6 +26,8 @@ pub(crate) struct DynamicDeserializer;
 
 impl DynamicDeserializer {
     /// Determine discriminator size based on total types count
+    /// (Kept for potential future use when we add v2 support)
+    #[allow(dead_code)]
     fn discriminator_size(total_types: u64) -> usize {
         match total_types {
             0..=255 => 1,               // u8
@@ -61,14 +63,11 @@ impl DynamicDeserializer {
         })
     }
 
-    /// Read v2 header (CH 25.5 with our protocol version)
-    async fn read_v2_header<R: ClickHouseRead>(
+    /// Read v3 header (CH 25.6+) - the only supported format
+    async fn read_v3_header<R: ClickHouseRead>(
         reader: &mut R,
         state: &mut DeserializerState,
     ) -> Result<(u64, Vec<(String, Type)>)> {
-        // Read max_types parameter (not used in v2, but still present in wire format)
-        let _max_types = reader.read_var_uint().await?;
-
         // Read total types count
         let total_types = reader.read_var_uint().await?;
 
@@ -79,49 +78,6 @@ impl DynamicDeserializer {
             let type_name = String::from_utf8(type_name_bytes).map_err(|e| {
                 crate::Error::DeserializeError(format!("Invalid UTF-8 in type name: {}", e))
             })?;
-            let typ = type_name.parse::<Type>().map_err(|_| {
-                crate::Error::DeserializeError(format!("Unknown type: {}", type_name))
-            })?;
-            types.push((type_name, typ));
-        }
-
-        // Sort types alphabetically by name
-        types.sort_by(|a, b| a.0.cmp(&b.0));
-
-        // Read variant version (should be 0)
-        let variant_version = reader.read_u64_le().await?;
-        if variant_version != 0 {
-            return Err(crate::Error::DeserializeError(format!(
-                "Unsupported Variant serialization version in Dynamic v2: {}",
-                variant_version
-            )));
-        }
-
-        // Read prefixes for nested types
-        for (_, typ) in &types {
-            typ.deserialize_prefix_async(reader, state).await?;
-        }
-
-        Ok((total_types, types))
-    }
-
-    /// Read v3 header (CH 25.6+)
-    async fn read_v3_header<R: ClickHouseRead>(
-        reader: &mut R,
-        state: &mut DeserializerState,
-    ) -> Result<(u64, Vec<(String, Type)>)> {
-        // Read total types count
-        let total_types = reader.read_var_uint().await?;
-
-        // Read type names and create types
-        let mut types = Vec::with_capacity(total_types as usize);
-        for i in 0..total_types {
-            let type_name_bytes = reader.read_string().await?;
-            eprintln!("DEBUG v3: Read type name bytes[{}]: {:?}", i, type_name_bytes);
-            let type_name = String::from_utf8(type_name_bytes).map_err(|e| {
-                crate::Error::DeserializeError(format!("Invalid UTF-8 in type name: {}", e))
-            })?;
-            eprintln!("DEBUG v3: Parsed type name[{}]: '{}'", i, type_name);
             let typ = type_name.parse::<Type>().map_err(|_| {
                 crate::Error::DeserializeError(format!("Unknown type: {}", type_name))
             })?;
@@ -143,29 +99,11 @@ impl DynamicDeserializer {
     ) -> Result<()> {
         // Read serialization version
         let version = reader.read_u64_le().await?;
-        eprintln!("DEBUG: Dynamic serialization version: {}", version);
 
         // Store version and header info in state for use during data reading
         match version {
-            1 => {
-                // v1 with SharedVariant (for older protocol versions)
-                // We'll implement this later as nice-to-have
-                return Err(crate::Error::DeserializeError(
-                    "Dynamic v1 serialization not yet implemented".to_string(),
-                ));
-            }
-            2 => {
-                // v2 without SharedVariant but with max_types (CH 25.5)
-                let (total_types, types) = Self::read_v2_header(reader, state).await?;
-                DYNAMIC_STATE.with(|state| {
-                    let mut state = state.borrow_mut();
-                    state.version = Some(2);
-                    state.total_types = Some(total_types);
-                    state.types = Some(types);
-                });
-            }
             3 => {
-                // v3 flat format (CH 25.6+)
+                // v3 flat format (CH 25.6+) - our primary supported format
                 let (total_types, types) = Self::read_v3_header(reader, state).await?;
                 DYNAMIC_STATE.with(|state| {
                     let mut state = state.borrow_mut();
@@ -174,9 +112,27 @@ impl DynamicDeserializer {
                     state.types = Some(types);
                 });
             }
+            1 => {
+                return Err(crate::Error::DeserializeError(
+                    "Dynamic v1 serialization not supported. Use ClickHouse 25.6+ and enable \
+                     'output_format_native_use_flattened_dynamic_and_json_serialization=1' for v3 \
+                     format."
+                        .to_string(),
+                ));
+            }
+            2 => {
+                return Err(crate::Error::DeserializeError(
+                    "Dynamic v2 serialization not supported. Use ClickHouse 25.6+ and enable \
+                     'output_format_native_use_flattened_dynamic_and_json_serialization=1' for v3 \
+                     format."
+                        .to_string(),
+                ));
+            }
             _ => {
                 return Err(crate::Error::DeserializeError(format!(
-                    "Unsupported Dynamic serialization version: {}",
+                    "Unknown Dynamic serialization version: {}. Expected version 3. Use \
+                     ClickHouse 25.6+ and enable \
+                     'output_format_native_use_flattened_dynamic_and_json_serialization=1'.",
                     version
                 )));
             }
@@ -276,56 +232,8 @@ impl DynamicDeserializer {
         let version = reader.get_u64_le();
 
         match version {
-            1 => {
-                return Err(crate::Error::DeserializeError(
-                    "Dynamic v1 serialization not yet implemented".to_string(),
-                ));
-            }
-            2 => {
-                // Read max_types (not used in v2, but still present in wire format)
-                let _max_types = reader.try_get_var_uint()?;
-
-                // Read total types
-                let total_types = reader.try_get_var_uint()?;
-
-                // Read type names
-                let mut types = Vec::with_capacity(total_types as usize);
-                for _ in 0..total_types {
-                    let type_name_bytes = reader.try_get_string()?;
-                    let type_name = String::from_utf8(type_name_bytes.to_vec()).map_err(|e| {
-                        crate::Error::DeserializeError(format!("Invalid UTF-8 in type name: {}", e))
-                    })?;
-                    let typ = type_name.parse::<Type>().map_err(|_| {
-                        crate::Error::DeserializeError(format!("Unknown type: {}", type_name))
-                    })?;
-                    types.push((type_name, typ));
-                }
-
-                // Sort types alphabetically
-                types.sort_by(|a, b| a.0.cmp(&b.0));
-
-                // Read variant version
-                let variant_version = reader.get_u64_le();
-                if variant_version != 0 {
-                    return Err(crate::Error::DeserializeError(format!(
-                        "Unsupported Variant serialization version in Dynamic v2: {}",
-                        variant_version
-                    )));
-                }
-
-                // Read prefixes for nested types
-                for (_, typ) in &types {
-                    typ.deserialize_prefix(reader)?;
-                }
-
-                DYNAMIC_STATE.with(|state| {
-                    let mut state = state.borrow_mut();
-                    state.version = Some(2);
-                    state.total_types = Some(total_types);
-                    state.types = Some(types);
-                });
-            }
             3 => {
+                // v3 flat format (CH 25.6+) - our primary supported format
                 // Read total types
                 let total_types = reader.try_get_var_uint()?;
 
@@ -354,9 +262,27 @@ impl DynamicDeserializer {
                     state.types = Some(types);
                 });
             }
+            1 => {
+                return Err(crate::Error::DeserializeError(
+                    "Dynamic v1 serialization not supported. Use ClickHouse 25.6+ and enable \
+                     'output_format_native_use_flattened_dynamic_and_json_serialization=1' for v3 \
+                     format."
+                        .to_string(),
+                ));
+            }
+            2 => {
+                return Err(crate::Error::DeserializeError(
+                    "Dynamic v2 serialization not supported. Use ClickHouse 25.6+ and enable \
+                     'output_format_native_use_flattened_dynamic_and_json_serialization=1' for v3 \
+                     format."
+                        .to_string(),
+                ));
+            }
             _ => {
                 return Err(crate::Error::DeserializeError(format!(
-                    "Unsupported Dynamic serialization version: {}",
+                    "Unknown Dynamic serialization version: {}. Expected version 3. Use \
+                     ClickHouse 25.6+ and enable \
+                     'output_format_native_use_flattened_dynamic_and_json_serialization=1'.",
                     version
                 )));
             }

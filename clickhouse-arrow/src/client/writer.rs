@@ -126,6 +126,11 @@ impl<W: ClickHouseWrite> Writer<W> {
         revision: u64,
         metadata: ClientMetadata,
     ) -> Result<()> {
+        eprintln!(
+            "DEBUG: send_data called for qid: {}, format: {}",
+            qid,
+            std::any::type_name::<T>()
+        );
         writer.write_var_uint(ClientPacketId::Data as u64).await?;
         writer.write_string("").await?; // Table name
         T::write(writer, data, qid, header, revision, metadata).await?;

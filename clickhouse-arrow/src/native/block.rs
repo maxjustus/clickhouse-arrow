@@ -157,14 +157,14 @@ impl Block {
 }
 
 impl ProtocolData<Self, ()> for Block {
-    type Options = ();
+    type Options = Option<crate::client::connection::ClientMetadata>;
 
     async fn write_async<W: ClickHouseWrite>(
         mut self,
         writer: &mut W,
         revision: u64,
         _header: Option<&[(String, Type)]>,
-        _options: (),
+        options: Self::Options,
     ) -> Result<()> {
         if revision > 0 {
             self.info.write_async(writer).await?;
@@ -178,9 +178,7 @@ impl ProtocolData<Self, ()> for Block {
         writer.write_var_uint(columns as u64).await?;
         writer.write_var_uint(self.rows).await?;
 
-        eprintln!("DEBUG: Block has {} columns", columns);
         for (name, type_) in self.column_types {
-            eprintln!("DEBUG: Processing column '{}' of type '{}'", name, type_);
             let mut values = Vec::with_capacity(rows);
             values.extend(self.column_data.drain(..rows));
 
@@ -202,12 +200,14 @@ impl ProtocolData<Self, ()> for Block {
                 }
 
                 let mut state = SerializerState::default();
+                if let Some(metadata) = options {
+                    if let Some(version) = metadata.server_version {
+                        state = state.with_server_version(version);
+                    }
+                }
 
                 // For Dynamic type, we need to analyze values before writing prefix
                 if matches!(type_, Type::Dynamic) {
-                    eprintln!(
-                        "DEBUG: Block write_async found Dynamic type, calling analyze_values"
-                    );
                     use crate::native::types::serialize::dynamic::DynamicSerializer;
                     DynamicSerializer::analyze_values(&values)?;
                 }
@@ -224,7 +224,7 @@ impl ProtocolData<Self, ()> for Block {
         writer: &mut W,
         revision: u64,
         _header: Option<&[(String, Type)]>,
-        _options: (),
+        options: Self::Options,
     ) -> Result<()> {
         if revision > 0 {
             self.info.write(writer)?;
@@ -260,12 +260,14 @@ impl ProtocolData<Self, ()> for Block {
                 }
 
                 let mut state = SerializerState::default();
+                if let Some(metadata) = options {
+                    if let Some(version) = metadata.server_version {
+                        state = state.with_server_version(version);
+                    }
+                }
 
                 // For Dynamic type, we need to analyze values before writing prefix
                 if matches!(type_, Type::Dynamic) {
-                    eprintln!(
-                        "DEBUG: Block write_async found Dynamic type, calling analyze_values"
-                    );
                     use crate::native::types::serialize::dynamic::DynamicSerializer;
                     DynamicSerializer::analyze_values(&values)?;
                 }
@@ -280,7 +282,7 @@ impl ProtocolData<Self, ()> for Block {
     async fn read_async<R: ClickHouseRead>(
         reader: &mut R,
         revision: u64,
-        _options: (),
+        _options: Self::Options,
         state: &mut DeserializerState,
     ) -> Result<Self> {
         let info =
@@ -340,7 +342,7 @@ impl ProtocolData<Self, ()> for Block {
     fn read<R: ClickHouseBytesRead + 'static>(
         reader: &mut R,
         revision: u64,
-        _options: (),
+        _options: Self::Options,
         state: &mut DeserializerState,
     ) -> Result<Self> {
         let info = if revision > 0 { BlockInfo::read(reader)? } else { BlockInfo::default() };

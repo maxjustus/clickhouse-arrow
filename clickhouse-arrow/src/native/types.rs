@@ -407,7 +407,6 @@ impl Type {
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
         use deserialize::*;
-        // eprintln!("DEBUG: deserialize_column_sync called for type: {:?}, rows: {}", self, rows);
 
         if rows > MAX_STRING_SIZE {
             return Err(Error::Protocol(format!(

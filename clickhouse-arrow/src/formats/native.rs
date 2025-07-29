@@ -35,11 +35,11 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
         state: &mut DeserializerState,
     ) -> Result<Option<Block>> {
         Ok(if let CompressionMethod::None = metadata.compression {
-            Block::read_async(reader, revision, (), state).await?.into_option()
+            Block::read_async(reader, revision, None, state).await?.into_option()
         } else {
             let mut buffer =
                 BytesMut::from_iter(decompress_data_async(reader, metadata.compression).await?);
-            Block::read(&mut buffer, revision, (), state)?.into_option()
+            Block::read(&mut buffer, revision, None, state)?.into_option()
         })
     }
 
@@ -51,8 +51,14 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
         revision: u64,
         metadata: ClientMetadata,
     ) -> Result<()> {
+        eprintln!(
+            "DEBUG: NativeFormat::write called - block rows: {}, columns: {}, compression: {:?}",
+            data.rows,
+            data.column_types.len(),
+            metadata.compression
+        );
         if let CompressionMethod::None = metadata.compression {
-            data.write_async(writer, revision, header, ())
+            data.write_async(writer, revision, header, Some(metadata))
                 .instrument(trace_span!("serialize_block"))
                 .await
                 .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "(block:uncompressed)"))
@@ -61,7 +67,7 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
             let estimated_size = data.estimate_size();
             let mut buffer = BytesMut::with_capacity(estimated_size);
 
-            data.write(&mut buffer, revision, header, ())
+            data.write(&mut buffer, revision, header, Some(metadata))
                 .inspect_err(|error| error!(?error, {ATT_QID} = %qid, "(block:compressed)"))?;
 
             compress_data_sync(writer, buffer.freeze(), metadata.compression)

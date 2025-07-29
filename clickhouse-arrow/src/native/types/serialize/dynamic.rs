@@ -23,10 +23,12 @@ thread_local! {
 
 /// Handles serialization of Dynamic types
 /// Dynamic is internally represented as a Variant with different serialization versions
-pub struct DynamicSerializer;
+pub(crate) struct DynamicSerializer;
 
 impl DynamicSerializer {
     /// Determine discriminator size based on total types count
+    /// (Kept for potential future use when we add v2 support)
+    #[allow(dead_code)]
     fn discriminator_size(total_types: usize) -> usize {
         match total_types {
             0..=255 => 1,               // u8
@@ -68,69 +70,44 @@ impl DynamicSerializer {
     pub(crate) async fn write_prefix<W: ClickHouseWrite>(
         _type: &Type,
         writer: &mut W,
-        state: &mut SerializerState,
+        _state: &mut SerializerState,
     ) -> Result<()> {
-        eprintln!("DEBUG: DynamicSerializer::write_prefix called");
-
-        // Write serialization version (2 for v2)
-        writer.write_u64_le(2).await?;
+        // Always use v3 (flattened format) for now
+        // v2 support can be added later if needed
+        writer.write_u64_le(3).await?;
 
         // Check if we have cached metadata from a previous analysis
         let cache_data = DYNAMIC_CACHE.with(|cache| cache.borrow_mut().take());
 
         if let Some(cache) = cache_data {
-            eprintln!("DEBUG: Found cached metadata with {} types", cache.total_types);
             // We have cached metadata from analyze_values, write it now
-            let max_types = 32u64; // Default from Go implementation
-            writer.write_var_uint(max_types).await?;
+
+            // v3 format: total_types, then type names, then nested prefixes
             writer.write_var_uint(cache.total_types as u64).await?;
 
             // Write type names
-            eprintln!(
-                "DEBUG: Writing {} type names: {:?}",
-                cache.type_names.len(),
-                cache.type_names
-            );
-            for (i, type_name) in cache.type_names.iter().enumerate() {
-                eprintln!(
-                    "DEBUG: Writing type name[{}]: '{}' (len={})",
-                    i,
-                    type_name,
-                    type_name.len()
-                );
+            for type_name in &cache.type_names {
                 writer.write_string(type_name).await?;
             }
-
-            // Write Variant serialization version (always 0)
-            writer.write_u64_le(0).await?;
 
             // Write nested type prefixes
             for type_name in &cache.type_names {
                 let (_, typ) = &cache.type_map[type_name];
-                typ.serialize_prefix_async(writer, state).await?;
+                typ.serialize_prefix_async(writer, _state).await?;
             }
 
             // Put cache back for use in write()
             DYNAMIC_CACHE.with(|c| *c.borrow_mut() = Some(cache));
         } else {
-            eprintln!("DEBUG: No cached metadata found - this is an error!");
-            // No cached metadata - this is an error in the current architecture
-            // We would need to either:
-            // 1. Have a pre-analysis phase
-            // 2. Modify the architecture to pass values to serialize_prefix
-            // For now, write empty metadata which will cause an error
-            let max_types = 32u64;
-            writer.write_var_uint(max_types).await?;
+            // No cached metadata - write empty v3 format
             writer.write_var_uint(0).await?; // 0 types
-            writer.write_u64_le(0).await?; // Variant version
         }
 
         Ok(())
     }
 
     /// Analyze values and cache type metadata for use in write_prefix
-    pub fn analyze_values(values: &[Value]) -> Result<()> {
-        eprintln!("DEBUG: DynamicSerializer::analyze_values called with {} values", values.len());
+    pub(crate) fn analyze_values(values: &[Value]) -> Result<()> {
         let mut type_map: HashMap<String, (usize, Type)> = HashMap::new();
         let mut type_names: Vec<String> = Vec::new();
 
@@ -143,7 +120,7 @@ impl DynamicSerializer {
                 if !type_map.contains_key(&type_name) {
                     let index = type_names.len();
                     type_names.push(type_name.clone());
-                    let _ = type_map.insert(type_name, (index, value_type));
+                    drop(type_map.insert(type_name, (index, value_type)));
                 }
             }
         }
@@ -155,13 +132,12 @@ impl DynamicSerializer {
         type_map.clear();
         for (index, type_name) in type_names.iter().enumerate() {
             let value_type = type_name.parse::<Type>().unwrap_or(Type::String);
-            type_map.insert(type_name.clone(), (index, value_type));
+            drop(type_map.insert(type_name.clone(), (index, value_type)));
         }
 
         let total_types = type_names.len();
         let cache = DynamicSerializationCache { type_names, type_map, total_types };
 
-        eprintln!("DEBUG: Storing cache with {} types", total_types);
         DYNAMIC_CACHE.with(|c| *c.borrow_mut() = Some(cache));
         Ok(())
     }
@@ -192,7 +168,7 @@ impl DynamicSerializer {
                     if !type_map.contains_key(&type_name) {
                         let index = type_names.len();
                         type_names.push(type_name.clone());
-                        let _ = type_map.insert(type_name, (index, value_type));
+                        drop(type_map.insert(type_name, (index, value_type)));
                     }
                 }
             }
@@ -204,7 +180,7 @@ impl DynamicSerializer {
             type_map.clear();
             for (index, type_name) in type_names.iter().enumerate() {
                 let value_type = type_name.parse::<Type>().unwrap_or(Type::String);
-                type_map.insert(type_name.clone(), (index, value_type));
+                drop(type_map.insert(type_name.clone(), (index, value_type)));
             }
 
             let total_types = type_names.len();
@@ -255,18 +231,18 @@ impl DynamicSerializer {
     pub(crate) fn write_prefix_sync<W: ClickHouseBytesWrite>(
         _type: &Type,
         writer: &mut W,
-        state: &mut SerializerState,
+        _state: &mut SerializerState,
     ) -> Result<()> {
-        // Write serialization version (2 for v2)
-        writer.put_u64_le(2);
+        // Always use v3 (flattened format) for now
+        writer.put_u64_le(3);
 
         // Check if we have cached metadata
         let cache_data = DYNAMIC_CACHE.with(|cache| cache.borrow_mut().take());
 
         if let Some(cache) = cache_data {
             // We have cached metadata, write it now
-            let max_types = 32u64;
-            writer.put_var_uint(max_types)?;
+
+            // v3 format: total_types, then type names, then nested prefixes
             writer.put_var_uint(cache.total_types as u64)?;
 
             // Write type names
@@ -274,23 +250,17 @@ impl DynamicSerializer {
                 writer.put_string(type_name)?;
             }
 
-            // Write Variant serialization version
-            writer.put_u64_le(0);
-
             // Write nested type prefixes
             for type_name in &cache.type_names {
                 let (_, typ) = &cache.type_map[type_name];
-                typ.serialize_prefix(writer, state);
+                typ.serialize_prefix(writer, _state);
             }
 
             // Put cache back
             DYNAMIC_CACHE.with(|c| *c.borrow_mut() = Some(cache));
         } else {
-            // No cached metadata
-            let max_types = 32u64;
-            writer.put_var_uint(max_types)?;
+            // No cached metadata - write empty v3 format
             writer.put_var_uint(0)?; // 0 types
-            writer.put_u64_le(0); // Variant version
         }
 
         Ok(())
@@ -321,7 +291,7 @@ impl DynamicSerializer {
                     if !type_map.contains_key(&type_name) {
                         let index = type_names.len();
                         type_names.push(type_name.clone());
-                        let _ = type_map.insert(type_name, (index, value_type));
+                        drop(type_map.insert(type_name, (index, value_type)));
                     }
                 }
             }
@@ -333,7 +303,7 @@ impl DynamicSerializer {
             type_map.clear();
             for (index, type_name) in type_names.iter().enumerate() {
                 let value_type = type_name.parse::<Type>().unwrap_or(Type::String);
-                type_map.insert(type_name.clone(), (index, value_type));
+                drop(type_map.insert(type_name.clone(), (index, value_type)));
             }
 
             let total_types = type_names.len();
@@ -415,8 +385,6 @@ mod tests {
         }
 
         // Verify the buffer contains expected data
-        eprintln!("Buffer: {:?}", buffer);
-        eprintln!("Buffer as string: {:?}", String::from_utf8_lossy(&buffer));
 
         // The buffer should contain:
         // - varint 3 (number of types)
@@ -455,15 +423,12 @@ mod tests {
     }
 
     #[test]
-    fn test_dynamic_v2_prefix() {
-        // Test v2 Dynamic prefix serialization
+    fn test_dynamic_v3_prefix() {
+        // Test v3 Dynamic prefix serialization
         let mut buffer = Vec::new();
 
-        // Write v2 serialization version
-        buffer.put_u64_le(2);
-
-        // Write max_types
-        buffer.put_var_uint(32).unwrap();
+        // Write v3 serialization version
+        buffer.put_u64_le(3);
 
         // Write total_types
         buffer.put_var_uint(3).unwrap();
@@ -474,22 +439,12 @@ mod tests {
             buffer.put_string(name).unwrap();
         }
 
-        // Write Variant version
-        buffer.put_u64_le(0);
-
-        eprintln!("v2 prefix buffer: {:?}", buffer);
-        eprintln!("v2 prefix as string: {:?}", String::from_utf8_lossy(&buffer));
-
         // Check we can read it back
         let mut reader = &buffer[..];
 
         // Read version
         let version = reader.get_u64_le();
-        assert_eq!(version, 2);
-
-        // Read max_types
-        let max_types = reader.try_get_var_uint().unwrap();
-        assert_eq!(max_types, 32);
+        assert_eq!(version, 3);
 
         // Read total_types
         let total_types = reader.try_get_var_uint().unwrap();
@@ -501,10 +456,6 @@ mod tests {
             let actual = String::from_utf8(bytes.to_vec()).unwrap();
             assert_eq!(&actual, expected);
         }
-
-        // Read variant version
-        let variant_version = reader.get_u64_le();
-        assert_eq!(variant_version, 0);
     }
 
     #[tokio::test]
@@ -526,16 +477,6 @@ mod tests {
         // Write prefix
         DynamicSerializer::write_prefix(&Type::Dynamic, &mut buffer, &mut state).await.unwrap();
 
-        // Print the buffer contents
-        eprintln!("Buffer contents ({} bytes):", buffer.len());
-        for (i, &byte) in buffer.iter().enumerate() {
-            eprintln!(
-                "  [{:3}] = 0x{:02x} ({:3}) '{}'",
-                i,
-                byte,
-                byte,
-                if byte.is_ascii_graphic() { byte as char } else { '.' }
-            );
-        }
+        // Verify the prefix was written successfully
     }
 }

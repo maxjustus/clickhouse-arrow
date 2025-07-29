@@ -97,7 +97,8 @@ impl<R: ClickHouseRead + 'static> Reader<R> {
         metadata: ClientMetadata,
         state: &mut DeserializerState<T::Deser>,
     ) -> Result<ServerPacket<T::Data>> {
-        let packet = ServerPacketId::from_u64(reader.read_var_uint().await?)
+        let packet_id = reader.read_var_uint().await?;
+        let packet = ServerPacketId::from_u64(packet_id)
             .inspect_err(|error| error!(?error, "Failed to read packet ID"))?;
         trace!({ ATT_PID } = packet.as_ref(), "Read packet ID");
         match packet {
@@ -476,7 +477,7 @@ impl<R: ClickHouseRead + 'static> Reader<R> {
         metadata: ClientMetadata,
         state: &mut DeserializerState<T::Deser>,
     ) -> Result<Option<ServerData<T::Data>>> {
-        drop(reader.read_string().await?);
+        let _table_name = reader.read_string().await?;
         let Some(block) =
             T::read(reader, revision, metadata, state).await.inspect_err(|error| {
                 error!(?error, { ATT_CID } = metadata.client_id, "Data read fail");
