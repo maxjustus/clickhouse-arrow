@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = []
+# dependencies = ["scapy"]
 # ///
 
 import socket
@@ -13,6 +13,9 @@ import json
 import argparse
 import struct
 from datetime import datetime
+from scapy.all import wrpcap, Ether, IP, TCP, Raw, conf
+# Disable scapy verbose output
+conf.verb = 0
 
 class ClickHouseProtocolParser:
     """Parse ClickHouse native protocol messages"""
@@ -155,16 +158,33 @@ class ClickHouseProtocolParser:
         return integers
 
 class ClickHouseTCPCapture:
-    def __init__(self, clickhouse_host='localhost', clickhouse_port=9000, proxy_port=9001, output_format='construct', verbose=False):
+    def __init__(self, clickhouse_host='localhost', clickhouse_port=9000, proxy_port=9001, output_format='construct', verbose=False, pcap_file=None):
         self.clickhouse_host = clickhouse_host
         self.clickhouse_port = clickhouse_port
         self.proxy_port = proxy_port
         self.output_format = output_format
         self.verbose = verbose
         self.parser = ClickHouseProtocolParser()
+        self.pcap_file = pcap_file
+        self.pcap_packets = []
+        self.client_addr = None
+        self.server_addr = None
         
     def log_packet(self, direction, data):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        
+        # Create pcap packet if pcap file is specified
+        if self.pcap_file and self.client_addr and self.server_addr:
+            if direction == "CLIENT->SERVER":
+                src_ip, src_port = self.client_addr
+                dst_ip, dst_port = self.server_addr
+            else:
+                src_ip, src_port = self.server_addr
+                dst_ip, dst_port = self.client_addr
+            
+            # Create a TCP packet with the raw data
+            packet = Ether()/IP(src=src_ip, dst=dst_ip)/TCP(sport=src_port, dport=dst_port, flags="PA")/Raw(load=data)
+            self.pcap_packets.append(packet)
         
         packet_info = {
             'timestamp': timestamp,
@@ -248,6 +268,10 @@ class ClickHouseTCPCapture:
     def handle_connection(self, client_socket, client_addr):
         if self.verbose:
             print(f"New connection from {client_addr}", file=sys.stderr)
+        
+        # Store addresses for pcap generation
+        self.client_addr = (client_addr[0], client_addr[1])
+        self.server_addr = (self.clickhouse_host, self.clickhouse_port)
         
         # Connect to actual ClickHouse server
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -349,6 +373,13 @@ class ClickHouseTCPCapture:
         except Exception as e:
             print(f"Error running ClickHouse client: {e}", file=sys.stderr)
             return None
+    
+    def write_pcap(self):
+        """Write captured packets to pcap file"""
+        if self.pcap_file and self.pcap_packets:
+            wrpcap(self.pcap_file, self.pcap_packets)
+            if self.verbose:
+                print(f"\nWrote {len(self.pcap_packets)} packets to {self.pcap_file}", file=sys.stderr)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -376,7 +407,11 @@ def main():
   uv run clickhouse_tcp_capture.py 'SELECT 1' --verbose
   
   # Custom server
-  uv run clickhouse_tcp_capture.py 'SELECT version()' --host myserver.com --port 9000'''
+  uv run clickhouse_tcp_capture.py 'SELECT version()' --host myserver.com --port 9000
+  
+  # Capture to pcap file
+  uv run clickhouse_tcp_capture.py 'SELECT 1' --pcap capture.pcap
+  uv run clickhouse_tcp_capture.py 'SELECT 1' --pcap capture.pcap --format compact'''
     )
     
     parser.add_argument('query', help='SQL query to execute')
@@ -385,6 +420,7 @@ def main():
     parser.add_argument('--format', choices=['construct', 'minimal', 'compact', 'parsed', 'hex'], default='construct',
                         help='Output format: construct (byte array, default), minimal (hex string), compact (ultra-minimal), parsed (full details), hex (hex dump)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Show debug output to stderr')
+    parser.add_argument('--pcap', metavar='FILE', help='Write TCP dump to specified pcap file')
     
     args = parser.parse_args()
     
@@ -392,12 +428,16 @@ def main():
         args.host, 
         args.port, 
         output_format=args.format,
-        verbose=args.verbose
+        verbose=args.verbose,
+        pcap_file=args.pcap
     )
     capturer.run_clickhouse_client(args.query)
     
     # Keep proxy running for a bit to capture any trailing packets
     time.sleep(2)
+    
+    # Write pcap file if requested
+    capturer.write_pcap()
 
 if __name__ == '__main__':
     main()
