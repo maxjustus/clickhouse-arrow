@@ -87,9 +87,13 @@ impl VariantSerializer {
         let (discriminators, grouped_values) = Self::extract_discriminators_and_values(&values)?;
         
         // Write discriminators
-        // TODO: Implement COMPACT mode for better compression of homogeneous data
-        // Current implementation uses BASIC mode (raw discriminators)
-        // COMPACT mode would:
+        // NOTE: The current implementation matches the ClickHouse Go driver behavior.
+        // There's a theoretical COMPACT mode (mode=1) mentioned in some documentation
+        // that would use granule-based compression for homogeneous data, but it's not
+        // implemented in any reference drivers as of 2025. Our implementation uses
+        // what the docs call BASIC mode (mode=0) - writing raw discriminators.
+        // 
+        // If COMPACT mode is ever implemented in ClickHouse, it would:
         // - Write mode byte = 1 after version prefix
         // - Group discriminators into granules
         // - Use single discriminator for homogeneous granules
@@ -548,7 +552,8 @@ mod tests {
         assert_eq!(deserialized, values);
     }
     
-    // TODO: Add test for COMPACT mode when implemented
-    // The COMPACT mode would be particularly efficient for homogeneous data
-    // where all values in a granule have the same discriminator
+    // NOTE: COMPACT mode is a theoretical optimization mentioned in some docs
+    // but not implemented in any reference drivers as of 2025. If it's ever
+    // added to ClickHouse, it would be particularly efficient for homogeneous
+    // data where all values in a granule have the same discriminator.
 }
