@@ -328,10 +328,11 @@ fn clickhouse_value_to_json(value: ChValue) -> Result<Value> {
             // Just return the inner value directly
             clickhouse_value_to_json(*inner)
         }
-        ChValue::Dynamic(_type_name, inner) => {
-            // Just return the inner value directly
-            clickhouse_value_to_json(*inner)
-        }
+        // TODO: Dynamic type not yet implemented
+        // ChValue::Dynamic(_type_name, inner) => {
+        //     // Just return the inner value directly
+        //     clickhouse_value_to_json(*inner)
+        // }
     }
 }
 

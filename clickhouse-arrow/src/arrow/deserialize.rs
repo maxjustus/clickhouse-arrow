@@ -391,9 +391,10 @@ impl ClickHouseArrowDeserializer for Type {
             Type::Variant(_) => {
                 todo!("Variant deserialization not yet implemented");
             }
-            Type::Dynamic(_) => {
-                todo!("Dynamic deserialization not yet implemented");
-            }
+            // TODO: Dynamic type not yet implemented
+            // Type::Dynamic(_) => {
+            //     todo!("Dynamic deserialization not yet implemented");
+            // }
         })
     }
 

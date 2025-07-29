@@ -97,9 +97,10 @@ impl ClickHouseNativeDeserializer for Type {
                 Type::Variant(_) => {
                     variant::VariantDeserializer::read_prefix(self, reader, state).await?;
                 }
-                Type::Dynamic(_) => {
-                    dynamic::DynamicDeserializer::read_prefix(self, reader, state).await?;
-                }
+                // TODO: Dynamic type not yet implemented
+                // Type::Dynamic(_) => {
+                //     dynamic::DynamicDeserializer::read_prefix(self, reader, state).await?;
+                // }
             }
             Ok(())
         }
@@ -143,11 +144,11 @@ impl ClickHouseNativeDeserializer for Type {
                     )));
                 }
             }
-            Type::Dynamic(_) => {
-                // eprintln!("DEBUG: Type::Dynamic deserialize_prefix called");
-                use crate::native::types::deserialize::dynamic::DynamicDeserializer;
-                DynamicDeserializer::read_prefix_sync(self, reader, &mut DeserializerState::default())?;
-            }
+            // TODO: Dynamic type not yet implemented
+            // Type::Dynamic(_) => {
+            //     use crate::native::types::deserialize::dynamic::DynamicDeserializer;
+            //     DynamicDeserializer::read_prefix_sync(self, reader, &mut DeserializerState::default())?;
+            // }
             _ => {}
         }
         Ok(())
@@ -506,30 +507,8 @@ impl FromStr for Type {
                     Type::Variant(inner)
                 }
                 "Dynamic" => {
-                    // Dynamic can have optional max_types parameter: Dynamic(max_types=N)
-                    if following.starts_with('(') && following.ends_with(')') {
-                        let params_str = &following[1..following.len()-1].trim();
-                        if params_str.starts_with("max_types=") {
-                            let max_types_str = &params_str[10..]; // Skip "max_types="
-                            let max_types: u8 = max_types_str.parse().map_err(|_| {
-                                Error::TypeParseError(format!("Invalid max_types value: {}", max_types_str))
-                            })?;
-                            if max_types == 0 {
-                                return Err(Error::TypeParseError(
-                                    "Dynamic max_types must be greater than 0".to_string()
-                                ));
-                            }
-                            Type::Dynamic(max_types)
-                        } else {
-                            return Err(Error::TypeParseError(
-                                format!("Invalid Dynamic parameter: {}", params_str)
-                            ));
-                        }
-                    } else {
-                        return Err(Error::TypeParseError(
-                            "Dynamic with arguments must use format Dynamic(max_types=N)".to_string()
-                        ));
-                    }
+                    // TODO: Dynamic type not yet implemented
+                    return Err(Error::TypeParseError("Dynamic type not yet implemented".to_string()));
                 }
                 // Unsupported
                 "Nested" => {
@@ -571,7 +550,7 @@ impl FromStr for Type {
             "Polygon" => Type::Polygon,
             "MultiPolygon" => Type::MultiPolygon,
             "Object" | "Json" | "OBJECT" | "JSON" => Type::Object,
-            "Dynamic" => Type::Dynamic(255), // Default max_types
+            "Dynamic" => return Err(Error::TypeParseError("Dynamic type not yet implemented".to_string())),
             _ => {
                 return Err(Error::TypeParseError(format!("invalid type name: '{ident}'")));
             }

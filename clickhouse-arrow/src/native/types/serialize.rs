@@ -93,9 +93,10 @@ impl ClickHouseNativeSerializer for Type {
                 Type::Variant(_) => {
                     todo!("Variant prefix serialization not yet implemented");
                 }
-                Type::Dynamic(_) => {
-                    todo!("Dynamic prefix serialization not implemented");
-                }
+                // TODO: Dynamic type not yet implemented
+                // Type::Dynamic(_) => {
+                //     todo!("Dynamic prefix serialization not implemented");
+                // }
             }
             Ok(())
         }

@@ -12,8 +12,6 @@ use crate::Result;
 pub(crate) struct DiscriminatorMap {
     /// Maps discriminator byte to (type_string, type)
     types: HashMap<u8, (String, Type)>,
-    /// Maps type string to discriminator
-    type_to_discriminator: HashMap<String, u8>,
 }
 
 impl DiscriminatorMap {
@@ -30,14 +28,12 @@ impl DiscriminatorMap {
         
         // Build the discriminator map, starting from 0
         let mut types = HashMap::new();
-        let mut type_to_discriminator = HashMap::new();
         for (idx, (type_str, type_)) in type_strings.into_iter().enumerate() {
             let discriminator = idx as u8;
-            types.insert(discriminator, (type_str.clone(), type_));
-            type_to_discriminator.insert(type_str, discriminator);
+            drop(types.insert(discriminator, (type_str.clone(), type_)));
         }
         
-        Ok(Self { types, type_to_discriminator })
+        Ok(Self { types })
     }
     
     /// Get the type for a given discriminator
@@ -104,7 +100,7 @@ impl VariantDeserializer {
                 if count > 0 {
                     if let Some(inner_type) = discriminator_map.get_type(discriminator) {
                         let column_values = inner_type.deserialize_column(reader, count, state).await?;
-                        let _ = columns.insert(discriminator, column_values);
+                        drop(columns.insert(discriminator, column_values));
                     }
                 }
             }
@@ -176,7 +172,7 @@ impl VariantDeserializer {
                 if count > 0 {
                     if let Some(inner_type) = discriminator_map.get_type(discriminator) {
                         let column_values = inner_type.deserialize_column_sync(reader, count, state)?;
-                        let _ = columns.insert(discriminator, column_values);
+                        drop(columns.insert(discriminator, column_values));
                     }
                 }
             }
