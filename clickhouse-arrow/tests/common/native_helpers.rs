@@ -1,8 +1,8 @@
 use chrono::NaiveDate;
 use chrono_tz::Tz;
+use clickhouse_arrow::native::block::Block;
 use clickhouse_arrow::prelude::*;
 use clickhouse_arrow::{ColumnDefinition, Type, Value};
-use clickhouse_arrow::native::block::Block;
 use uuid::Uuid;
 
 /// Test data for round trip
@@ -376,13 +376,13 @@ pub fn generate_dynamic_test_block() -> Block {
         // Test simple types first for debugging
         Value::Int32(42),
         Value::String(b"hello".to_vec()),
-        Value::Float64(3.14),
+        Value::Float64(3.141_592_653_589_793),
     ];
 
     Block {
-        info: Default::default(),
-        rows: rows.len() as u64,
+        info:         Default::default(),
+        rows:         rows.len() as u64,
         column_types: vec![("dynamic_col".to_string(), Type::Dynamic)],
-        column_data: rows,
+        column_data:  rows,
     }
 }

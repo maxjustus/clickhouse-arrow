@@ -175,8 +175,8 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     debug!("ClickHouse Native URL: {native_url}");
 
     header("native/dynamic", "Testing Dynamic type round trip");
-    
-    // Table create options  
+
+    // Table create options
     let options = CreateOptions::new("MergeTree");
 
     // Create ClientBuilder and ConnectionManager
@@ -193,11 +193,9 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     // Check if the server supports Dynamic type (requires 25.5+)
     // We'll skip the test if the server is too old - since 24.x is still commonly used
     let version_check_query = "SELECT version() as version";
-    let mut stream = client
-        .query::<VersionRow>(version_check_query, None)
-        .await
-        .expect("version query failed");
-    
+    let mut stream =
+        client.query::<VersionRow>(version_check_query, None).await.expect("version query failed");
+
     if let Some(Ok(row)) = stream.next().await {
         let version = row.version;
         debug!("ClickHouse version: {}", version);
@@ -206,7 +204,10 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
         if parts.len() >= 2 {
             if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
                 if major < 25 || (major == 25 && minor < 5) {
-                    warn!("Skipping Dynamic type test - requires ClickHouse 25.5+ (found {})", version);
+                    warn!(
+                        "Skipping Dynamic type test - requires ClickHouse 25.5+ (found {})",
+                        version
+                    );
                     return;
                 }
             }
@@ -215,59 +216,54 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
 
     // Test Dynamic type with direct block operations
     let test_data = generate_dynamic_test_block();
-    
+
     // Create a test table with Dynamic column
     let query_id = "dynamic_test";
     let table_name = "test_dynamic";
-    
+
     header(query_id, format!("Creating table with Dynamic column"));
     client
         .execute(&format!("DROP TABLE IF EXISTS {table_name}"), None)
         .await
         .expect("drop table failed");
-        
+
     client
         .execute(&format!("CREATE TABLE {table_name} (dynamic_col Dynamic) ENGINE = Memory"), None)
         .await
         .expect("create table failed");
-    
+
     header(query_id, "Inserting Dynamic data");
     let insert_query = format!("INSERT INTO {table_name} VALUES");
-    let mut stream = client
-        .insert(&insert_query, test_data, None)
-        .await
-        .expect("insert failed");
-    
+    let mut stream = client.insert(&insert_query, test_data, None).await.expect("insert failed");
+
     while let Some(result) = stream.next().await {
         result.expect("insert stream failed");
     }
-    
+
     header(query_id, "Querying Dynamic data");
     let query = format!("SELECT * FROM {table_name}");
-    let mut stream = client
-        .query::<DynamicRow>(&query, None)  
-        .await
-        .expect("query failed");
-    
+    let mut stream = client.query::<DynamicRow>(&query, None).await.expect("query failed");
+
     let mut received_values = Vec::new();
     while let Some(Ok(row)) = stream.next().await {
         received_values.push(row.dynamic_col);
     }
-    
+
     header(query_id, "Verifying Dynamic data");
     let expected_values = &generate_dynamic_test_block().column_data;
     assert_eq!(received_values.len(), expected_values.len(), "Row count mismatch");
-    
+
     // Verify each value
-    for (i, (expected, received)) in expected_values.iter().zip(received_values.iter()).enumerate() {
+    for (i, (expected, received)) in expected_values.iter().zip(received_values.iter()).enumerate()
+    {
         assert_eq!(expected, received, "Value mismatch at index {}", i);
     }
-    
+
     header(query_id, format!("Dropping table {table_name}"));
     client
         .execute(&format!("DROP TABLE {table_name}"), None)
         .await
         .expect("drop table failed");
-        
+
     header(query_id, "Dynamic type test completed successfully");
 }

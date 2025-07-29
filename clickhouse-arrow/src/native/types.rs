@@ -615,9 +615,7 @@ impl Type {
             Type::Variant(_) => {
                 variant::VariantSerializer::write_sync(self, values, writer, state)?
             }
-            Type::Dynamic => {
-                dynamic::DynamicSerializer::write_sync(self, &values, writer, state)?
-            }
+            Type::Dynamic => dynamic::DynamicSerializer::write_sync(self, &values, writer, state)?,
         }
         Ok(())
     }

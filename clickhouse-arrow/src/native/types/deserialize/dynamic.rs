@@ -26,13 +26,12 @@ pub(crate) struct DynamicDeserializer;
 
 impl DynamicDeserializer {
     /// Determine discriminator size based on total types count
-    #[allow(dead_code)]
     fn discriminator_size(total_types: u64) -> usize {
         match total_types {
-            0..=255 => 1,            // u8
-            256..=65535 => 2,        // u16
+            0..=255 => 1,               // u8
+            256..=65535 => 2,           // u16
             65536..=4_294_967_295 => 4, // u32
-            _ => 8,                  // u64
+            _ => 8,                     // u64
         }
     }
 

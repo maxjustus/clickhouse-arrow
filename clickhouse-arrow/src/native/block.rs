@@ -178,7 +178,9 @@ impl ProtocolData<Self, ()> for Block {
         writer.write_var_uint(columns as u64).await?;
         writer.write_var_uint(self.rows).await?;
 
+        eprintln!("DEBUG: Block has {} columns", columns);
         for (name, type_) in self.column_types {
+            eprintln!("DEBUG: Processing column '{}' of type '{}'", name, type_);
             let mut values = Vec::with_capacity(rows);
             values.extend(self.column_data.drain(..rows));
 
@@ -200,6 +202,16 @@ impl ProtocolData<Self, ()> for Block {
                 }
 
                 let mut state = SerializerState::default();
+
+                // For Dynamic type, we need to analyze values before writing prefix
+                if matches!(type_, Type::Dynamic) {
+                    eprintln!(
+                        "DEBUG: Block write_async found Dynamic type, calling analyze_values"
+                    );
+                    use crate::native::types::serialize::dynamic::DynamicSerializer;
+                    DynamicSerializer::analyze_values(&values)?;
+                }
+
                 type_.serialize_prefix_async(writer, &mut state).await?;
                 type_.serialize_column(values, writer, &mut state).await?;
             }
@@ -248,6 +260,16 @@ impl ProtocolData<Self, ()> for Block {
                 }
 
                 let mut state = SerializerState::default();
+
+                // For Dynamic type, we need to analyze values before writing prefix
+                if matches!(type_, Type::Dynamic) {
+                    eprintln!(
+                        "DEBUG: Block write_async found Dynamic type, calling analyze_values"
+                    );
+                    use crate::native::types::serialize::dynamic::DynamicSerializer;
+                    DynamicSerializer::analyze_values(&values)?;
+                }
+
                 type_.serialize_prefix(writer, &mut state);
                 type_.serialize_column_sync(values, writer, &mut state)?;
             }
