@@ -145,7 +145,8 @@ impl Deserializer for JsonDeserializer {
                 let total_dynamic_paths = reader.read_var_uint().await?;
 
                 // Read path names
-                let mut path_names = Vec::with_capacity(total_dynamic_paths as usize);
+                let mut path_names =
+                    Vec::with_capacity(total_dynamic_paths.try_into().unwrap_or(usize::MAX));
                 for _ in 0..total_dynamic_paths {
                     let path_name_bytes = reader.read_string().await?;
                     let path_name = String::from_utf8(path_name_bytes).map_err(|e| {
@@ -155,7 +156,8 @@ impl Deserializer for JsonDeserializer {
                 }
 
                 // For each dynamic path, read the Dynamic column header
-                let mut dynamic_data = Vec::with_capacity(total_dynamic_paths as usize);
+                let mut dynamic_data =
+                    Vec::with_capacity(total_dynamic_paths.try_into().unwrap_or(usize::MAX));
                 for path_name in &path_names {
                     // Each dynamic path has its own Dynamic column with header
                     // Read Dynamic version (should be 3)
@@ -169,7 +171,8 @@ impl Deserializer for JsonDeserializer {
 
                     // Read Dynamic header (same as Dynamic v3 format)
                     let total_types = reader.read_var_uint().await?;
-                    let mut types = Vec::with_capacity(total_types as usize);
+                    let mut types =
+                        Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
                     for _ in 0..total_types {
                         let type_name_bytes = reader.read_string().await?;
                         let type_name = String::from_utf8(type_name_bytes).map_err(|e| {
@@ -232,14 +235,14 @@ impl Deserializer for JsonDeserializer {
             }
             JSON_OBJECT_SERIALIZATION_VERSION_2 | JSON_OBJECT_SERIALIZATION_VERSION => {
                 // Get the stored JSON format data from prefix phase
+                use std::collections::HashMap;
+
                 let (_total_dynamic_paths, path_names, dynamic_data) =
                     JSON_DYNAMIC_DATA.with(|data| {
                         data.borrow().clone().ok_or_else(|| {
                             Error::DeserializeError("JSON object data not set in state".to_string())
                         })
                     })?;
-
-                use std::collections::HashMap;
 
                 // For each dynamic path, read its data using Dynamic format
                 let mut path_values: HashMap<String, Vec<Value>> = HashMap::new();
@@ -276,12 +279,12 @@ impl Deserializer for JsonDeserializer {
 
                     for (idx, (_, typ)) in types.iter().enumerate() {
                         let type_idx = idx as u64;
-                        if let Some(&count) = row_count_by_type.get(&type_idx) {
-                            if count > 0 {
-                                let column_values =
-                                    typ.deserialize_column(reader, count, state).await?;
-                                drop(columns.insert(type_idx, column_values));
-                            }
+                        if let Some(&count) = row_count_by_type.get(&type_idx)
+                            && count > 0
+                        {
+                            let column_values =
+                                typ.deserialize_column(reader, count, state).await?;
+                            drop(columns.insert(type_idx, column_values));
                         }
                     }
 
@@ -369,14 +372,14 @@ impl Deserializer for JsonDeserializer {
             }
             JSON_OBJECT_SERIALIZATION_VERSION_2 | JSON_OBJECT_SERIALIZATION_VERSION => {
                 // Get the stored JSON format data from prefix phase
+                use std::collections::HashMap;
+
                 let (_total_dynamic_paths, path_names, dynamic_data) =
                     JSON_DYNAMIC_DATA.with(|data| {
                         data.borrow().clone().ok_or_else(|| {
                             Error::DeserializeError("JSON object data not set in state".to_string())
                         })
                     })?;
-
-                use std::collections::HashMap;
 
                 // For each dynamic path, read its data using Dynamic format
                 let mut path_values: HashMap<String, Vec<Value>> = HashMap::new();

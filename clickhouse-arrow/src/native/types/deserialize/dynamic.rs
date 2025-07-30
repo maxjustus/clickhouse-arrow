@@ -51,16 +51,13 @@ impl DynamicDeserializer {
     }
 
     /// Read discriminator sync version
-    fn read_discriminator_sync<R: ClickHouseBytesRead>(
-        reader: &mut R,
-        total_types: u64,
-    ) -> Result<u64> {
-        Ok(match total_types {
+    fn read_discriminator_sync<R: ClickHouseBytesRead>(reader: &mut R, total_types: u64) -> u64 {
+        match total_types {
             0..=255 => u64::from(reader.get_u8()),
             256..=65535 => u64::from(reader.get_u16_le()),
             65536..=4_294_967_295 => u64::from(reader.get_u32_le()),
             _ => reader.get_u64_le(),
-        })
+        }
     }
 
     /// Read v3 header (CH 25.6+) - the only supported format
@@ -311,7 +308,7 @@ impl DynamicDeserializer {
         // Read discriminators
         let mut discriminators = Vec::with_capacity(rows);
         for _ in 0..rows {
-            let disc = Self::read_discriminator_sync(reader, total_types)?;
+            let disc = Self::read_discriminator_sync(reader, total_types);
             discriminators.push(disc);
         }
 

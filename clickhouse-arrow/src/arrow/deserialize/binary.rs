@@ -629,7 +629,7 @@ mod tests {
             .expect("Failed to deserialize Ipv6");
         let array = result.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
         assert_eq!(array.value(0), Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1).octets());
-        assert_eq!(array.value(1), Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1).octets());
+        assert_eq!(array.value(1), Ipv6Addr::LOCALHOST.octets());
         assert_eq!(array.nulls(), None);
     }
 
@@ -656,7 +656,7 @@ mod tests {
         let array = result.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
         assert_eq!(array.value(0), Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1).octets());
         assert!(!array.is_valid(1));
-        assert_eq!(array.value(2), Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1).octets());
+        assert_eq!(array.value(2), Ipv6Addr::LOCALHOST.octets());
         assert_eq!(array.nulls().unwrap().iter().collect::<Vec<bool>>(), vec![true, false, true]);
     }
 

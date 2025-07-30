@@ -341,7 +341,7 @@ pub fn generate_variant_test_block() -> Vec<TestRowVariant> {
                     Value::String(b"b".to_vec()),
                 ])),
             ), /* Array(String) (discriminator 0) */
-            multi_type_variant: Value::Variant(1, Box::new(Value::Float64(3.14))), /* Float64 (discriminator 1) */
+            multi_type_variant: Value::Variant(1, Box::new(Value::Float64(3.14159))), /* Float64 (discriminator 1) */
         },
         TestRowVariant {
             id:                 2,
@@ -376,7 +376,7 @@ pub fn generate_dynamic_test_block() -> Block {
         // Test simple types first for debugging
         Value::Int32(42),
         Value::String(b"hello".to_vec()),
-        Value::Float64(3.141_592_653_589_793),
+        Value::Float64(std::f64::consts::PI),
     ];
 
     Block {

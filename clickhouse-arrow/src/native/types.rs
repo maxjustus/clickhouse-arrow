@@ -842,10 +842,7 @@ impl Type {
                 }
 
                 // Build discriminator map to check if discriminator is valid
-                let discriminator_map = match deserialize::variant::DiscriminatorMap::new(types) {
-                    Ok(map) => map,
-                    Err(_) => return false,
-                };
+                let discriminator_map = deserialize::variant::DiscriminatorMap::new(types);
 
                 // Check if discriminator maps to a valid type and value matches that type
                 if let Some(expected_type) = discriminator_map.get_type(*discriminator) {

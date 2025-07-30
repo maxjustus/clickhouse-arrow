@@ -16,7 +16,7 @@ pub(crate) struct DiscriminatorMap {
 
 impl DiscriminatorMap {
     /// Create a new discriminator map from variant types
-    pub(crate) fn new(variant_types: &[Type]) -> Result<Self> {
+    pub(crate) fn new(variant_types: &[Type]) -> Self {
         // Convert types to their string representations and collect them
         let mut type_strings: Vec<(String, Type)> =
             variant_types.iter().map(|t| (t.to_string(), t.clone())).collect();
@@ -27,11 +27,11 @@ impl DiscriminatorMap {
         // Build the discriminator map, starting from 0
         let mut types = HashMap::new();
         for (idx, (type_str, type_)) in type_strings.into_iter().enumerate() {
-            let discriminator = idx as u8;
+            let discriminator = idx.try_into().expect("Too many variant types (max 256)");
             drop(types.insert(discriminator, (type_str.clone(), type_)));
         }
 
-        Ok(Self { types })
+        Self { types }
     }
 
     /// Get the type for a given discriminator
@@ -130,7 +130,7 @@ impl VariantDeserializer {
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
         let variant_types = type_.unwrap_variant()?;
-        let discriminator_map = DiscriminatorMap::new(variant_types)?;
+        let discriminator_map = DiscriminatorMap::new(variant_types);
 
         // Read discriminators as a simple byte array
         let mut discriminators = vec![0u8; rows];
@@ -195,7 +195,7 @@ impl VariantDeserializer {
         }
 
         let variant_types = type_.unwrap_variant()?;
-        let discriminator_map = DiscriminatorMap::new(variant_types)?;
+        let discriminator_map = DiscriminatorMap::new(variant_types);
 
         // Read discriminators as a simple byte array
         let mut discriminators = vec![0u8; rows];
@@ -236,7 +236,7 @@ mod tests {
         // Test that types are sorted alphabetically
         let types = vec![Type::String, Type::UInt64, Type::Array(Box::new(Type::String))];
 
-        let map = DiscriminatorMap::new(&types).unwrap();
+        let map = DiscriminatorMap::new(&types);
 
         // Expected order: Array(String), String, UInt64
         assert_eq!(map.get_type(0).unwrap().to_string(), "Array(String)");
@@ -250,7 +250,7 @@ mod tests {
         // Test sorting with Date, DateTime, and String
         let types = vec![Type::String, Type::DateTime(chrono_tz::UTC), Type::Date];
 
-        let map = DiscriminatorMap::new(&types).unwrap();
+        let map = DiscriminatorMap::new(&types);
 
         // Expected order: Date, DateTime('UTC'), String
         assert_eq!(map.get_type(0).unwrap().to_string(), "Date");
@@ -615,14 +615,12 @@ mod tests {
         let map = DiscriminatorMap::new(match &nested_type {
             Type::Variant(types) => types,
             _ => panic!("Expected Variant"),
-        })
-        .unwrap();
+        });
 
         // String comes before Variant alphabetically
         assert_eq!(map.get_type(0).unwrap().to_string(), "String");
         assert!(matches!(map.get_type(1).unwrap(), Type::Variant(_)));
     }
-
 
     #[tokio::test]
     async fn test_variant_async_deserialization() {

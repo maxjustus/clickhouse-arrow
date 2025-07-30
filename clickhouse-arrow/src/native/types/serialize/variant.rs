@@ -77,7 +77,7 @@ impl VariantSerializer {
     ) -> Result<()> {
         let variant_types = type_.unwrap_variant()?;
         let discriminator_map =
-            crate::native::types::deserialize::variant::DiscriminatorMap::new(variant_types)?;
+            crate::native::types::deserialize::variant::DiscriminatorMap::new(variant_types);
 
         // Extract discriminators and group values
         let (discriminators, grouped_values) = Self::extract_discriminators_and_values(&values)?;
@@ -120,7 +120,7 @@ impl VariantSerializer {
     ) -> Result<()> {
         let variant_types = type_.unwrap_variant()?;
         let discriminator_map =
-            crate::native::types::deserialize::variant::DiscriminatorMap::new(variant_types)?;
+            crate::native::types::deserialize::variant::DiscriminatorMap::new(variant_types);
 
         // Extract discriminators and group values
         let (discriminators, grouped_values) = Self::extract_discriminators_and_values(&values)?;
