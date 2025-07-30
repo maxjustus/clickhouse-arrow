@@ -749,8 +749,8 @@ impl Type {
                 }
             }
             // No validation needed for simple scalar types and special types
-            Type::Dynamic 
-            | Type::JSON 
+            Type::Dynamic
+            | Type::JSON
             | Type::Object
             | Type::Binary
             | Type::FixedSizedBinary(_)
@@ -948,8 +948,12 @@ impl Type {
             Type::Int16 | Type::Enum16(_) => writer.write_i16_le(0).await?,
             Type::Int32 | Type::Date32 | Type::Decimal32(_) => writer.write_i32_le(0).await?,
             Type::Int64 | Type::Decimal64(_) => writer.write_i64_le(0).await?,
-            Type::Int128 | Type::UInt128 | Type::Uuid | Type::Ipv6 | Type::Decimal128(_) => writer.write_all(&[0; 16]).await?,
-            Type::Int256 | Type::UInt256 | Type::Decimal256(_) => writer.write_all(&[0; 32]).await?,
+            Type::Int128 | Type::UInt128 | Type::Uuid | Type::Ipv6 | Type::Decimal128(_) => {
+                writer.write_all(&[0; 16]).await?
+            }
+            Type::Int256 | Type::UInt256 | Type::Decimal256(_) => {
+                writer.write_all(&[0; 32]).await?
+            }
             Type::UInt8 => writer.write_u8(0).await?,
             Type::UInt16 | Type::Date => writer.write_u16_le(0).await?,
             Type::UInt32 | Type::Ipv4 | Type::DateTime(_) => writer.write_u32_le(0).await?,
@@ -960,7 +964,7 @@ impl Type {
                 let bytes = (0_i64).to_le_bytes();
                 writer.write_all(&bytes[..*precision]).await?;
             }
-            Type::Array(_) | Type::Map(_, _) => writer.write_var_uint(0).await?, // Empty collection
+            Type::Array(_) | Type::Map(_, _) => writer.write_var_uint(0).await?, /* Empty collection */
             // Recursive
             Type::LowCardinality(inner) => Box::pin(inner.write_default(writer)).await?,
             Type::Tuple(inner) => {

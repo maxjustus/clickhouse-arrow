@@ -1,28 +1,15 @@
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 use tokio::io::AsyncWriteExt;
 
 use super::{Serializer, SerializerState, Type};
+use crate::formats::{JsonState, TypeSpecificState};
 use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
 use crate::{Error, Result, Value};
 
 type JsonPathData = (Vec<String>, HashMap<String, Vec<(usize, Value)>>, HashMap<String, u8>);
 
 pub(crate) struct JsonSerializer;
-
-/// Cache for JSON type metadata during serialization
-#[derive(Debug, Default)]
-struct JsonSerializationCache {
-    paths:        Vec<String>,
-    path_columns: BTreeMap<String, Vec<Value>>,
-    rows:         usize,
-}
-
-// Thread-local cache for JSON type metadata
-thread_local! {
-    static JSON_CACHE: RefCell<Option<JsonSerializationCache>> = const { RefCell::new(None) };
-}
 
 // JSON serialization versions from ClickHouse
 const JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION: u64 = 0;
@@ -440,25 +427,19 @@ impl JsonSerializer {
 }
 
 impl JsonSerializer {
-    /// Analyze JSON values and cache metadata for use in `write_prefix`
-    pub(crate) fn analyze_values(values: &[Value]) -> Result<()> {
+    /// Analyze JSON values and return metadata for use in `write_prefix`
+    pub(crate) fn analyze_values(values: &[Value]) -> Result<TypeSpecificState> {
         // Parse JSON values into path-organized structure
         let json_data = JsonData::from_values(values.to_vec())?;
 
-        // Cache the metadata
+        // Build the metadata
         let mut paths: Vec<String> = json_data.path_columns.keys().cloned().collect();
         paths.sort(); // Ensure consistent ordering
-
-        let cache = JsonSerializationCache {
-            paths:        paths.clone(),
-            path_columns: json_data.path_columns,
-            rows:         json_data.rows,
-        };
 
         #[cfg(test)]
         {
             println!("JSON analyze_values found {} paths: {:?}", paths.len(), paths);
-            for (path, values) in &cache.path_columns {
+            for (path, values) in &json_data.path_columns {
                 let types: std::collections::HashSet<_> = values
                     .iter()
                     .filter(|v| !matches!(v, Value::Null))
@@ -468,8 +449,15 @@ impl JsonSerializer {
             }
         }
 
-        JSON_CACHE.with(|c| *c.borrow_mut() = Some(cache));
-        Ok(())
+        let state = JsonState {
+            version: None, // Will be set properly in write_prefix
+            paths: paths.clone(),
+            path_columns: Some(json_data.path_columns),
+            rows: Some(json_data.rows),
+            dynamic_data: None,
+        };
+        
+        Ok(TypeSpecificState::Json(state))
     }
 
     /// Check if server supports flat Dynamic/JSON serialization (v3)
@@ -549,26 +537,29 @@ impl JsonSerializer {
     ) -> Result<()> {
         let version = Self::get_serialization_version(state);
         writer.put_u64_le(version);
+        
+        // Update the version in state
+        if let TypeSpecificState::Json(json_state) = &mut state.type_specific {
+            json_state.version = Some(version);
+        }
 
-        // Retrieve cached metadata from analyze_values
-        let cache_data = JSON_CACHE.with(|cache| cache.borrow_mut().take());
-
-        if let Some(cache) = cache_data {
+        // Retrieve metadata from state
+        if let TypeSpecificState::Json(json_state) = &state.type_specific {
             // Write paths header
-            Self::write_paths_header_sync(&cache.paths, version, writer)?;
+            Self::write_paths_header_sync(&json_state.paths, version, writer)?;
 
             // Write Dynamic column headers for each path
-            for path in &cache.paths {
-                if let Some(column_values) = cache.path_columns.get(path) {
-                    Self::write_dynamic_header_for_column_sync(column_values, writer)?;
+            if let Some(path_columns) = &json_state.path_columns {
+                for path in &json_state.paths {
+                    if let Some(column_values) = path_columns.get(path) {
+                        Self::write_dynamic_header_for_column_sync(column_values, writer)?;
+                    }
                 }
             }
-
-            // Put cache back for use in write()
-            JSON_CACHE.with(|c| *c.borrow_mut() = Some(cache));
         } else {
-            // No cached metadata - write empty format
-            Self::write_paths_header_sync(&[], version, writer)?;
+            return Err(Error::SerializeError(
+                "JSON serialization state not found. `analyze_values` must be called before `write_prefix`.".to_string()
+            ));
         }
 
         Ok(())
@@ -583,26 +574,29 @@ impl Serializer for JsonSerializer {
     ) -> Result<()> {
         let version = Self::get_serialization_version(state);
         writer.write_u64_le(version).await?;
+        
+        // Update the version in state
+        if let TypeSpecificState::Json(json_state) = &mut state.type_specific {
+            json_state.version = Some(version);
+        }
 
-        // Retrieve cached metadata from analyze_values
-        let cache_data = JSON_CACHE.with(|cache| cache.borrow_mut().take());
-
-        if let Some(cache) = cache_data {
+        // Retrieve metadata from state
+        if let TypeSpecificState::Json(json_state) = &state.type_specific {
             // Write paths header
-            Self::write_paths_header_async(&cache.paths, version, writer).await?;
+            Self::write_paths_header_async(&json_state.paths, version, writer).await?;
 
             // Write Dynamic column headers for each path
-            for path in &cache.paths {
-                if let Some(column_values) = cache.path_columns.get(path) {
-                    Self::write_dynamic_header_for_column_async(column_values, writer).await?;
+            if let Some(path_columns) = &json_state.path_columns {
+                for path in &json_state.paths {
+                    if let Some(column_values) = path_columns.get(path) {
+                        Self::write_dynamic_header_for_column_async(column_values, writer).await?;
+                    }
                 }
             }
-
-            // Put cache back for use in write()
-            JSON_CACHE.with(|c| *c.borrow_mut() = Some(cache));
         } else {
-            // No cached metadata - write empty format
-            Self::write_paths_header_async(&[], version, writer).await?;
+            return Err(Error::SerializeError(
+                "JSON serialization state not found. `analyze_values` must be called before `write_prefix`.".to_string()
+            ));
         }
 
         Ok(())
@@ -610,24 +604,26 @@ impl Serializer for JsonSerializer {
 
     async fn write<W: ClickHouseWrite>(
         _type_: &Type,
-        values: Vec<Value>,
+        _values: Vec<Value>,
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
         let use_v3 = Self::supports_flat_dynamic_json(state);
 
-        // Try to get cached data first
-        let cache = JSON_CACHE.with(|cache| cache.borrow_mut().take());
-
-        let (paths, path_columns, rows) = if let Some(cache_data) = cache {
-            // Use cached data from analyze_values
-            (cache_data.paths, cache_data.path_columns, cache_data.rows)
+        // Get metadata from state
+        let (paths, path_columns, rows) = if let TypeSpecificState::Json(json_state) = &state.type_specific {
+            // Use metadata from analyze_values
+            let path_columns = json_state.path_columns.clone().ok_or_else(|| {
+                Error::SerializeError("JSON path columns not found in state".to_string())
+            })?;
+            let rows = json_state.rows.ok_or_else(|| {
+                Error::SerializeError("JSON rows count not found in state".to_string())
+            })?;
+            (json_state.paths.clone(), path_columns, rows)
         } else {
-            // Fallback: parse JSON values if no cache (shouldn't happen in normal flow)
-            let json_data = JsonData::from_values(values)?;
-            let mut paths: Vec<String> = json_data.path_columns.keys().cloned().collect();
-            paths.sort();
-            (paths, json_data.path_columns, json_data.rows)
+            return Err(Error::SerializeError(
+                "JSON serialization state not found. `analyze_values` must be called before `write`.".to_string()
+            ));
         };
 
         // Write data for each path (using Dynamic column format)
@@ -649,24 +645,26 @@ impl Serializer for JsonSerializer {
 
     fn write_sync(
         _type_: &Type,
-        values: Vec<Value>,
+        _values: Vec<Value>,
         writer: &mut impl ClickHouseBytesWrite,
         state: &mut SerializerState,
     ) -> Result<()> {
         let use_v3 = Self::supports_flat_dynamic_json(state);
 
-        // Try to get cached data first
-        let cache = JSON_CACHE.with(|cache| cache.borrow_mut().take());
-
-        let (paths, path_columns, rows) = if let Some(cache_data) = cache {
-            // Use cached data from analyze_values
-            (cache_data.paths, cache_data.path_columns, cache_data.rows)
+        // Get metadata from state
+        let (paths, path_columns, rows) = if let TypeSpecificState::Json(json_state) = &state.type_specific {
+            // Use metadata from analyze_values
+            let path_columns = json_state.path_columns.clone().ok_or_else(|| {
+                Error::SerializeError("JSON path columns not found in state".to_string())
+            })?;
+            let rows = json_state.rows.ok_or_else(|| {
+                Error::SerializeError("JSON rows count not found in state".to_string())
+            })?;
+            (json_state.paths.clone(), path_columns, rows)
         } else {
-            // Fallback: parse JSON values if no cache (shouldn't happen in normal flow)
-            let json_data = JsonData::from_values(values)?;
-            let mut paths: Vec<String> = json_data.path_columns.keys().cloned().collect();
-            paths.sort();
-            (paths, json_data.path_columns, json_data.rows)
+            return Err(Error::SerializeError(
+                "JSON serialization state not found. `analyze_values` must be called before `write`.".to_string()
+            ));
         };
 
         // Write data for each path (using Dynamic column format)
@@ -854,7 +852,8 @@ mod tests {
         let mut state = SerializerState::default();
 
         // First analyze the values (this is normally done by Block serialization)
-        JsonSerializer::analyze_values(&values)?;
+        let type_specific_state = JsonSerializer::analyze_values(&values)?;
+        state.type_specific = type_specific_state;
 
         // Serialize
         type_.serialize_prefix_async(&mut output, &mut state).await?;
@@ -931,11 +930,14 @@ mod tests {
         let type_ = Type::JSON;
 
         // First analyze the values (this is normally done by Block serialization)
-        JsonSerializer::analyze_values(&values)?;
+        let type_specific_state = JsonSerializer::analyze_values(&values)?;
 
         // Test with v3 object serialization (current implementation)
         let mut v3_output = vec![];
-        let mut state = SerializerState::default();
+        let mut state = SerializerState {
+            type_specific: type_specific_state,
+            ..Default::default()
+        };
 
         type_.serialize_prefix_async(&mut v3_output, &mut state).await?;
         type_.serialize_column(values.clone(), &mut v3_output, &mut state).await?;
@@ -984,9 +986,12 @@ mod tests {
         let type_ = Type::JSON;
 
         // Test object serialization (v3 - should decompose into paths)
-        JsonSerializer::analyze_values(&values)?;
+        let type_specific_state = JsonSerializer::analyze_values(&values)?;
         let mut v3_output = vec![];
-        let mut state = SerializerState::default();
+        let mut state = SerializerState {
+            type_specific: type_specific_state,
+            ..Default::default()
+        };
 
         type_.serialize_prefix_async(&mut v3_output, &mut state).await?;
         type_.serialize_column(values.clone(), &mut v3_output, &mut state).await?;
@@ -1034,19 +1039,21 @@ mod tests {
         ];
 
         // Test that analyze_values works correctly
-        JsonSerializer::analyze_values(&values)?;
+        let type_specific_state = JsonSerializer::analyze_values(&values)?;
 
-        // Verify cache was populated
-        let cache_exists = JSON_CACHE.with(|cache| cache.borrow().is_some());
-        assert!(cache_exists, "Cache should be populated after analyze_values");
+        // Verify state was populated
+        assert!(matches!(type_specific_state, TypeSpecificState::Json(_)), "Should return Json state");
 
         let type_ = Type::JSON;
         let values_len = values.len();
 
         let mut output = vec![];
-        let mut state = SerializerState::default();
+        let mut state = SerializerState {
+            type_specific: type_specific_state,
+            ..Default::default()
+        };
 
-        // This should use the cached data
+        // This should use the state data
         type_.serialize_prefix_async(&mut output, &mut state).await?;
         type_.serialize_column(values.clone(), &mut output, &mut state).await?;
 

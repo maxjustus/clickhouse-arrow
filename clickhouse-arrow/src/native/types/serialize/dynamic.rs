@@ -3,25 +3,12 @@ use std::collections::HashMap;
 use tokio::io::AsyncWriteExt;
 
 use crate::Result;
-use crate::formats::SerializerState;
+use crate::formats::{SerializerState, DynamicState, TypeSpecificState};
 use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
 use crate::native::types::serialize::ClickHouseNativeSerializer;
 use crate::native::types::{Type, Value};
 
 const DYNAMIC_VERSION: u64 = 3; // Always use v3 (flattened format)
-
-/// Cache for Dynamic type metadata during serialization
-#[derive(Debug, Default)]
-struct DynamicSerializationCache {
-    type_names:  Vec<String>,
-    type_map:    HashMap<String, (usize, Type)>,
-    total_types: usize,
-}
-
-// Thread-local cache for Dynamic type metadata
-thread_local! {
-    static DYNAMIC_CACHE: std::cell::RefCell<Option<DynamicSerializationCache>> = const { std::cell::RefCell::new(None) };
-}
 
 /// Macro to write discriminator based on size
 macro_rules! write_discriminator {
@@ -175,43 +162,48 @@ impl DynamicSerializer {
     pub(crate) async fn write_prefix<W: ClickHouseWrite>(
         _type: &Type,
         writer: &mut W,
-        _state: &mut SerializerState,
+        state: &mut SerializerState,
     ) -> Result<()> {
         writer.write_u64_le(DYNAMIC_VERSION).await?;
 
-        // Check if we have cached metadata from a previous analysis
-        let cache_data = DYNAMIC_CACHE.with(|cache| cache.borrow_mut().take());
-
-        if let Some(cache) = cache_data {
+        // Check if we have metadata from previous analysis
+        if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
             // v3 format: total_types, then type names, then nested prefixes
-            writer.write_var_uint(cache.total_types as u64).await?;
+            writer.write_var_uint(dynamic_state.total_types).await?;
 
             // Write type names
-            for type_name in &cache.type_names {
+            for type_name in &dynamic_state.type_names {
                 writer.write_string(type_name).await?;
             }
 
+            // Clone type_names and type_map to avoid borrowing issues
+            let type_names = dynamic_state.type_names.clone();
+            let type_map = dynamic_state.type_map.clone();
+            
             // Write nested type prefixes
-            for type_name in &cache.type_names {
-                let (_, typ) = &cache.type_map[type_name];
-                typ.serialize_prefix_async(writer, _state).await?;
+            for type_name in &type_names {
+                let (_, typ) = &type_map[type_name];
+                typ.serialize_prefix_async(writer, state).await?;
             }
-
-            // Put cache back for use in write()
-            DYNAMIC_CACHE.with(|c| *c.borrow_mut() = Some(cache));
         } else {
-            // No cached metadata - write empty v3 format
-            writer.write_var_uint(0).await?; // 0 types
+            return Err(crate::Error::SerializeError(
+                "Dynamic serialization state not found. `analyze_values` must be called before `write_prefix`.".to_string()
+            ));
         }
 
         Ok(())
     }
 
-    /// Analyze values and cache type metadata for use in `write_prefix`
-    pub(crate) fn analyze_values(values: &[Value]) {
+    /// Analyze values and return type metadata for use in `write_prefix`
+    pub(crate) fn analyze_values(values: &[Value]) -> TypeSpecificState {
         let (type_names, type_map, total_types) = Self::build_type_registry(values);
-        let cache = DynamicSerializationCache { type_names, type_map, total_types };
-        DYNAMIC_CACHE.with(|c| *c.borrow_mut() = Some(cache));
+        let state = DynamicState {
+            total_types: total_types as u64,
+            type_names,
+            type_map,
+            types: vec![], // Will be populated if needed
+        };
+        TypeSpecificState::Dynamic(state)
     }
 
     pub(crate) async fn write<W: ClickHouseWrite>(
@@ -220,14 +212,14 @@ impl DynamicSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // Get cached metadata or build it if not available
-        let cache = DYNAMIC_CACHE.with(|cache| cache.borrow_mut().take());
-
-        let (type_names, type_map, total_types) = if let Some(cache) = cache {
-            (cache.type_names, cache.type_map, cache.total_types)
+        // Get metadata from state
+        let (type_names, type_map, total_types) = if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
+            let total = usize::try_from(dynamic_state.total_types).unwrap_or(usize::MAX);
+            (dynamic_state.type_names.clone(), dynamic_state.type_map.clone(), total)
         } else {
-            // This shouldn't happen if analyze_values was called, but handle it anyway
-            Self::build_type_registry(values)
+            return Err(crate::Error::SerializeError(
+                "Dynamic serialization state not found. `analyze_values` must be called before `write`.".to_string()
+            ));
         };
 
         // Build discriminators and count rows per type
@@ -247,33 +239,33 @@ impl DynamicSerializer {
     pub(crate) fn write_prefix_sync<W: ClickHouseBytesWrite>(
         _type: &Type,
         writer: &mut W,
-        _state: &mut SerializerState,
+        state: &mut SerializerState,
     ) -> Result<()> {
         writer.put_u64_le(DYNAMIC_VERSION);
 
-        // Check if we have cached metadata
-        let cache_data = DYNAMIC_CACHE.with(|cache| cache.borrow_mut().take());
-
-        if let Some(cache) = cache_data {
+        // Check if we have metadata from previous analysis
+        if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
             // v3 format: total_types, then type names, then nested prefixes
-            writer.put_var_uint(cache.total_types as u64)?;
+            writer.put_var_uint(dynamic_state.total_types)?;
 
             // Write type names
-            for type_name in &cache.type_names {
+            for type_name in &dynamic_state.type_names {
                 writer.put_string(type_name)?;
             }
 
+            // Clone type_names and type_map to avoid borrowing issues
+            let type_names = dynamic_state.type_names.clone();
+            let type_map = dynamic_state.type_map.clone();
+            
             // Write nested type prefixes
-            for type_name in &cache.type_names {
-                let (_, typ) = &cache.type_map[type_name];
-                typ.serialize_prefix(writer, _state);
+            for type_name in &type_names {
+                let (_, typ) = &type_map[type_name];
+                typ.serialize_prefix(writer, state);
             }
-
-            // Put cache back
-            DYNAMIC_CACHE.with(|c| *c.borrow_mut() = Some(cache));
         } else {
-            // No cached metadata - write empty v3 format
-            writer.put_var_uint(0)?; // 0 types
+            return Err(crate::Error::SerializeError(
+                "Dynamic serialization state not found. `analyze_values` must be called before `write_prefix`.".to_string()
+            ));
         }
 
         Ok(())
@@ -285,13 +277,14 @@ impl DynamicSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // Get cached metadata or build it
-        let cache = DYNAMIC_CACHE.with(|cache| cache.borrow_mut().take());
-
-        let (type_names, type_map, total_types) = if let Some(cache) = cache {
-            (cache.type_names, cache.type_map, cache.total_types)
+        // Get metadata from state
+        let (type_names, type_map, total_types) = if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
+            let total = usize::try_from(dynamic_state.total_types).unwrap_or(usize::MAX);
+            (dynamic_state.type_names.clone(), dynamic_state.type_map.clone(), total)
         } else {
-            Self::build_type_registry(values)
+            return Err(crate::Error::SerializeError(
+                "Dynamic serialization state not found. `analyze_values` must be called before `write`.".to_string()
+            ));
         };
 
         // Build discriminators and count rows per type
@@ -414,11 +407,14 @@ mod tests {
         ];
 
         // Analyze values first
-        DynamicSerializer::analyze_values(&values);
-
+        let type_specific_state = DynamicSerializer::analyze_values(&values);
+        
         // Write prefix
         let mut buffer = Vec::new();
-        let mut state = SerializerState::default();
+        let mut state = SerializerState {
+            type_specific: type_specific_state,
+            ..Default::default()
+        };
         DynamicSerializer::write_prefix(&Type::Dynamic, &mut buffer, &mut state).await.unwrap();
 
         // Verify version and type count

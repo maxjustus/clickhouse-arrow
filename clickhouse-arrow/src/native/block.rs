@@ -209,13 +209,15 @@ impl ProtocolData<Self, ()> for Block {
                 // For Dynamic type, we need to analyze values before writing prefix
                 if matches!(type_, Type::Dynamic) {
                     use crate::native::types::serialize::dynamic::DynamicSerializer;
-                    DynamicSerializer::analyze_values(&values);
+                    let type_specific_state = DynamicSerializer::analyze_values(&values);
+                    state.type_specific = type_specific_state;
                 }
 
                 // For JSON type, we need to analyze values before writing prefix
                 if matches!(type_, Type::JSON) {
                     use crate::native::types::serialize::json::JsonSerializer;
-                    JsonSerializer::analyze_values(&values)?;
+                    let type_specific_state = JsonSerializer::analyze_values(&values)?;
+                    state.type_specific = type_specific_state;
                 }
 
                 type_.serialize_prefix_async(writer, &mut state).await?;
@@ -275,13 +277,15 @@ impl ProtocolData<Self, ()> for Block {
                 // For Dynamic type, we need to analyze values before writing prefix
                 if matches!(type_, Type::Dynamic) {
                     use crate::native::types::serialize::dynamic::DynamicSerializer;
-                    DynamicSerializer::analyze_values(&values);
+                    let type_specific_state = DynamicSerializer::analyze_values(&values);
+                    state.type_specific = type_specific_state;
                 }
 
                 // For JSON type, we need to analyze values before writing prefix
                 if matches!(type_, Type::JSON) {
                     use crate::native::types::serialize::json::JsonSerializer;
-                    JsonSerializer::analyze_values(&values)?;
+                    let type_specific_state = JsonSerializer::analyze_values(&values)?;
+                    state.type_specific = type_specific_state;
                 }
 
                 type_.serialize_prefix(writer, &mut state);

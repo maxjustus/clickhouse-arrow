@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tokio::io::AsyncReadExt;
 
 use crate::Result;
-use crate::formats::DeserializerState;
+use crate::formats::{DeserializerState, DynamicState, TypeSpecificState};
 use crate::io::{ClickHouseBytesRead, ClickHouseRead};
 use crate::native::types::deserialize::ClickHouseNativeDeserializer;
 use crate::native::types::{Type, Value};
@@ -12,13 +12,6 @@ const SUPPORTED_VERSION: u64 = 3;
 const VERSION_ERROR: &str = "Use ClickHouse 25.6+ and enable \
                              'output_format_native_use_flattened_dynamic_and_json_serialization=1' \
                              for v3 format";
-
-type DynamicMetadata = std::cell::RefCell<Option<(u64, Vec<(String, Type)>)>>;
-
-thread_local! {
-    // Store metadata between prefix and data reading phases
-    static METADATA: DynamicMetadata = const { std::cell::RefCell::new(None) };
-}
 
 /// Macro to read discriminator based on size
 macro_rules! read_discriminator {
@@ -108,7 +101,8 @@ impl DynamicDeserializer {
                     format!("Dynamic v{version} serialization not supported. {VERSION_ERROR}")
                 }
                 _ => format!(
-                    "Unknown Dynamic serialization version: {version}. Expected version 3. {VERSION_ERROR}"
+                    "Unknown Dynamic serialization version: {version}. Expected version 3. \
+                     {VERSION_ERROR}"
                 ),
             };
             return Err(crate::Error::DeserializeError(msg));
@@ -136,8 +130,16 @@ impl DynamicDeserializer {
             typ.deserialize_prefix_async(reader, state).await?;
         }
 
-        // Store metadata for data phase
-        METADATA.with(|m| *m.borrow_mut() = Some((total_types, types)));
+        // Store metadata in state for data phase
+        let mut type_names = Vec::with_capacity(types.len());
+        let mut type_map = HashMap::new();
+        for (idx, (name, typ)) in types.iter().enumerate() {
+            type_names.push(name.clone());
+            drop(type_map.insert(name.clone(), (idx, typ.clone())));
+        }
+
+        state.type_specific =
+            TypeSpecificState::Dynamic(DynamicState { total_types, type_names, type_map, types });
         Ok(())
     }
 
@@ -147,11 +149,14 @@ impl DynamicDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (total_types, types) = METADATA.with(|m| {
-            m.borrow_mut().take().ok_or_else(|| {
-                crate::Error::DeserializeError("Dynamic metadata not set".to_string())
-            })
-        })?;
+        let (total_types, types) =
+            if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
+                (dynamic_state.total_types, dynamic_state.types.clone())
+            } else {
+                return Err(crate::Error::DeserializeError(
+                    "Dynamic metadata not set in state".to_string(),
+                ));
+            };
 
         // Read discriminators
         let mut discriminators = Vec::with_capacity(rows);
@@ -181,7 +186,7 @@ impl DynamicDeserializer {
     pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
         _type: &Type,
         reader: &mut R,
-        _state: &mut DeserializerState,
+        state: &mut DeserializerState,
     ) -> Result<()> {
         let version = reader.get_u64_le();
         Self::validate_version(version)?;
@@ -199,8 +204,16 @@ impl DynamicDeserializer {
             typ.deserialize_prefix(reader)?;
         }
 
-        // Store metadata for data phase
-        METADATA.with(|m| *m.borrow_mut() = Some((total_types, types)));
+        // Store metadata in state for data phase
+        let mut type_names = Vec::with_capacity(types.len());
+        let mut type_map = HashMap::new();
+        for (idx, (name, typ)) in types.iter().enumerate() {
+            type_names.push(name.clone());
+            drop(type_map.insert(name.clone(), (idx, typ.clone())));
+        }
+
+        state.type_specific =
+            TypeSpecificState::Dynamic(DynamicState { total_types, type_names, type_map, types });
         Ok(())
     }
 
@@ -210,11 +223,14 @@ impl DynamicDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (total_types, types) = METADATA.with(|m| {
-            m.borrow_mut().take().ok_or_else(|| {
-                crate::Error::DeserializeError("Dynamic metadata not set".to_string())
-            })
-        })?;
+        let (total_types, types) =
+            if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
+                (dynamic_state.total_types, dynamic_state.types.clone())
+            } else {
+                return Err(crate::Error::DeserializeError(
+                    "Dynamic metadata not set in state".to_string(),
+                ));
+            };
 
         // Read discriminators
         let mut discriminators = Vec::with_capacity(rows);

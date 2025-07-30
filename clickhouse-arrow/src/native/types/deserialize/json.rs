@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use tokio::io::AsyncReadExt;
 
 use super::{ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
+use crate::formats::{JsonState as JsonStateData, TypeSpecificState};
 use crate::io::{ClickHouseBytesRead, ClickHouseRead};
 use crate::native::values::Value;
 use crate::{Error, Result};
@@ -11,14 +12,6 @@ use crate::{Error, Result};
 const JSON_STRING_VERSION: u64 = 1;
 const JSON_OBJECT_VERSION_2: u64 = 2;
 const JSON_OBJECT_VERSION_3: u64 = 3;
-
-type JsonState = std::cell::RefCell<(u64, Option<(Vec<String>, Vec<(u64, Vec<(String, Type)>)>)>)>;
-
-thread_local! {
-    // Store version and object data between prefix and data reading phases
-    static JSON_STATE: JsonState =
-        const { std::cell::RefCell::new((JSON_STRING_VERSION, None)) };
-}
 
 /// Macro to read discriminator based on size
 macro_rules! read_discriminator {
@@ -210,7 +203,14 @@ impl Deserializer for JsonDeserializer {
 
         match version {
             JSON_STRING_VERSION => {
-                JSON_STATE.with(|s| *s.borrow_mut() = (version, None));
+                // Simple string version - no paths or dynamic data
+                state.type_specific = TypeSpecificState::Json(JsonStateData {
+                    version: Some(version),
+                    paths: Vec::new(),
+                    path_columns: None,
+                    rows: None,
+                    dynamic_data: None,
+                });
                 Ok(())
             }
             JSON_OBJECT_VERSION_2 | JSON_OBJECT_VERSION_3 => {
@@ -255,7 +255,14 @@ impl Deserializer for JsonDeserializer {
                     dynamic_data.push((total_types, types));
                 }
 
-                JSON_STATE.with(|s| *s.borrow_mut() = (version, Some((path_names, dynamic_data))));
+                // Store metadata in state
+                state.type_specific = TypeSpecificState::Json(JsonStateData {
+                    version: Some(version),
+                    paths: path_names,
+                    path_columns: None,
+                    rows: None,
+                    dynamic_data: Some(dynamic_data),
+                });
                 Ok(())
             }
             _ => Err(Error::DeserializeError(format!(
@@ -270,7 +277,14 @@ impl Deserializer for JsonDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (version, object_data) = JSON_STATE.with(|s| s.borrow().clone());
+        let (version, path_names, dynamic_data) = if let TypeSpecificState::Json(json_state) = &state.type_specific {
+            let version = json_state.version.ok_or_else(|| {
+                Error::DeserializeError("JSON version not set. read_prefix must be called first".to_string())
+            })?;
+            (version, json_state.paths.clone(), json_state.dynamic_data.clone())
+        } else {
+            return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
+        };
 
         match version {
             JSON_STRING_VERSION => {
@@ -282,7 +296,7 @@ impl Deserializer for JsonDeserializer {
                 Ok(out)
             }
             JSON_OBJECT_VERSION_2 | JSON_OBJECT_VERSION_3 => {
-                let (path_names, dynamic_data) = object_data.ok_or_else(|| {
+                let dynamic_data = dynamic_data.ok_or_else(|| {
                     Error::DeserializeError("JSON object data not set".to_string())
                 })?;
 
@@ -339,7 +353,14 @@ impl Deserializer for JsonDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (version, object_data) = JSON_STATE.with(|s| s.borrow().clone());
+        let (version, path_names, dynamic_data) = if let TypeSpecificState::Json(json_state) = &state.type_specific {
+            let version = json_state.version.ok_or_else(|| {
+                Error::DeserializeError("JSON version not set. read_prefix must be called first".to_string())
+            })?;
+            (version, json_state.paths.clone(), json_state.dynamic_data.clone())
+        } else {
+            return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
+        };
 
         match version {
             JSON_STRING_VERSION => {
@@ -351,7 +372,7 @@ impl Deserializer for JsonDeserializer {
                 Ok(out)
             }
             JSON_OBJECT_VERSION_2 | JSON_OBJECT_VERSION_3 => {
-                let (path_names, dynamic_data) = object_data.ok_or_else(|| {
+                let dynamic_data = dynamic_data.ok_or_else(|| {
                     Error::DeserializeError("JSON object data not set".to_string())
                 })?;
 
