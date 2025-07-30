@@ -1,9 +1,24 @@
 use super::{ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
 use crate::io::{ClickHouseBytesRead, ClickHouseRead};
 use crate::native::values::Value;
-use crate::{Error, Result};
+use crate::Result;
 
 pub(crate) struct TupleDeserializer;
+
+/// Build tuple values from column data
+fn build_tuples(rows: usize, inner_types: &[Type], column_data: Vec<Vec<Value>>) -> Vec<Value> {
+    let mut tuples = vec![Value::Tuple(Vec::with_capacity(inner_types.len())); rows];
+    
+    for column_values in column_data {
+        for (i, value) in column_values.into_iter().enumerate() {
+            if let Value::Tuple(tuple_values) = &mut tuples[i] {
+                tuple_values.push(value);
+            }
+        }
+    }
+    
+    tuples
+}
 
 impl Deserializer for TupleDeserializer {
     async fn read_prefix<R: ClickHouseRead>(
@@ -11,17 +26,9 @@ impl Deserializer for TupleDeserializer {
         reader: &mut R,
         state: &mut DeserializerState,
     ) -> Result<()> {
-        match type_ {
-            Type::Tuple(inner) => {
-                for item in inner {
-                    item.deserialize_prefix_async(reader, state).await?;
-                }
-            }
-            _ => {
-                return Err(Error::DeserializeError(
-                    "TupleDeserializer called with non-tuple type".to_string(),
-                ));
-            }
+        let inner_types = type_.unwrap_tuple()?;
+        for item in inner_types {
+            item.deserialize_prefix_async(reader, state).await?;
         }
         Ok(())
     }
@@ -33,22 +40,13 @@ impl Deserializer for TupleDeserializer {
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
         let inner_types = type_.unwrap_tuple()?;
-        let mut tuples = vec![Value::Tuple(Vec::with_capacity(inner_types.len())); rows];
+        let mut column_data = Vec::with_capacity(inner_types.len());
+        
         for type_ in inner_types {
-            for (i, value) in
-                type_.deserialize_column(reader, rows, state).await?.into_iter().enumerate()
-            {
-                match &mut tuples[i] {
-                    Value::Tuple(values) => {
-                        values.push(value);
-                    }
-                    _ => {
-                        return Err(Error::DeserializeError("Expected tuple".to_string()));
-                    }
-                }
-            }
+            column_data.push(type_.deserialize_column(reader, rows, state).await?);
         }
-        Ok(tuples)
+        
+        Ok(build_tuples(rows, inner_types, column_data))
     }
 
     fn read_sync(
@@ -58,21 +56,12 @@ impl Deserializer for TupleDeserializer {
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
         let inner_types = type_.unwrap_tuple()?;
-        let mut tuples = vec![Value::Tuple(Vec::with_capacity(inner_types.len())); rows];
+        let mut column_data = Vec::with_capacity(inner_types.len());
+        
         for type_ in inner_types {
-            for (i, value) in
-                type_.deserialize_column_sync(reader, rows, state)?.into_iter().enumerate()
-            {
-                match &mut tuples[i] {
-                    Value::Tuple(values) => {
-                        values.push(value);
-                    }
-                    _ => {
-                        return Err(Error::DeserializeError("Expected tuple".to_string()));
-                    }
-                }
-            }
+            column_data.push(type_.deserialize_column_sync(reader, rows, state)?);
         }
-        Ok(tuples)
+        
+        Ok(build_tuples(rows, inner_types, column_data))
     }
 }
