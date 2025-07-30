@@ -107,8 +107,7 @@ impl VariantDeserializer {
                         .map(|val| Value::Variant(disc, Box::new(val.clone())))
                         .ok_or_else(|| {
                             crate::Error::DeserializeError(format!(
-                                "Invalid offset {} for discriminator {}",
-                                offset, disc
+                                "Invalid offset {offset} for discriminator {disc}"
                             ))
                         })
                 }
@@ -190,8 +189,7 @@ impl VariantDeserializer {
         // Sanity check
         if rows > MAX_VARIANT_ROWS {
             return Err(crate::Error::DeserializeError(format!(
-                "Variant row count too large: {} (likely corrupt data)",
-                rows
+                "Variant row count too large: {rows} (likely corrupt data)"
             )));
         }
 

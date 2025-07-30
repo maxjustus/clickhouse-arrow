@@ -12,9 +12,11 @@ const JSON_STRING_VERSION: u64 = 1;
 const JSON_OBJECT_VERSION_2: u64 = 2;
 const JSON_OBJECT_VERSION_3: u64 = 3;
 
+type JsonState = std::cell::RefCell<(u64, Option<(Vec<String>, Vec<(u64, Vec<(String, Type)>)>)>)>;
+
 thread_local! {
     // Store version and object data between prefix and data reading phases
-    static JSON_STATE: std::cell::RefCell<(u64, Option<(Vec<String>, Vec<(u64, Vec<(String, Type)>)>)>)> =
+    static JSON_STATE: JsonState =
         const { std::cell::RefCell::new((JSON_STRING_VERSION, None)) };
 }
 

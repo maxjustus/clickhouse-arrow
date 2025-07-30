@@ -364,7 +364,7 @@ mod tests {
         for (value, expected_type_name) in test_cases {
             let guessed_type = value.guess_type();
             let type_name = guessed_type.to_string();
-            assert_eq!(type_name, expected_type_name, "For value {:?}", value);
+            assert_eq!(type_name, expected_type_name, "For value {value:?}");
         }
     }
 
@@ -464,7 +464,7 @@ mod tests {
         for (total_types, expected_bytes) in test_cases {
             let mut buffer = Vec::new();
             write_discriminator!(sync &mut buffer, 0, total_types);
-            assert_eq!(buffer.len(), expected_bytes, "Failed for total_types={}", total_types);
+            assert_eq!(buffer.len(), expected_bytes, "Failed for total_types={total_types}");
         }
     }
 }

@@ -7,6 +7,8 @@ use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
 use crate::native::types::serialize::{ClickHouseNativeSerializer, SerializerState};
 use crate::native::types::{Type, Value};
 
+type VariantGroupedData = (Vec<u8>, HashMap<u8, Vec<Value>>);
+
 const VERSION: u64 = 0;
 const NULL_DISCRIMINATOR: u8 = 0xFF;
 
@@ -17,7 +19,7 @@ impl VariantSerializer {
     /// Extract discriminators and group values by discriminator
     fn extract_discriminators_and_values(
         values: &[Value],
-    ) -> Result<(Vec<u8>, HashMap<u8, Vec<Value>>)> {
+    ) -> Result<VariantGroupedData> {
         let mut discriminators = Vec::with_capacity(values.len());
         let mut grouped_values: HashMap<u8, Vec<Value>> = HashMap::new();
 
@@ -128,7 +130,7 @@ impl VariantSerializer {
 
     pub(crate) fn write_sync<W: ClickHouseBytesWrite>(
         type_: &Type,
-        values: Vec<Value>,
+        values: &[Value],
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
@@ -137,7 +139,7 @@ impl VariantSerializer {
             crate::native::types::deserialize::variant::DiscriminatorMap::new(variant_types);
 
         // Extract discriminators and group values
-        let (discriminators, grouped_values) = Self::extract_discriminators_and_values(&values)?;
+        let (discriminators, grouped_values) = Self::extract_discriminators_and_values(values)?;
 
         // Write discriminators
         writer.put_slice(&discriminators);
@@ -158,19 +160,19 @@ mod tests {
 
     /// Helper to serialize and deserialize variant values
     fn round_trip_test(variant_type: &Type, values: Vec<Value>) {
+        use bytes::Buf;
+        
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
 
         // Serialize
         VariantSerializer::write_sync_prefix(variant_type, &mut buffer, &mut state).unwrap();
-        VariantSerializer::write_sync(variant_type, values.clone(), &mut buffer, &mut state)
+        VariantSerializer::write_sync(variant_type, &values, &mut buffer, &mut state)
             .unwrap();
 
         // Deserialize
         let mut reader = Cursor::new(buffer);
         let mut deser_state = DeserializerState::default();
-
-        use bytes::Buf;
         let _ = reader.get_u64_le(); // Skip version
 
         let deserialized = VariantDeserializer::read_sync(
@@ -229,18 +231,19 @@ mod tests {
 
     #[test]
     fn test_variant_homogeneous() {
+        use bytes::Buf;
+        
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64, Type::Float64]);
         // All UInt64 (discriminator 2 after sorting)
-        let values = (100..=500).step_by(100).map(|v| variant!(2, Value::UInt64(v))).collect();
+        let values: Vec<_> = (100..=500).step_by(100).map(|v| variant!(2, Value::UInt64(v))).collect();
 
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
 
         VariantSerializer::write_sync_prefix(&variant_type, &mut buffer, &mut state).unwrap();
-        VariantSerializer::write_sync(&variant_type, values, &mut buffer, &mut state).unwrap();
+        VariantSerializer::write_sync(&variant_type, &values, &mut buffer, &mut state).unwrap();
 
         // Verify discriminators
-        use bytes::Buf;
         let mut reader = Cursor::new(&buffer);
         assert_eq!(reader.get_u64_le(), 0); // Version
         for _ in 0..5 {
@@ -298,6 +301,8 @@ mod tests {
 
     #[test]
     fn test_variant_all_nulls() {
+        use bytes::Buf;
+        
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64, Type::Date]);
         let values = vec![variant!(0xFF, Value::Null); 4];
 
@@ -305,10 +310,9 @@ mod tests {
         let mut state = SerializerState::default();
 
         VariantSerializer::write_sync_prefix(&variant_type, &mut buffer, &mut state).unwrap();
-        VariantSerializer::write_sync(&variant_type, values, &mut buffer, &mut state).unwrap();
+        VariantSerializer::write_sync(&variant_type, &values, &mut buffer, &mut state).unwrap();
 
         // Verify wire format
-        use bytes::Buf;
         let mut reader = Cursor::new(&buffer);
         assert_eq!(reader.get_u64_le(), 0); // Version
         for _ in 0..4 {
@@ -338,6 +342,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_variant_async() {
+        use tokio::io::AsyncReadExt;
+        
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
         let values =
             vec![variant!(1, Value::UInt64(999)), variant!(0, Value::String(b"async".to_vec()))];
@@ -354,7 +360,6 @@ mod tests {
         let mut reader = Cursor::new(buffer);
         let mut deser_state = DeserializerState::default();
 
-        use tokio::io::AsyncReadExt;
         let _ = reader.read_u64_le().await.unwrap();
 
         let deserialized =

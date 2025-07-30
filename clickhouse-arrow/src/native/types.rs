@@ -228,11 +228,8 @@ impl Type {
             Type::LowCardinality(x) => x.default_value(),
             Type::Array(_) => Value::Array(vec![]),
             Type::Tuple(types) => Value::Tuple(types.iter().map(Type::default_value).collect()),
-            Type::Nullable(_) => Value::Null,
+            Type::Nullable(_) | Type::Variant(_) | Type::Dynamic | Type::JSON => Value::Null,
             Type::Map(_, _) => Value::Map(vec![], vec![]),
-            Type::Variant(_) => Value::Null, // Default variant value is NULL
-            Type::Dynamic => Value::Null,    // Default dynamic value is NULL
-            Type::JSON => Value::Null,       // Default JSON value is NULL
             Type::Point => Value::Point(Point::default()),
             Type::Ring => Value::Ring(Ring::default()),
             Type::Polygon => Value::Polygon(Polygon::default()),
@@ -541,10 +538,10 @@ impl Type {
                     object::ObjectSerializer::write(self, values, writer, state).await?;
                 }
                 Type::Variant(_) => {
-                    variant::VariantSerializer::write(self, values, writer, state).await?
+                    variant::VariantSerializer::write(self, values, writer, state).await?;
                 }
                 Type::Dynamic => {
-                    dynamic::DynamicSerializer::write(self, &values, writer, state).await?
+                    dynamic::DynamicSerializer::write(self, &values, writer, state).await?;
                 }
                 Type::JSON => json::JsonSerializer::write(self, values, writer, state).await?,
             }
@@ -618,7 +615,7 @@ impl Type {
                 object::ObjectSerializer::write_sync(self, values, writer, state)?;
             }
             Type::Variant(_) => {
-                variant::VariantSerializer::write_sync(self, values, writer, state)?
+                variant::VariantSerializer::write_sync(self, &values, writer, state)?;
             }
             Type::Dynamic => dynamic::DynamicSerializer::write_sync(self, &values, writer, state)?,
             Type::JSON => json::JsonSerializer::write_sync(self, values, writer, state)?,
@@ -755,10 +752,8 @@ impl Type {
                     inner_type.validate()?;
                 }
             }
-            Type::Dynamic => {} // No validation needed for Dynamic
-            Type::JSON => {}    // No validation needed for JSON
-            Type::Object => {}  // No validation needed for Object
-            _ => {}
+            Type::Dynamic | Type::JSON | Type::Object => {} // No validation needed
+            _ => {} // No validation needed for other types
         }
         Ok(())
     }

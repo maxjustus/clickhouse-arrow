@@ -13,9 +13,11 @@ const VERSION_ERROR: &str = "Use ClickHouse 25.6+ and enable \
                              'output_format_native_use_flattened_dynamic_and_json_serialization=1' \
                              for v3 format";
 
+type DynamicMetadata = std::cell::RefCell<Option<(u64, Vec<(String, Type)>)>>;
+
 thread_local! {
     // Store metadata between prefix and data reading phases
-    static METADATA: std::cell::RefCell<Option<(u64, Vec<(String, Type)>)>> = const { std::cell::RefCell::new(None) };
+    static METADATA: DynamicMetadata = const { std::cell::RefCell::new(None) };
 }
 
 /// Macro to read discriminator based on size
@@ -90,8 +92,7 @@ impl DynamicDeserializer {
                 } else {
                     columns.get(&disc).and_then(|col| col.get(offset)).cloned().ok_or_else(|| {
                         crate::Error::DeserializeError(format!(
-                            "Invalid offset {} for discriminator {}",
-                            offset, disc
+                            "Invalid offset {offset} for discriminator {disc}"
                         ))
                     })
                 }
@@ -104,11 +105,10 @@ impl DynamicDeserializer {
         if version != SUPPORTED_VERSION {
             let msg = match version {
                 1 | 2 => {
-                    format!("Dynamic v{} serialization not supported. {}", version, VERSION_ERROR)
+                    format!("Dynamic v{version} serialization not supported. {VERSION_ERROR}")
                 }
                 _ => format!(
-                    "Unknown Dynamic serialization version: {}. Expected version 3. {}",
-                    version, VERSION_ERROR
+                    "Unknown Dynamic serialization version: {version}. Expected version 3. {VERSION_ERROR}"
                 ),
             };
             return Err(crate::Error::DeserializeError(msg));
@@ -265,7 +265,7 @@ mod tests {
                 65536..=4_294_967_295 => 4,
                 _ => 8,
             };
-            assert_eq!(size, expected_size, "Failed for total_types: {}", total_types);
+            assert_eq!(size, expected_size, "Failed for total_types: {total_types}");
         }
     }
 }
