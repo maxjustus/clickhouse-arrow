@@ -615,15 +615,9 @@ fn test_value_display_formatting() {
 
     // Test large integer types with suffix
     assert_eq!(Value::Int128(42).to_string(), "42::Int128");
-    assert_eq!(
-        Value::Int256(i256::from(42i128)).to_string(),
-        "0x000000000000000000000000000000000000000000000000000000000000002A::Int256"
-    );
+    assert_eq!(Value::Int256(i256::from(42i128)).to_string(), "42::Int256");
     assert_eq!(Value::UInt128(42).to_string(), "42::UInt128");
-    assert_eq!(
-        Value::UInt256(u256::from((42u128, 0u128))).to_string(),
-        "0x0000000000000000000000000000002A00000000000000000000000000000000::UInt256"
-    );
+    assert_eq!(Value::UInt256(u256::from((0u128, 42u128))).to_string(), "42::UInt256");
 
     // Test float display
     assert_eq!(Value::Float32(1.5).to_string(), "1.5");
@@ -636,10 +630,7 @@ fn test_value_display_formatting() {
     assert_eq!(Value::Decimal32(4, 1234).to_string(), ".1234");
     assert_eq!(Value::Decimal64(3, 123_456).to_string(), "123.456");
     assert_eq!(Value::Decimal128(1, 42).to_string(), "4.2");
-    assert_eq!(
-        Value::Decimal256(0, i256::from(42i128)).to_string(),
-        "0x000000000000000000000000000000000000000000000000000000000000002A."
-    );
+    assert_eq!(Value::Decimal256(0, i256::from(42i128)).to_string(), "42.");
 
     // Test string escaping
     assert_eq!(Value::String(b"hello".to_vec()).to_string(), "'hello'");
@@ -857,10 +848,7 @@ fn test_decimal_display_edge_cases() {
     assert_eq!(Value::Decimal32(5, 123).to_string(), "123");
     assert_eq!(Value::Decimal64(10, 456).to_string(), "456");
     assert_eq!(Value::Decimal128(8, 789).to_string(), "789");
-    assert_eq!(
-        Value::Decimal256(6, i256::from(42i128)).to_string(),
-        "0x0000000000000000000000000000000000000000000000000000000000.00002A"
-    );
+    assert_eq!(Value::Decimal256(6, i256::from(42i128)).to_string(), "42");
 
     // Test zero scale
     assert_eq!(Value::Decimal32(0, 123).to_string(), "123.");

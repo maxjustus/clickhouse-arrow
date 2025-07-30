@@ -949,10 +949,10 @@ impl Type {
             Type::Int32 | Type::Date32 | Type::Decimal32(_) => writer.write_i32_le(0).await?,
             Type::Int64 | Type::Decimal64(_) => writer.write_i64_le(0).await?,
             Type::Int128 | Type::UInt128 | Type::Uuid | Type::Ipv6 | Type::Decimal128(_) => {
-                writer.write_all(&[0; 16]).await?
+                writer.write_all(&[0; 16]).await?;
             }
             Type::Int256 | Type::UInt256 | Type::Decimal256(_) => {
-                writer.write_all(&[0; 32]).await?
+                writer.write_all(&[0; 32]).await?;
             }
             Type::UInt8 => writer.write_u8(0).await?,
             Type::UInt16 | Type::Date => writer.write_u16_le(0).await?,
