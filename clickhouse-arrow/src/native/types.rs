@@ -752,8 +752,40 @@ impl Type {
                     inner_type.validate()?;
                 }
             }
-            Type::Dynamic | Type::JSON | Type::Object => {} // No validation needed
-            _ => {} // No validation needed for other types
+            // No validation needed for simple scalar types and special types
+            Type::Dynamic 
+            | Type::JSON 
+            | Type::Object
+            | Type::Binary
+            | Type::FixedSizedBinary(_)
+            | Type::String
+            | Type::FixedSizedString(_)
+            | Type::Int8
+            | Type::Int16
+            | Type::Int32
+            | Type::Int64
+            | Type::Int128
+            | Type::Int256
+            | Type::UInt8
+            | Type::UInt16
+            | Type::UInt32
+            | Type::UInt64
+            | Type::UInt128
+            | Type::UInt256
+            | Type::Float32
+            | Type::Float64
+            | Type::Date
+            | Type::Date32
+            | Type::DateTime(_)
+            | Type::Uuid
+            | Type::Ipv4
+            | Type::Ipv6
+            | Type::Enum8(_)
+            | Type::Enum16(_)
+            | Type::Point
+            | Type::Ring
+            | Type::Polygon
+            | Type::MultiPolygon => {}
         }
         Ok(())
     }
@@ -793,7 +825,9 @@ impl Type {
             | (Type::Point, Value::Point(_))
             | (Type::Ring, Value::Ring(_))
             | (Type::Polygon, Value::Polygon(_))
-            | (Type::MultiPolygon, Value::MultiPolygon(_)) => true,
+            | (Type::MultiPolygon, Value::MultiPolygon(_))
+            | (Type::Variant(_), Value::Null)  // NULL is valid for Variant
+            | (Type::Dynamic, _) => true,      // Dynamic accepts any value
             (Type::DateTime(tz1), Value::DateTime(date)) => tz1 == &date.0,
             (Type::DateTime64(precision1, tz1), Value::DateTime64(tz2)) => {
                 tz1 == &tz2.0 && precision1 == &tz2.2
@@ -846,8 +880,6 @@ impl Type {
                     false
                 }
             }
-            (Type::Variant(_), Value::Null) => true, // NULL is valid for Variant
-            (Type::Dynamic, _) => true,              // Dynamic accepts any value
             _ => false,
         }
     }
