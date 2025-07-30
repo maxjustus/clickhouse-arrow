@@ -159,7 +159,7 @@ mod tests {
     use crate::native::values::Date;
 
     /// Helper to serialize and deserialize variant values
-    fn round_trip_test(variant_type: &Type, values: Vec<Value>) {
+    fn round_trip_test(variant_type: &Type, values: &[Value]) {
         use bytes::Buf;
         
         let mut buffer = Vec::new();
@@ -167,7 +167,7 @@ mod tests {
 
         // Serialize
         VariantSerializer::write_sync_prefix(variant_type, &mut buffer, &mut state).unwrap();
-        VariantSerializer::write_sync(variant_type, &values, &mut buffer, &mut state)
+        VariantSerializer::write_sync(variant_type, values, &mut buffer, &mut state)
             .unwrap();
 
         // Deserialize
@@ -201,7 +201,7 @@ mod tests {
             variant!(1, Value::UInt64(42)),
             variant!(0, Value::String(b"world".to_vec())),
         ];
-        round_trip_test(&variant_type, values);
+        round_trip_test(&variant_type, &values);
     }
 
     #[test]
@@ -212,7 +212,7 @@ mod tests {
             variant!(0xFF, Value::Null),
             variant!(1, Value::UInt64(123)),
         ];
-        round_trip_test(&variant_type, values);
+        round_trip_test(&variant_type, &values);
     }
 
     #[test]
@@ -226,7 +226,7 @@ mod tests {
             variant!(1, Value::Date(Date(19723))),
             variant!(0, Value::Array(vec![Value::String(b"c".to_vec())])),
         ];
-        round_trip_test(&variant_type, values);
+        round_trip_test(&variant_type, &values);
     }
 
     #[test]
@@ -271,7 +271,7 @@ mod tests {
             variant!(0xFF, Value::Null),
             variant!(4, Value::UInt64(999)),
         ];
-        round_trip_test(&variant_type, values);
+        round_trip_test(&variant_type, &values);
     }
 
     #[test]
@@ -290,13 +290,13 @@ mod tests {
                 Value::Tuple(vec![Value::String(b"tuple_str".to_vec()), Value::UInt64(42),])
             ),
         ];
-        round_trip_test(&variant_type, values);
+        round_trip_test(&variant_type, &values);
     }
 
     #[test]
     fn test_variant_empty() {
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
-        round_trip_test(&variant_type, vec![]);
+        round_trip_test(&variant_type, &[]);
     }
 
     #[test]
