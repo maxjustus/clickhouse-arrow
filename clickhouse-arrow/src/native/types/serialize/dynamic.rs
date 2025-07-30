@@ -8,6 +8,8 @@ use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
 use crate::native::types::serialize::ClickHouseNativeSerializer;
 use crate::native::types::{Type, Value};
 
+const DYNAMIC_VERSION: u64 = 3; // Always use v3 (flattened format)
+
 /// Cache for Dynamic type metadata during serialization
 #[derive(Debug, Default)]
 struct DynamicSerializationCache {
@@ -21,96 +23,51 @@ thread_local! {
     static DYNAMIC_CACHE: std::cell::RefCell<Option<DynamicSerializationCache>> = const { std::cell::RefCell::new(None) };
 }
 
+/// Macro to write discriminator based on size
+macro_rules! write_discriminator {
+    (async $writer:expr, $disc:expr, $total_types:expr) => {
+        match $total_types {
+            0..=255 => {
+                debug_assert!($disc <= 255);
+                $writer.write_u8(u8::try_from($disc).unwrap()).await?
+            }
+            256..=65535 => {
+                debug_assert!($disc <= 65535);
+                $writer.write_u16_le(u16::try_from($disc).unwrap()).await?
+            }
+            65536..=4_294_967_295 => {
+                $writer.write_u32_le(u32::try_from($disc).unwrap()).await?
+            }
+            _ => $writer.write_u64_le($disc).await?,
+        }
+    };
+    (sync $writer:expr, $disc:expr, $total_types:expr) => {
+        match $total_types {
+            0..=255 => {
+                debug_assert!($disc <= 255);
+                $writer.put_u8(u8::try_from($disc).unwrap())
+            }
+            256..=65535 => {
+                debug_assert!($disc <= 65535);  
+                $writer.put_u16_le(u16::try_from($disc).unwrap())
+            }
+            65536..=4_294_967_295 => {
+                $writer.put_u32_le(u32::try_from($disc).unwrap())
+            }
+            _ => $writer.put_u64_le($disc),
+        }
+    };
+}
+
 /// Handles serialization of Dynamic types
 /// Dynamic is internally represented as a Variant with different serialization versions
 pub(crate) struct DynamicSerializer;
 
 impl DynamicSerializer {
-    /// Determine discriminator size based on total types count
-    /// (Kept for potential future use when we add v2 support)
-    #[allow(dead_code)]
-    fn discriminator_size(total_types: usize) -> usize {
-        match total_types {
-            0..=255 => 1,               // u8
-            256..=65535 => 2,           // u16
-            65536..=4_294_967_295 => 4, // u32
-            _ => 8,                     // u64
-        }
-    }
-
-    /// Write discriminator based on the total types count (async)
-    #[allow(clippy::cast_possible_truncation)]
-    async fn write_discriminator_async<W: ClickHouseWrite>(
-        writer: &mut W,
-        discriminator: u64,
-        total_types: usize,
-    ) -> Result<()> {
-        match total_types {
-            0..=255 => writer.write_u8(discriminator as u8).await?,
-            256..=65535 => writer.write_u16_le(discriminator as u16).await?,
-            65536..=4_294_967_295 => writer.write_u32_le(discriminator as u32).await?,
-            _ => writer.write_u64_le(discriminator).await?,
-        }
-        Ok(())
-    }
-
-    /// Write discriminator based on the total types count (sync)
-    #[allow(clippy::cast_possible_truncation)]
-    fn write_discriminator_sync<W: ClickHouseBytesWrite>(
-        writer: &mut W,
-        discriminator: u64,
-        total_types: usize,
-    ) {
-        match total_types {
-            0..=255 => writer.put_u8(discriminator as u8),
-            256..=65535 => writer.put_u16_le(discriminator as u16),
-            65536..=4_294_967_295 => writer.put_u32_le(discriminator as u32),
-            _ => writer.put_u64_le(discriminator),
-        }
-    }
-
-    #[allow(clippy::used_underscore_binding)]
-    pub(crate) async fn write_prefix<W: ClickHouseWrite>(
-        _type: &Type,
-        writer: &mut W,
-        _state: &mut SerializerState,
-    ) -> Result<()> {
-        // Always use v3 (flattened format) for now
-        // v2 support can be added later if needed
-        writer.write_u64_le(3).await?;
-
-        // Check if we have cached metadata from a previous analysis
-        let cache_data = DYNAMIC_CACHE.with(|cache| cache.borrow_mut().take());
-
-        if let Some(cache) = cache_data {
-            // We have cached metadata from analyze_values, write it now
-
-            // v3 format: total_types, then type names, then nested prefixes
-            writer.write_var_uint(cache.total_types as u64).await?;
-
-            // Write type names
-            for type_name in &cache.type_names {
-                writer.write_string(type_name).await?;
-            }
-
-            // Write nested type prefixes
-            for type_name in &cache.type_names {
-                let (_, typ) = &cache.type_map[type_name];
-                typ.serialize_prefix_async(writer, _state).await?;
-            }
-
-            // Put cache back for use in write()
-            DYNAMIC_CACHE.with(|c| *c.borrow_mut() = Some(cache));
-        } else {
-            // No cached metadata - write empty v3 format
-            writer.write_var_uint(0).await?; // 0 types
-        }
-
-        Ok(())
-    }
-
-    /// Analyze values and cache type metadata for use in `write_prefix`
-    pub(crate) fn analyze_values(values: &[Value]) {
+    /// Build type registry from values
+    fn build_type_registry(
+        values: &[Value],
+    ) -> (Vec<String>, HashMap<String, (usize, Type)>, usize) {
         let mut type_map: HashMap<String, (usize, Type)> = HashMap::new();
         let mut type_names: Vec<String> = Vec::new();
 
@@ -137,63 +94,20 @@ impl DynamicSerializer {
         type_map.clear();
         for (index, type_name) in type_names.iter().enumerate() {
             let value_type = type_name.parse::<Type>().unwrap_or(Type::String);
-            drop(type_map.insert(type_name.clone(), (index, value_type)));
+            let old = type_map.insert(type_name.clone(), (index, value_type));
+            debug_assert!(old.is_none());
         }
 
         let total_types = type_names.len();
-        let cache = DynamicSerializationCache { type_names, type_map, total_types };
-
-        DYNAMIC_CACHE.with(|c| *c.borrow_mut() = Some(cache));
+        (type_names, type_map, total_types)
     }
 
-    pub(crate) async fn write<W: ClickHouseWrite>(
-        _type: &Type,
+    /// Build discriminators and group rows by type
+    fn build_discriminators_and_groups(
         values: &[Value],
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        // Get cached metadata or build it if not available
-        let cache = DYNAMIC_CACHE.with(|cache| cache.borrow_mut().take());
-
-        let (type_names, type_map, total_types) = if let Some(cache) = cache {
-            // Use cached metadata
-            (cache.type_names, cache.type_map, cache.total_types)
-        } else {
-            // This shouldn't happen if analyze_values was called, but handle it anyway
-            let mut type_map: HashMap<String, (usize, Type)> = HashMap::new();
-            let mut type_names: Vec<String> = Vec::new();
-
-            // Scan all values to build type registry
-            for value in values {
-                if !matches!(value, Value::Null) {
-                    let value_type = value.guess_type();
-                    let type_name = value_type.to_string();
-
-                    if let std::collections::hash_map::Entry::Vacant(entry) =
-                        type_map.entry(type_name.clone())
-                    {
-                        let index = type_names.len();
-                        type_names.push(type_name);
-                        let _ = entry.insert((index, value_type));
-                    }
-                }
-            }
-
-            // Sort type names alphabetically (ClickHouse requirement)
-            type_names.sort();
-
-            // Rebuild type map with sorted indices
-            type_map.clear();
-            for (index, type_name) in type_names.iter().enumerate() {
-                let value_type = type_name.parse::<Type>().unwrap_or(Type::String);
-                drop(type_map.insert(type_name.clone(), (index, value_type)));
-            }
-
-            let total_types = type_names.len();
-            (type_names, type_map, total_types)
-        };
-
-        // Build discriminators and count rows per type
+        type_map: &HashMap<String, (usize, Type)>,
+        total_types: usize,
+    ) -> (Vec<u64>, HashMap<usize, Vec<usize>>) {
         let mut discriminators = Vec::with_capacity(values.len());
         let mut rows_by_type: HashMap<usize, Vec<usize>> = HashMap::new();
 
@@ -210,28 +124,127 @@ impl DynamicSerializer {
             }
         }
 
-        // Write discriminators
-        for &disc in &discriminators {
-            Self::write_discriminator_async(writer, disc, total_types).await?;
-        }
+        (discriminators, rows_by_type)
+    }
 
-        // Write column data for each type
+    /// Write column data for each type
+    async fn write_columns<W: ClickHouseWrite>(
+        type_names: &[String],
+        type_map: &HashMap<String, (usize, Type)>,
+        rows_by_type: &HashMap<usize, Vec<usize>>,
+        values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
         for (type_idx, type_name) in type_names.iter().enumerate() {
             if let Some(row_indices) = rows_by_type.get(&type_idx) {
                 let (_, typ) = &type_map[type_name];
 
                 // Collect values for this type
-                let mut type_values = Vec::with_capacity(row_indices.len());
-                for &row_idx in row_indices {
-                    type_values.push(values[row_idx].clone());
-                }
+                let type_values: Vec<Value> =
+                    row_indices.iter().map(|&row_idx| values[row_idx].clone()).collect();
 
                 // Write the column data
                 typ.serialize_column(type_values, writer, state).await?;
             }
         }
+        Ok(())
+    }
+
+    /// Write column data for each type (sync)
+    fn write_columns_sync<W: ClickHouseBytesWrite>(
+        type_names: &[String],
+        type_map: &HashMap<String, (usize, Type)>,
+        rows_by_type: &HashMap<usize, Vec<usize>>,
+        values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        for (type_idx, type_name) in type_names.iter().enumerate() {
+            if let Some(row_indices) = rows_by_type.get(&type_idx) {
+                let (_, typ) = &type_map[type_name];
+
+                // Collect values for this type
+                let type_values: Vec<Value> =
+                    row_indices.iter().map(|&row_idx| values[row_idx].clone()).collect();
+
+                // Write the column data
+                typ.serialize_column_sync(type_values, writer, state)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::used_underscore_binding)]
+    pub(crate) async fn write_prefix<W: ClickHouseWrite>(
+        _type: &Type,
+        writer: &mut W,
+        _state: &mut SerializerState,
+    ) -> Result<()> {
+        writer.write_u64_le(DYNAMIC_VERSION).await?;
+
+        // Check if we have cached metadata from a previous analysis
+        let cache_data = DYNAMIC_CACHE.with(|cache| cache.borrow_mut().take());
+
+        if let Some(cache) = cache_data {
+            // v3 format: total_types, then type names, then nested prefixes
+            writer.write_var_uint(cache.total_types as u64).await?;
+
+            // Write type names
+            for type_name in &cache.type_names {
+                writer.write_string(type_name).await?;
+            }
+
+            // Write nested type prefixes
+            for type_name in &cache.type_names {
+                let (_, typ) = &cache.type_map[type_name];
+                typ.serialize_prefix_async(writer, _state).await?;
+            }
+
+            // Put cache back for use in write()
+            DYNAMIC_CACHE.with(|c| *c.borrow_mut() = Some(cache));
+        } else {
+            // No cached metadata - write empty v3 format
+            writer.write_var_uint(0).await?; // 0 types
+        }
 
         Ok(())
+    }
+
+    /// Analyze values and cache type metadata for use in `write_prefix`
+    pub(crate) fn analyze_values(values: &[Value]) {
+        let (type_names, type_map, total_types) = Self::build_type_registry(values);
+        let cache = DynamicSerializationCache { type_names, type_map, total_types };
+        DYNAMIC_CACHE.with(|c| *c.borrow_mut() = Some(cache));
+    }
+
+    pub(crate) async fn write<W: ClickHouseWrite>(
+        _type: &Type,
+        values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        // Get cached metadata or build it if not available
+        let cache = DYNAMIC_CACHE.with(|cache| cache.borrow_mut().take());
+
+        let (type_names, type_map, total_types) = if let Some(cache) = cache {
+            (cache.type_names, cache.type_map, cache.total_types)
+        } else {
+            // This shouldn't happen if analyze_values was called, but handle it anyway
+            Self::build_type_registry(values)
+        };
+
+        // Build discriminators and count rows per type
+        let (discriminators, rows_by_type) =
+            Self::build_discriminators_and_groups(values, &type_map, total_types);
+
+        // Write discriminators
+        for &disc in &discriminators {
+            write_discriminator!(async writer, disc, total_types);
+        }
+
+        // Write column data for each type
+        Self::write_columns(&type_names, &type_map, &rows_by_type, values, writer, state).await
     }
 
     #[allow(clippy::used_underscore_binding)]
@@ -240,15 +253,12 @@ impl DynamicSerializer {
         writer: &mut W,
         _state: &mut SerializerState,
     ) -> Result<()> {
-        // Always use v3 (flattened format) for now
-        writer.put_u64_le(3);
+        writer.put_u64_le(DYNAMIC_VERSION);
 
         // Check if we have cached metadata
         let cache_data = DYNAMIC_CACHE.with(|cache| cache.borrow_mut().take());
 
         if let Some(cache) = cache_data {
-            // We have cached metadata, write it now
-
             // v3 format: total_types, then type names, then nested prefixes
             writer.put_var_uint(cache.total_types as u64)?;
 
@@ -285,78 +295,20 @@ impl DynamicSerializer {
         let (type_names, type_map, total_types) = if let Some(cache) = cache {
             (cache.type_names, cache.type_map, cache.total_types)
         } else {
-            // Build type registry from values
-            let mut type_map: HashMap<String, (usize, Type)> = HashMap::new();
-            let mut type_names: Vec<String> = Vec::new();
-
-            // Scan all values to build type registry
-            for value in values {
-                if !matches!(value, Value::Null) {
-                    let value_type = value.guess_type();
-                    let type_name = value_type.to_string();
-
-                    if let std::collections::hash_map::Entry::Vacant(entry) =
-                        type_map.entry(type_name.clone())
-                    {
-                        let index = type_names.len();
-                        type_names.push(type_name);
-                        let _ = entry.insert((index, value_type));
-                    }
-                }
-            }
-
-            // Sort type names alphabetically
-            type_names.sort();
-
-            // Rebuild type map with sorted indices
-            type_map.clear();
-            for (index, type_name) in type_names.iter().enumerate() {
-                let value_type = type_name.parse::<Type>().unwrap_or(Type::String);
-                drop(type_map.insert(type_name.clone(), (index, value_type)));
-            }
-
-            let total_types = type_names.len();
-            (type_names, type_map, total_types)
+            Self::build_type_registry(values)
         };
 
         // Build discriminators and count rows per type
-        let mut discriminators = Vec::with_capacity(values.len());
-        let mut rows_by_type: HashMap<usize, Vec<usize>> = HashMap::new();
-
-        for (row_idx, value) in values.iter().enumerate() {
-            if matches!(value, Value::Null) {
-                discriminators.push(total_types as u64);
-            } else {
-                let value_type = value.guess_type();
-                let type_name = value_type.to_string();
-                let (type_idx, _) = &type_map[&type_name];
-                discriminators.push(*type_idx as u64);
-                rows_by_type.entry(*type_idx).or_default().push(row_idx);
-            }
-        }
+        let (discriminators, rows_by_type) =
+            Self::build_discriminators_and_groups(values, &type_map, total_types);
 
         // Write discriminators
         for &disc in &discriminators {
-            Self::write_discriminator_sync(writer, disc, total_types);
+            write_discriminator!(sync writer, disc, total_types);
         }
 
         // Write column data for each type
-        for (type_idx, type_name) in type_names.iter().enumerate() {
-            if let Some(row_indices) = rows_by_type.get(&type_idx) {
-                let (_, typ) = &type_map[type_name];
-
-                // Collect values for this type
-                let mut type_values = Vec::with_capacity(row_indices.len());
-                for &row_idx in row_indices {
-                    type_values.push(values[row_idx].clone());
-                }
-
-                // Write the column data
-                typ.serialize_column_sync(type_values, writer, state)?;
-            }
-        }
-
-        Ok(())
+        Self::write_columns_sync(&type_names, &type_map, &rows_by_type, values, writer, state)
     }
 }
 
@@ -366,17 +318,6 @@ mod tests {
 
     use super::*;
     use crate::io::{ClickHouseBytesRead, ClickHouseBytesWrite};
-
-    #[test]
-    fn test_discriminator_size() {
-        assert_eq!(DynamicSerializer::discriminator_size(100), 1);
-        assert_eq!(DynamicSerializer::discriminator_size(255), 1);
-        assert_eq!(DynamicSerializer::discriminator_size(256), 2);
-        assert_eq!(DynamicSerializer::discriminator_size(65535), 2);
-        assert_eq!(DynamicSerializer::discriminator_size(65536), 4);
-        assert_eq!(DynamicSerializer::discriminator_size(4_294_967_295), 4);
-        assert_eq!(DynamicSerializer::discriminator_size(4_294_967_296), 8);
-    }
 
     #[test]
     fn test_dynamic_type_name_serialization() {
@@ -437,7 +378,7 @@ mod tests {
         let mut buffer = Vec::new();
 
         // Write v3 serialization version
-        buffer.put_u64_le(3);
+        buffer.put_u64_le(DYNAMIC_VERSION);
 
         // Write total_types
         buffer.put_var_uint(3).unwrap();
@@ -453,7 +394,7 @@ mod tests {
 
         // Read version
         let version = reader.get_u64_le();
-        assert_eq!(version, 3);
+        assert_eq!(version, DYNAMIC_VERSION);
 
         // Read total_types
         let total_types = reader.try_get_var_uint().unwrap();
@@ -469,10 +410,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_dynamic_prefix_writing_detailed() {
-        // Create a buffer to write to
-        let mut buffer = Vec::new();
-        let mut state = SerializerState::default();
-
         // Create test values
         let values = vec![
             Value::Int32(42),
@@ -484,8 +421,54 @@ mod tests {
         DynamicSerializer::analyze_values(&values);
 
         // Write prefix
+        let mut buffer = Vec::new();
+        let mut state = SerializerState::default();
         DynamicSerializer::write_prefix(&Type::Dynamic, &mut buffer, &mut state).await.unwrap();
 
-        // Verify the prefix was written successfully
+        // Verify version and type count
+        let mut reader = &buffer[..];
+        assert_eq!(reader.get_u64_le(), DYNAMIC_VERSION);
+        assert_eq!(reader.try_get_var_uint().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_build_type_registry() {
+        let values = vec![
+            Value::String(b"test".to_vec()),
+            Value::Int32(42),
+            Value::String(b"another".to_vec()),
+            Value::Float64(std::f64::consts::PI),
+            Value::Null,
+            Value::Int32(99),
+        ];
+
+        let (type_names, type_map, total_types) = DynamicSerializer::build_type_registry(&values);
+
+        // Check alphabetical ordering
+        assert_eq!(type_names, vec!["Float64", "Int32", "String"]);
+        assert_eq!(total_types, 3);
+
+        // Check type indices
+        assert_eq!(type_map["Float64"].0, 0);
+        assert_eq!(type_map["Int32"].0, 1);
+        assert_eq!(type_map["String"].0, 2);
+    }
+
+    #[test]
+    fn test_discriminator_writing() {
+        // Test that discriminator size is chosen correctly
+        let test_cases: Vec<(usize, usize)> = vec![
+            (100, 1),   // fits in u8
+            (255, 1),   // max u8
+            (256, 2),   // needs u16
+            (65535, 2), // max u16
+            (65536, 4), // needs u32
+        ];
+
+        for (total_types, expected_bytes) in test_cases {
+            let mut buffer = Vec::new();
+            write_discriminator!(sync &mut buffer, 0, total_types);
+            assert_eq!(buffer.len(), expected_bytes, "Failed for total_types={}", total_types);
+        }
     }
 }
