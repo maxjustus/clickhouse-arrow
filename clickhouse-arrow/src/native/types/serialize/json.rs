@@ -26,6 +26,8 @@ thread_local! {
 const JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION: u64 = 0;
 const _JSON_STRING_SERIALIZATION_VERSION: u64 = 1; // Reserved for potential future use
 const JSON_OBJECT_SERIALIZATION_VERSION: u64 = 3;
+const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
+const DYNAMIC_VERSION: u64 = 3;
 
 // JSON v3 object serialization is now supported via thread-local caching
 // The implementation follows the same pattern as Dynamic type serialization:
@@ -160,6 +162,38 @@ impl JsonData {
     }
 }
 
+/// Macro to write discriminator based on size
+macro_rules! write_discriminator {
+    (async $writer:expr, $disc:expr, $total_types:expr) => {
+        match $total_types {
+            0..=255 => {
+                debug_assert!($disc <= 255);
+                $writer.write_u8(u8::try_from($disc).unwrap()).await?
+            }
+            256..=65535 => {
+                debug_assert!($disc <= 65535);
+                $writer.write_u16_le(u16::try_from($disc).unwrap()).await?
+            }
+            65536..=4_294_967_295 => $writer.write_u32_le(u32::try_from($disc).unwrap()).await?,
+            _ => $writer.write_u64_le($disc).await?,
+        }
+    };
+    (sync $writer:expr, $disc:expr, $total_types:expr) => {
+        match $total_types {
+            0..=255 => {
+                debug_assert!($disc <= 255);
+                $writer.put_u8(u8::try_from($disc).unwrap())
+            }
+            256..=65535 => {
+                debug_assert!($disc <= 65535);
+                $writer.put_u16_le(u16::try_from($disc).unwrap())
+            }
+            65536..=4_294_967_295 => $writer.put_u32_le(u32::try_from($disc).unwrap()),
+            _ => $writer.put_u64_le($disc),
+        }
+    };
+}
+
 impl JsonSerializer {
     /// Get the `ClickHouse` type name for a Value
     fn get_value_type_name(value: &Value) -> String {
@@ -182,12 +216,8 @@ impl JsonSerializer {
         }
     }
 
-    /// Write Dynamic column header for a column with given values (async)
-    async fn write_dynamic_header_for_column_async<W: ClickHouseWrite>(
-        column_values: &[Value],
-        writer: &mut W,
-    ) -> Result<()> {
-        // Determine the types in this column
+    /// Build type map from column values
+    fn build_type_map(column_values: &[Value]) -> (Vec<String>, HashMap<String, Vec<Value>>) {
         let mut type_map: HashMap<String, Vec<Value>> = HashMap::new();
 
         for value in column_values {
@@ -197,16 +227,23 @@ impl JsonSerializer {
             }
         }
 
-        // Write Dynamic header for this path
-        // Dynamic version (always use v3)
-        writer.write_u64_le(3).await?;
-
-        // Total types count
-        writer.write_var_uint(type_map.len() as u64).await?;
-
         // Type names (sorted for consistency)
         let mut type_names: Vec<String> = type_map.keys().cloned().collect();
         type_names.sort();
+
+        (type_names, type_map)
+    }
+
+    /// Write Dynamic column header for a column with given values (async)
+    async fn write_dynamic_header_for_column_async<W: ClickHouseWrite>(
+        column_values: &[Value],
+        writer: &mut W,
+    ) -> Result<()> {
+        let (type_names, type_map) = Self::build_type_map(column_values);
+
+        // Write Dynamic header for this path
+        writer.write_u64_le(DYNAMIC_VERSION).await?;
+        writer.write_var_uint(type_map.len() as u64).await?;
 
         for type_name in &type_names {
             writer.write_string(type_name.as_bytes().to_vec()).await?;
@@ -222,26 +259,11 @@ impl JsonSerializer {
         column_values: &[Value],
         writer: &mut W,
     ) -> Result<()> {
-        // Determine the types in this column
-        let mut type_map: HashMap<String, Vec<Value>> = HashMap::new();
-
-        for value in column_values {
-            if !matches!(value, Value::Null) {
-                let type_name = Self::get_value_type_name(value);
-                type_map.entry(type_name).or_default().push(value.clone());
-            }
-        }
+        let (type_names, type_map) = Self::build_type_map(column_values);
 
         // Write Dynamic header for this path
-        // Dynamic version (always use v3)
-        writer.put_u64_le(3);
-
-        // Total types count
+        writer.put_u64_le(DYNAMIC_VERSION);
         writer.put_var_uint(type_map.len() as u64)?;
-
-        // Type names (sorted for consistency)
-        let mut type_names: Vec<String> = type_map.keys().cloned().collect();
-        type_names.sort();
 
         for type_name in &type_names {
             writer.put_string(type_name.as_bytes())?;
@@ -252,13 +274,10 @@ impl JsonSerializer {
         Ok(())
     }
 
-    /// Write Dynamic column data (discriminators + column data)
-    async fn write_dynamic_column_data<W: ClickHouseWrite>(
+    /// Group values by type and build discriminator mapping
+    fn group_values_by_type(
         column_values: &[Value],
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        // Group values by type
+    ) -> (Vec<String>, HashMap<String, Vec<(usize, Value)>>, HashMap<String, u8>) {
         let mut type_map: HashMap<String, Vec<(usize, Value)>> = HashMap::new();
 
         for (idx, value) in column_values.iter().enumerate() {
@@ -277,26 +296,59 @@ impl JsonSerializer {
             .iter()
             .enumerate()
             .map(|(idx, name)| {
-                #[allow(clippy::cast_possible_truncation)]
-                let idx_u8 = idx as u8;
-                (name.clone(), idx_u8)
+                debug_assert!(idx <= 255, "Too many types for u8 discriminator");
+                (name.clone(), u8::try_from(idx).unwrap())
             })
             .collect();
 
-        // Write discriminators for each row
-        let total_types = type_names.len() as u64;
+        (type_names, type_map, type_to_discriminator)
+    }
+
+    /// Write discriminators for column values
+    async fn write_discriminators<W: ClickHouseWrite>(
+        column_values: &[Value],
+        type_to_discriminator: &HashMap<String, u8>,
+        total_types: u64,
+        writer: &mut W,
+    ) -> Result<()> {
         for value in column_values {
             let type_name = Self::get_value_type_name(value);
             if matches!(value, Value::Null) {
                 // NULL discriminator is total_types
-                Self::write_discriminator(writer, total_types, total_types).await?;
+                write_discriminator!(async writer, total_types, total_types);
             } else if let Some(&disc) = type_to_discriminator.get(&type_name) {
-                Self::write_discriminator(writer, u64::from(disc), total_types).await?;
+                write_discriminator!(async writer, u64::from(disc), total_types);
             }
         }
+        Ok(())
+    }
 
-        // Write column data for each type (in alphabetical order)
-        for type_name in &type_names {
+    /// Write discriminators for column values (sync)
+    fn write_discriminators_sync<W: ClickHouseBytesWrite>(
+        column_values: &[Value],
+        type_to_discriminator: &HashMap<String, u8>,
+        total_types: u64,
+        writer: &mut W,
+    ) {
+        for value in column_values {
+            let type_name = Self::get_value_type_name(value);
+            if matches!(value, Value::Null) {
+                // NULL discriminator is total_types
+                write_discriminator!(sync writer, total_types, total_types);
+            } else if let Some(&disc) = type_to_discriminator.get(&type_name) {
+                write_discriminator!(sync writer, u64::from(disc), total_types);
+            }
+        }
+    }
+
+    /// Write column data for typed values
+    async fn write_typed_columns<W: ClickHouseWrite>(
+        type_names: &[String],
+        type_map: &HashMap<String, Vec<(usize, Value)>>,
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        for type_name in type_names {
             if let Some(values_with_idx) = type_map.get(type_name)
                 && !values_with_idx.is_empty()
             {
@@ -316,71 +368,17 @@ impl JsonSerializer {
                 typ.serialize_column(values, writer, state).await?;
             }
         }
-
         Ok(())
     }
 
-    /// Write discriminator based on the total types count
-    #[allow(clippy::cast_possible_truncation)]
-    async fn write_discriminator<W: ClickHouseWrite>(
-        writer: &mut W,
-        discriminator: u64,
-        total_types: u64,
-    ) -> Result<()> {
-        match total_types {
-            0..=255 => writer.write_u8(discriminator as u8).await?,
-            256..=65535 => writer.write_u16_le(discriminator as u16).await?,
-            65536..=4_294_967_295 => writer.write_u32_le(discriminator as u32).await?,
-            _ => writer.write_u64_le(discriminator).await?,
-        }
-        Ok(())
-    }
-
-    /// Write Dynamic column data (discriminators + column data) - sync version
-    fn write_dynamic_column_data_sync<W: ClickHouseBytesWrite>(
-        column_values: &[Value],
+    /// Write column data for typed values (sync)
+    fn write_typed_columns_sync<W: ClickHouseBytesWrite>(
+        type_names: &[String],
+        type_map: &HashMap<String, Vec<(usize, Value)>>,
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // Group values by type
-        let mut type_map: HashMap<String, Vec<(usize, Value)>> = HashMap::new();
-
-        for (idx, value) in column_values.iter().enumerate() {
-            if !matches!(value, Value::Null) {
-                let type_name = Self::get_value_type_name(value);
-                type_map.entry(type_name).or_default().push((idx, value.clone()));
-            }
-        }
-
-        // Sort type names alphabetically to match prefix phase ordering
-        let mut type_names: Vec<String> = type_map.keys().cloned().collect();
-        type_names.sort();
-
-        // Create discriminator mapping based on alphabetical order
-        let type_to_discriminator: HashMap<String, u8> = type_names
-            .iter()
-            .enumerate()
-            .map(|(idx, name)| {
-                #[allow(clippy::cast_possible_truncation)]
-                let idx_u8 = idx as u8;
-                (name.clone(), idx_u8)
-            })
-            .collect();
-
-        // Write discriminators for each row
-        let total_types = type_names.len() as u64;
-        for value in column_values {
-            let type_name = Self::get_value_type_name(value);
-            if matches!(value, Value::Null) {
-                // NULL discriminator is total_types
-                Self::write_discriminator_sync(writer, total_types, total_types);
-            } else if let Some(&disc) = type_to_discriminator.get(&type_name) {
-                Self::write_discriminator_sync(writer, u64::from(disc), total_types);
-            }
-        }
-
-        // Write column data for each type (in alphabetical order)
-        for type_name in &type_names {
+        for type_name in type_names {
             if let Some(values_with_idx) = type_map.get(type_name)
                 && !values_with_idx.is_empty()
             {
@@ -400,23 +398,42 @@ impl JsonSerializer {
                 typ.serialize_column_sync(values, writer, state)?;
             }
         }
-
         Ok(())
     }
 
-    /// Write discriminator based on the total types count - sync version
-    #[allow(clippy::cast_possible_truncation)]
-    fn write_discriminator_sync<W: ClickHouseBytesWrite>(
+    /// Write Dynamic column data (discriminators + column data)
+    async fn write_dynamic_column_data<W: ClickHouseWrite>(
+        column_values: &[Value],
         writer: &mut W,
-        discriminator: u64,
-        total_types: u64,
-    ) {
-        match total_types {
-            0..=255 => writer.put_u8(discriminator as u8),
-            256..=65535 => writer.put_u16_le(discriminator as u16),
-            65536..=4_294_967_295 => writer.put_u32_le(discriminator as u32),
-            _ => writer.put_u64_le(discriminator),
-        }
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        let (type_names, type_map, type_to_discriminator) =
+            Self::group_values_by_type(column_values);
+        let total_types = type_names.len() as u64;
+
+        // Write discriminators for each row
+        Self::write_discriminators(column_values, &type_to_discriminator, total_types, writer)
+            .await?;
+
+        // Write column data for each type (in alphabetical order)
+        Self::write_typed_columns(&type_names, &type_map, writer, state).await
+    }
+
+    /// Write Dynamic column data (discriminators + column data) - sync version
+    fn write_dynamic_column_data_sync<W: ClickHouseBytesWrite>(
+        column_values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        let (type_names, type_map, type_to_discriminator) =
+            Self::group_values_by_type(column_values);
+        let total_types = type_names.len() as u64;
+
+        // Write discriminators for each row
+        Self::write_discriminators_sync(column_values, &type_to_discriminator, total_types, writer);
+
+        // Write column data for each type (in alphabetical order)
+        Self::write_typed_columns_sync(&type_names, &type_map, writer, state)
     }
 }
 
@@ -462,76 +479,94 @@ impl JsonSerializer {
         }
     }
 
+    /// Get serialization version based on server support
+    fn get_serialization_version(state: &SerializerState) -> u64 {
+        if Self::supports_flat_dynamic_json(state) {
+            JSON_OBJECT_SERIALIZATION_VERSION
+        } else {
+            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION
+        }
+    }
+
+    /// Write paths header based on version (sync)
+    fn write_paths_header_sync<W: ClickHouseBytesWrite>(
+        paths: &[String],
+        version: u64,
+        writer: &mut W,
+    ) -> Result<()> {
+        match version {
+            JSON_OBJECT_SERIALIZATION_VERSION => {
+                // V3 format: total dynamic paths count
+                writer.put_var_uint(paths.len() as u64)?;
+            }
+            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION => {
+                // V0 format
+                writer.put_var_uint(DEFAULT_MAX_DYNAMIC_PATHS)?;
+                writer.put_var_uint(paths.len() as u64)?;
+            }
+            _ => {}
+        }
+
+        // Write path names
+        for path in paths {
+            writer.put_string(path.as_bytes())?;
+        }
+        Ok(())
+    }
+    
+    /// Write paths header based on version (async)
+    async fn write_paths_header_async<W: ClickHouseWrite>(
+        paths: &[String],
+        version: u64,
+        writer: &mut W,
+    ) -> Result<()> {
+        match version {
+            JSON_OBJECT_SERIALIZATION_VERSION => {
+                // V3 format: total dynamic paths count
+                writer.write_var_uint(paths.len() as u64).await?;
+            }
+            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION => {
+                // V0 format
+                writer.write_var_uint(DEFAULT_MAX_DYNAMIC_PATHS).await?;
+                writer.write_var_uint(paths.len() as u64).await?;
+            }
+            _ => {}
+        }
+
+        // Write path names
+        for path in paths {
+            writer.write_string(path.as_bytes().to_vec()).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn write_prefix_sync<W: ClickHouseBytesWrite>(
         _type_: &Type,
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // Choose JSON serialization version based on server version
-        let version = if Self::supports_flat_dynamic_json(state) {
-            JSON_OBJECT_SERIALIZATION_VERSION
-        } else {
-            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION
-        };
+        let version = Self::get_serialization_version(state);
         writer.put_u64_le(version);
 
         // Retrieve cached metadata from analyze_values
         let cache_data = JSON_CACHE.with(|cache| cache.borrow_mut().take());
 
         if let Some(cache) = cache_data {
-            match version {
-                JSON_OBJECT_SERIALIZATION_VERSION => {
-                    // V3 format: total dynamic paths count
-                    writer.put_var_uint(cache.paths.len() as u64)?;
+            // Write paths header
+            Self::write_paths_header_sync(&cache.paths, version, writer)?;
 
-                    // Write path names
-                    for path in &cache.paths {
-                        writer.put_string(path.as_bytes())?;
-                    }
-
-                    // Write Dynamic column headers for each path
-                    for path in &cache.paths {
-                        if let Some(column_values) = cache.path_columns.get(path) {
-                            Self::write_dynamic_header_for_column_sync(column_values, writer)?;
-                        }
-                    }
+            // Write Dynamic column headers for each path
+            for path in &cache.paths {
+                if let Some(column_values) = cache.path_columns.get(path) {
+                    Self::write_dynamic_header_for_column_sync(column_values, writer)?;
                 }
-                JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION => {
-                    // V0 format
-                    const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
-                    writer.put_var_uint(DEFAULT_MAX_DYNAMIC_PATHS)?;
-                    writer.put_var_uint(cache.paths.len() as u64)?;
-
-                    // Write path names
-                    for path in &cache.paths {
-                        writer.put_string(path.as_bytes())?;
-                    }
-
-                    // Write Dynamic column headers for each path
-                    for path in &cache.paths {
-                        if let Some(column_values) = cache.path_columns.get(path) {
-                            Self::write_dynamic_header_for_column_sync(column_values, writer)?;
-                        }
-                    }
-                }
-                _ => {}
             }
 
             // Put cache back for use in write()
             JSON_CACHE.with(|c| *c.borrow_mut() = Some(cache));
         } else {
             // No cached metadata - write empty format
-            match version {
-                JSON_OBJECT_SERIALIZATION_VERSION => {
-                    writer.put_var_uint(0)?; // 0 paths
-                }
-                JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION => {
-                    const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
-                    writer.put_var_uint(DEFAULT_MAX_DYNAMIC_PATHS)?;
-                    writer.put_var_uint(0)?; // 0 paths
-                }
-                _ => {}
-            }
+            Self::write_paths_header_sync(&[], version, writer)?;
         }
 
         Ok(())
@@ -544,73 +579,28 @@ impl Serializer for JsonSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // Choose JSON serialization version based on server version
-        let version = if Self::supports_flat_dynamic_json(state) {
-            JSON_OBJECT_SERIALIZATION_VERSION
-        } else {
-            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION
-        };
+        let version = Self::get_serialization_version(state);
         writer.write_u64_le(version).await?;
 
         // Retrieve cached metadata from analyze_values
         let cache_data = JSON_CACHE.with(|cache| cache.borrow_mut().take());
 
         if let Some(cache) = cache_data {
-            match version {
-                JSON_OBJECT_SERIALIZATION_VERSION => {
-                    // V3 format: total dynamic paths count
-                    writer.write_var_uint(cache.paths.len() as u64).await?;
+            // Write paths header
+            Self::write_paths_header_async(&cache.paths, version, writer).await?;
 
-                    // Write path names
-                    for path in &cache.paths {
-                        writer.write_string(path.as_bytes().to_vec()).await?;
-                    }
-
-                    // Write Dynamic column headers for each path
-                    for path in &cache.paths {
-                        if let Some(column_values) = cache.path_columns.get(path) {
-                            Self::write_dynamic_header_for_column_async(column_values, writer)
-                                .await?;
-                        }
-                    }
+            // Write Dynamic column headers for each path
+            for path in &cache.paths {
+                if let Some(column_values) = cache.path_columns.get(path) {
+                    Self::write_dynamic_header_for_column_async(column_values, writer).await?;
                 }
-                JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION => {
-                    // V0 format
-                    const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
-                    writer.write_var_uint(DEFAULT_MAX_DYNAMIC_PATHS).await?;
-                    writer.write_var_uint(cache.paths.len() as u64).await?;
-
-                    // Write path names
-                    for path in &cache.paths {
-                        writer.write_string(path.as_bytes().to_vec()).await?;
-                    }
-
-                    // Write Dynamic column headers for each path
-                    for path in &cache.paths {
-                        if let Some(column_values) = cache.path_columns.get(path) {
-                            Self::write_dynamic_header_for_column_async(column_values, writer)
-                                .await?;
-                        }
-                    }
-                }
-                _ => {}
             }
 
             // Put cache back for use in write()
             JSON_CACHE.with(|c| *c.borrow_mut() = Some(cache));
         } else {
             // No cached metadata - write empty format
-            match version {
-                JSON_OBJECT_SERIALIZATION_VERSION => {
-                    writer.write_var_uint(0).await?; // 0 paths
-                }
-                JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION => {
-                    const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
-                    writer.write_var_uint(DEFAULT_MAX_DYNAMIC_PATHS).await?;
-                    writer.write_var_uint(0).await?; // 0 paths
-                }
-                _ => {}
-            }
+            Self::write_paths_header_async(&[], version, writer).await?;
         }
 
         Ok(())
@@ -633,29 +623,20 @@ impl Serializer for JsonSerializer {
         } else {
             // Fallback: parse JSON values if no cache (shouldn't happen in normal flow)
             let json_data = JsonData::from_values(values)?;
-            (
-                json_data.path_columns.keys().cloned().collect(),
-                json_data.path_columns,
-                json_data.rows,
-            )
+            let mut paths: Vec<String> = json_data.path_columns.keys().cloned().collect();
+            paths.sort();
+            (paths, json_data.path_columns, json_data.rows)
         };
 
-        if use_v3 {
-            // V3 format - write data for each path (using Dynamic column format)
-            for path in &paths {
-                if let Some(column_values) = path_columns.get(path) {
-                    Self::write_dynamic_column_data(column_values, writer, state).await?;
-                }
+        // Write data for each path (using Dynamic column format)
+        for path in &paths {
+            if let Some(column_values) = path_columns.get(path) {
+                Self::write_dynamic_column_data(column_values, writer, state).await?;
             }
-        } else {
-            // V0 format - write data for each path (using Dynamic column format)
-            for path in &paths {
-                if let Some(column_values) = path_columns.get(path) {
-                    Self::write_dynamic_column_data(column_values, writer, state).await?;
-                }
-            }
+        }
 
-            // Write SharedData (empty) per row
+        // V0 format needs SharedData (empty) per row
+        if !use_v3 {
             for _ in 0..rows {
                 writer.write_u64_le(0).await?;
             }
@@ -681,29 +662,20 @@ impl Serializer for JsonSerializer {
         } else {
             // Fallback: parse JSON values if no cache (shouldn't happen in normal flow)
             let json_data = JsonData::from_values(values)?;
-            (
-                json_data.path_columns.keys().cloned().collect(),
-                json_data.path_columns,
-                json_data.rows,
-            )
+            let mut paths: Vec<String> = json_data.path_columns.keys().cloned().collect();
+            paths.sort();
+            (paths, json_data.path_columns, json_data.rows)
         };
 
-        if use_v3 {
-            // V3 format - write data for each path (using Dynamic column format)
-            for path in &paths {
-                if let Some(column_values) = path_columns.get(path) {
-                    Self::write_dynamic_column_data_sync(column_values, writer, state)?;
-                }
+        // Write data for each path (using Dynamic column format)
+        for path in &paths {
+            if let Some(column_values) = path_columns.get(path) {
+                Self::write_dynamic_column_data_sync(column_values, writer, state)?;
             }
-        } else {
-            // V0 format - write data for each path (using Dynamic column format)
-            for path in &paths {
-                if let Some(column_values) = path_columns.get(path) {
-                    Self::write_dynamic_column_data_sync(column_values, writer, state)?;
-                }
-            }
+        }
 
-            // Write SharedData (empty) per row
+        // V0 format needs SharedData (empty) per row
+        if !use_v3 {
             for _ in 0..rows {
                 writer.put_u64_le(0);
             }

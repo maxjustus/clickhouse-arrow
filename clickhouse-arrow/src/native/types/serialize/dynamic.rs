@@ -35,9 +35,7 @@ macro_rules! write_discriminator {
                 debug_assert!($disc <= 65535);
                 $writer.write_u16_le(u16::try_from($disc).unwrap()).await?
             }
-            65536..=4_294_967_295 => {
-                $writer.write_u32_le(u32::try_from($disc).unwrap()).await?
-            }
+            65536..=4_294_967_295 => $writer.write_u32_le(u32::try_from($disc).unwrap()).await?,
             _ => $writer.write_u64_le($disc).await?,
         }
     };
@@ -48,12 +46,10 @@ macro_rules! write_discriminator {
                 $writer.put_u8(u8::try_from($disc).unwrap())
             }
             256..=65535 => {
-                debug_assert!($disc <= 65535);  
+                debug_assert!($disc <= 65535);
                 $writer.put_u16_le(u16::try_from($disc).unwrap())
             }
-            65536..=4_294_967_295 => {
-                $writer.put_u32_le(u32::try_from($disc).unwrap())
-            }
+            65536..=4_294_967_295 => $writer.put_u32_le(u32::try_from($disc).unwrap()),
             _ => $writer.put_u64_le($disc),
         }
     };
