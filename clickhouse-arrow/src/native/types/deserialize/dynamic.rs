@@ -88,16 +88,12 @@ impl DynamicDeserializer {
                 if disc == total_types {
                     Ok(Value::Null)
                 } else {
-                    columns
-                        .get(&disc)
-                        .and_then(|col| col.get(offset))
-                        .cloned()
-                        .ok_or_else(|| {
-                            crate::Error::DeserializeError(format!(
-                                "Invalid offset {} for discriminator {}",
-                                offset, disc
-                            ))
-                        })
+                    columns.get(&disc).and_then(|col| col.get(offset)).cloned().ok_or_else(|| {
+                        crate::Error::DeserializeError(format!(
+                            "Invalid offset {} for discriminator {}",
+                            offset, disc
+                        ))
+                    })
                 }
             })
             .collect()
@@ -119,7 +115,6 @@ impl DynamicDeserializer {
         }
         Ok(())
     }
-
 
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
         _type: &Type,
