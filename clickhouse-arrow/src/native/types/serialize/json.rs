@@ -715,6 +715,9 @@ mod tests {
         let mut output = vec![];
         let mut state = SerializerState::default();
 
+        // JSON serialization requires analyze_values to be called first
+        state.type_specific = JsonSerializer::analyze_values(&values)?;
+
         type_.serialize_prefix_async(&mut output, &mut state).await?;
         type_.serialize_column(values.clone(), &mut output, &mut state).await?;
 
@@ -743,6 +746,9 @@ mod tests {
 
         let mut output = vec![];
         let mut state = SerializerState::default();
+
+        // JSON serialization requires analyze_values to be called first
+        state.type_specific = JsonSerializer::analyze_values(&values)?;
 
         type_.serialize_prefix_async(&mut output, &mut state).await?;
         type_.serialize_column(values.clone(), &mut output, &mut state).await?;
@@ -774,6 +780,9 @@ mod tests {
         let mut output = vec![];
         let mut state = SerializerState::default();
 
+        // JSON serialization requires analyze_values to be called first
+        state.type_specific = JsonSerializer::analyze_values(&values)?;
+
         type_.serialize_prefix_async(&mut output, &mut state).await?;
         type_.serialize_column(values.clone(), &mut output, &mut state).await?;
 
@@ -802,6 +811,9 @@ mod tests {
         let mut output = vec![];
         let mut state = SerializerState::default();
 
+        // JSON serialization requires analyze_values to be called first
+        state.type_specific = JsonSerializer::analyze_values(&values)?;
+
         type_.serialize_prefix_async(&mut output, &mut state).await?;
         type_.serialize_column(values.clone(), &mut output, &mut state).await?;
 
@@ -829,6 +841,9 @@ mod tests {
 
         let mut output = vec![];
         let mut state = SerializerState::default();
+
+        // JSON serialization requires analyze_values to be called first
+        state.type_specific = JsonSerializer::analyze_values(&values)?;
 
         type_.serialize_prefix_async(&mut output, &mut state).await?;
         type_.serialize_column(values.clone(), &mut output, &mut state).await?;
@@ -1092,6 +1107,9 @@ mod tests {
         let timeout_result = tokio::time::timeout(std::time::Duration::from_secs(10), async move {
             let mut output = vec![];
             let mut state = SerializerState::default();
+
+            // JSON serialization requires analyze_values to be called first
+            state.type_specific = JsonSerializer::analyze_values(&values)?;
 
             type_.serialize_prefix_async(&mut output, &mut state).await?;
             type_.serialize_column(values.clone(), &mut output, &mut state).await?;
