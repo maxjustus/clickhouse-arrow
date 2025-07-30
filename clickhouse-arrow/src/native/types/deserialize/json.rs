@@ -71,7 +71,36 @@ impl JsonDeserializer {
         Ok(())
     }
 
+    /// Format a decimal value with proper decimal point placement
+    fn format_decimal(mut value: String, scale: usize) -> String {
+        if scale == 0 {
+            return value;
+        }
+
+        let is_negative = value.starts_with('-');
+        if is_negative {
+            let _ = value.remove(0);
+        }
+
+        // Pad with leading zeros if needed
+        while value.len() <= scale {
+            value.insert(0, '0');
+        }
+
+        // Insert decimal point
+        let point_pos = value.len() - scale;
+        value.insert(point_pos, '.');
+
+        // Add negative sign back if needed
+        if is_negative {
+            value.insert(0, '-');
+        }
+
+        value
+    }
+
     /// Convert `ClickHouse` Value to JSON
+    #[expect(clippy::too_many_lines)]
     fn value_to_json(value: Value) -> Result<serde_json::Value> {
         use serde_json::{Number, Value as JsonValue};
 
@@ -106,8 +135,159 @@ impl JsonDeserializer {
                     .map_err(|e| Error::DeserializeError(format!("Invalid UTF-8: {e}")))?,
             ),
 
-            // Everything else as debug string
-            _ => JsonValue::String(format!("{value:?}")),
+            // Decimal types - format with proper decimal point
+            Value::Decimal32(scale, value) => {
+                JsonValue::String(Self::format_decimal(value.to_string(), scale))
+            }
+            Value::Decimal64(scale, value) => {
+                JsonValue::String(Self::format_decimal(value.to_string(), scale))
+            }
+            Value::Decimal128(scale, value) => {
+                JsonValue::String(Self::format_decimal(value.to_string(), scale))
+            }
+            Value::Decimal256(scale, value) => {
+                JsonValue::String(Self::format_decimal(value.to_string(), scale))
+            }
+
+            // Date/Time types - format as ISO strings
+            Value::Date(date) => {
+                let chrono_date: chrono::NaiveDate = date.into();
+                JsonValue::String(chrono_date.format("%Y-%m-%d").to_string())
+            }
+            Value::Date32(date) => {
+                let chrono_date: chrono::NaiveDate = date.into();
+                JsonValue::String(chrono_date.format("%Y-%m-%d").to_string())
+            }
+            Value::DateTime(datetime) => {
+                let chrono_date: chrono::DateTime<chrono_tz::Tz> = datetime
+                    .try_into()
+                    .map_err(|_| Error::DeserializeError("Invalid DateTime".to_string()))?;
+                JsonValue::String(chrono_date.to_rfc3339())
+            }
+            Value::DateTime64(datetime) => {
+                use crate::FromSql;
+                let chrono_date: chrono::DateTime<chrono_tz::Tz> =
+                    FromSql::from_sql(&Type::DateTime64(datetime.2, datetime.0), value.clone())
+                        .map_err(|e| Error::DeserializeError(format!("Invalid DateTime64: {e}")))?;
+                JsonValue::String(chrono_date.to_rfc3339())
+            }
+
+            // UUID - standard hyphenated format
+            Value::Uuid(uuid) => JsonValue::String(uuid.to_string()),
+
+            // Network types
+            Value::Ipv4(ip) => JsonValue::String(ip.to_string()),
+            Value::Ipv6(ip) => JsonValue::String(ip.to_string()),
+
+            // Enum types - just the string value
+            Value::Enum8(name, _) | Value::Enum16(name, _) => JsonValue::String(name),
+
+            // Container types
+            Value::Array(array) => {
+                let mut arr = Vec::with_capacity(array.len());
+                for item in array {
+                    arr.push(Self::value_to_json(item)?);
+                }
+                JsonValue::Array(arr)
+            }
+            Value::Tuple(tuple) => {
+                let mut arr = Vec::with_capacity(tuple.len());
+                for item in tuple {
+                    arr.push(Self::value_to_json(item)?);
+                }
+                JsonValue::Array(arr)
+            }
+            Value::Map(keys, values) => {
+                // Check if all keys are strings
+                let all_string_keys = keys.iter().all(|k| matches!(k, Value::String(_)));
+
+                if all_string_keys && keys.len() == values.len() {
+                    // Create JSON object
+                    let mut map = serde_json::Map::new();
+                    for (key, value) in keys.iter().zip(values.iter()) {
+                        if let Value::String(key_bytes) = key {
+                            let key_str = String::from_utf8(key_bytes.clone()).map_err(|e| {
+                                Error::DeserializeError(format!("Invalid UTF-8 in map key: {e}"))
+                            })?;
+                            drop(map.insert(key_str, Self::value_to_json(value.clone())?));
+                        }
+                    }
+                    JsonValue::Object(map)
+                } else {
+                    // Create array of [key, value] pairs
+                    let mut arr = Vec::with_capacity(keys.len());
+                    for (key, value) in keys.iter().zip(values.iter()) {
+                        arr.push(JsonValue::Array(vec![
+                            Self::value_to_json(key.clone())?,
+                            Self::value_to_json(value.clone())?,
+                        ]));
+                    }
+                    JsonValue::Array(arr)
+                }
+            }
+
+            // Variant - unwrap and serialize contained value
+            Value::Variant(_, boxed_value) => Self::value_to_json(*boxed_value)?,
+
+            // Object type - already JSON, parse it
+            Value::Object(json_bytes) => serde_json::from_slice(&json_bytes)
+                .map_err(|e| Error::DeserializeError(format!("Invalid JSON in Object: {e}")))?,
+
+            // Geo types - as coordinate arrays
+            Value::Point(point) => JsonValue::Array(vec![
+                JsonValue::Number(Number::from_f64(point.0[0]).unwrap_or(Number::from(0))),
+                JsonValue::Number(Number::from_f64(point.0[1]).unwrap_or(Number::from(0))),
+            ]),
+            Value::Ring(ring) => {
+                let mut arr = Vec::with_capacity(ring.0.len());
+                for point in &ring.0 {
+                    arr.push(JsonValue::Array(vec![
+                        JsonValue::Number(Number::from_f64(point.0[0]).unwrap_or(Number::from(0))),
+                        JsonValue::Number(Number::from_f64(point.0[1]).unwrap_or(Number::from(0))),
+                    ]));
+                }
+                JsonValue::Array(arr)
+            }
+            Value::Polygon(polygon) => {
+                let mut arr = Vec::with_capacity(polygon.0.len());
+                for ring in &polygon.0 {
+                    let mut ring_arr = Vec::with_capacity(ring.0.len());
+                    for point in &ring.0 {
+                        ring_arr.push(JsonValue::Array(vec![
+                            JsonValue::Number(
+                                Number::from_f64(point.0[0]).unwrap_or(Number::from(0)),
+                            ),
+                            JsonValue::Number(
+                                Number::from_f64(point.0[1]).unwrap_or(Number::from(0)),
+                            ),
+                        ]));
+                    }
+                    arr.push(JsonValue::Array(ring_arr));
+                }
+                JsonValue::Array(arr)
+            }
+            Value::MultiPolygon(multi) => {
+                let mut arr = Vec::with_capacity(multi.0.len());
+                for polygon in &multi.0 {
+                    let mut poly_arr = Vec::with_capacity(polygon.0.len());
+                    for ring in &polygon.0 {
+                        let mut ring_arr = Vec::with_capacity(ring.0.len());
+                        for point in &ring.0 {
+                            ring_arr.push(JsonValue::Array(vec![
+                                JsonValue::Number(
+                                    Number::from_f64(point.0[0]).unwrap_or(Number::from(0)),
+                                ),
+                                JsonValue::Number(
+                                    Number::from_f64(point.0[1]).unwrap_or(Number::from(0)),
+                                ),
+                            ]));
+                        }
+                        poly_arr.push(JsonValue::Array(ring_arr));
+                    }
+                    arr.push(JsonValue::Array(poly_arr));
+                }
+                JsonValue::Array(arr)
+            }
         })
     }
 
