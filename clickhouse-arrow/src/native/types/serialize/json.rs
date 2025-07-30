@@ -19,7 +19,7 @@ struct JsonSerializationCache {
 
 // Thread-local cache for JSON type metadata
 thread_local! {
-    static JSON_CACHE: RefCell<Option<JsonSerializationCache>> = RefCell::new(None);
+    static JSON_CACHE: RefCell<Option<JsonSerializationCache>> = const { RefCell::new(None) };
 }
 
 // JSON serialization versions from ClickHouse
@@ -164,7 +164,6 @@ impl JsonSerializer {
     /// Get the `ClickHouse` type name for a Value
     fn get_value_type_name(value: &Value) -> String {
         match value {
-            Value::Null => "String".to_string(), // Nulls are typically String type in JSON context
             Value::Int8(_) => "Int8".to_string(),
             Value::Int16(_) => "Int16".to_string(),
             Value::Int32(_) => "Int32".to_string(),
@@ -179,8 +178,7 @@ impl JsonSerializer {
             Value::UInt256(_) => "UInt256".to_string(),
             Value::Float32(_) => "Float32".to_string(),
             Value::Float64(_) => "Float64".to_string(),
-            Value::String(_) => "String".to_string(),
-            _ => "String".to_string(), // Fallback to String for complex types
+            _ => "String".to_string(), // Nulls, strings, and complex types use String
         }
     }
 
@@ -195,7 +193,7 @@ impl JsonSerializer {
         for value in column_values {
             if !matches!(value, Value::Null) {
                 let type_name = Self::get_value_type_name(value);
-                type_map.entry(type_name).or_insert_with(Vec::new).push(value.clone());
+                type_map.entry(type_name).or_default().push(value.clone());
             }
         }
 
@@ -230,7 +228,7 @@ impl JsonSerializer {
         for value in column_values {
             if !matches!(value, Value::Null) {
                 let type_name = Self::get_value_type_name(value);
-                type_map.entry(type_name).or_insert_with(Vec::new).push(value.clone());
+                type_map.entry(type_name).or_default().push(value.clone());
             }
         }
 
@@ -246,7 +244,7 @@ impl JsonSerializer {
         type_names.sort();
 
         for type_name in &type_names {
-            writer.put_string(type_name.as_bytes().to_vec())?;
+            writer.put_string(type_name.as_bytes())?;
         }
 
         // Basic types don't need prefix serialization in Dynamic v3 format
@@ -266,7 +264,7 @@ impl JsonSerializer {
         for (idx, value) in column_values.iter().enumerate() {
             if !matches!(value, Value::Null) {
                 let type_name = Self::get_value_type_name(value);
-                type_map.entry(type_name).or_insert_with(Vec::new).push((idx, value.clone()));
+                type_map.entry(type_name).or_default().push((idx, value.clone()));
             }
         }
 
@@ -276,7 +274,11 @@ impl JsonSerializer {
 
         // Create discriminator mapping based on alphabetical order
         let type_to_discriminator: HashMap<String, u8> =
-            type_names.iter().enumerate().map(|(idx, name)| (name.clone(), idx as u8)).collect();
+            type_names.iter().enumerate().map(|(idx, name)| {
+                #[allow(clippy::cast_possible_truncation)]
+                let idx_u8 = idx as u8;
+                (name.clone(), idx_u8)
+            }).collect();
 
         // Write discriminators for each row
         let total_types = type_names.len() as u64;
@@ -286,14 +288,14 @@ impl JsonSerializer {
                 // NULL discriminator is total_types
                 Self::write_discriminator(writer, total_types, total_types).await?;
             } else if let Some(&disc) = type_to_discriminator.get(&type_name) {
-                Self::write_discriminator(writer, disc as u64, total_types).await?;
+                Self::write_discriminator(writer, u64::from(disc), total_types).await?;
             }
         }
 
         // Write column data for each type (in alphabetical order)
         for type_name in &type_names {
-            if let Some(values_with_idx) = type_map.get(type_name) {
-                if !values_with_idx.is_empty() {
+            if let Some(values_with_idx) = type_map.get(type_name)
+                && !values_with_idx.is_empty() {
                     let typ: Type = type_name.parse().map_err(|_| {
                         Error::SerializeError(format!("Invalid type name: {type_name}"))
                     })?;
@@ -310,13 +312,13 @@ impl JsonSerializer {
 
                     typ.serialize_column(values, writer, state).await?;
                 }
-            }
         }
 
         Ok(())
     }
 
     /// Write discriminator based on the total types count
+    #[allow(clippy::cast_possible_truncation)]
     async fn write_discriminator<W: ClickHouseWrite>(
         writer: &mut W,
         discriminator: u64,
@@ -343,7 +345,7 @@ impl JsonSerializer {
         for (idx, value) in column_values.iter().enumerate() {
             if !matches!(value, Value::Null) {
                 let type_name = Self::get_value_type_name(value);
-                type_map.entry(type_name).or_insert_with(Vec::new).push((idx, value.clone()));
+                type_map.entry(type_name).or_default().push((idx, value.clone()));
             }
         }
 
@@ -353,7 +355,11 @@ impl JsonSerializer {
 
         // Create discriminator mapping based on alphabetical order
         let type_to_discriminator: HashMap<String, u8> =
-            type_names.iter().enumerate().map(|(idx, name)| (name.clone(), idx as u8)).collect();
+            type_names.iter().enumerate().map(|(idx, name)| {
+                #[allow(clippy::cast_possible_truncation)]
+                let idx_u8 = idx as u8;
+                (name.clone(), idx_u8)
+            }).collect();
 
         // Write discriminators for each row
         let total_types = type_names.len() as u64;
@@ -361,16 +367,16 @@ impl JsonSerializer {
             let type_name = Self::get_value_type_name(value);
             if matches!(value, Value::Null) {
                 // NULL discriminator is total_types
-                Self::write_discriminator_sync(writer, total_types, total_types)?;
+                Self::write_discriminator_sync(writer, total_types, total_types);
             } else if let Some(&disc) = type_to_discriminator.get(&type_name) {
-                Self::write_discriminator_sync(writer, disc as u64, total_types)?;
+                Self::write_discriminator_sync(writer, u64::from(disc), total_types);
             }
         }
 
         // Write column data for each type (in alphabetical order)
         for type_name in &type_names {
-            if let Some(values_with_idx) = type_map.get(type_name) {
-                if !values_with_idx.is_empty() {
+            if let Some(values_with_idx) = type_map.get(type_name)
+                && !values_with_idx.is_empty() {
                     let typ: Type = type_name.parse().map_err(|_| {
                         Error::SerializeError(format!("Invalid type name: {type_name}"))
                     })?;
@@ -387,30 +393,29 @@ impl JsonSerializer {
 
                     typ.serialize_column_sync(values, writer, state)?;
                 }
-            }
         }
 
         Ok(())
     }
 
     /// Write discriminator based on the total types count - sync version
+    #[allow(clippy::cast_possible_truncation)]
     fn write_discriminator_sync<W: ClickHouseBytesWrite>(
         writer: &mut W,
         discriminator: u64,
         total_types: u64,
-    ) -> Result<()> {
+    ) {
         match total_types {
             0..=255 => writer.put_u8(discriminator as u8),
             256..=65535 => writer.put_u16_le(discriminator as u16),
             65536..=4_294_967_295 => writer.put_u32_le(discriminator as u32),
             _ => writer.put_u64_le(discriminator),
         }
-        Ok(())
     }
 }
 
 impl JsonSerializer {
-    /// Analyze JSON values and cache metadata for use in write_prefix
+    /// Analyze JSON values and cache metadata for use in `write_prefix`
     pub(crate) fn analyze_values(values: &[Value]) -> Result<()> {
         // Parse JSON values into path-organized structure
         let json_data = JsonData::from_values(values.to_vec())?;
@@ -432,7 +437,7 @@ impl JsonSerializer {
                 let types: std::collections::HashSet<_> = values
                     .iter()
                     .filter(|v| !matches!(v, Value::Null))
-                    .map(|v| Self::get_value_type_name(v))
+                    .map(Self::get_value_type_name)
                     .collect();
                 println!("  Path '{}': types {:?}, {} values", path, types, values.len());
             }
@@ -475,7 +480,7 @@ impl JsonSerializer {
 
                     // Write path names
                     for path in &cache.paths {
-                        writer.put_string(path.as_bytes().to_vec())?;
+                        writer.put_string(path.as_bytes())?;
                     }
 
                     // Write Dynamic column headers for each path
@@ -493,7 +498,7 @@ impl JsonSerializer {
 
                     // Write path names
                     for path in &cache.paths {
-                        writer.put_string(path.as_bytes().to_vec())?;
+                        writer.put_string(path.as_bytes())?;
                     }
 
                     // Write Dynamic column headers for each path

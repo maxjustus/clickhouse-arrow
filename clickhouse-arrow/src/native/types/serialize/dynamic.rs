@@ -18,7 +18,7 @@ struct DynamicSerializationCache {
 
 // Thread-local cache for Dynamic type metadata
 thread_local! {
-    static DYNAMIC_CACHE: std::cell::RefCell<Option<DynamicSerializationCache>> = std::cell::RefCell::new(None);
+    static DYNAMIC_CACHE: std::cell::RefCell<Option<DynamicSerializationCache>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Handles serialization of Dynamic types
@@ -39,6 +39,7 @@ impl DynamicSerializer {
     }
 
     /// Write discriminator based on the total types count (async)
+    #[allow(clippy::cast_possible_truncation)]
     async fn write_discriminator_async<W: ClickHouseWrite>(
         writer: &mut W,
         discriminator: u64,
@@ -54,6 +55,7 @@ impl DynamicSerializer {
     }
 
     /// Write discriminator based on the total types count (sync)
+    #[allow(clippy::cast_possible_truncation)]
     fn write_discriminator_sync<W: ClickHouseBytesWrite>(
         writer: &mut W,
         discriminator: u64,
@@ -67,6 +69,7 @@ impl DynamicSerializer {
         }
     }
 
+    #[allow(clippy::used_underscore_binding)]
     pub(crate) async fn write_prefix<W: ClickHouseWrite>(
         _type: &Type,
         writer: &mut W,
@@ -106,8 +109,8 @@ impl DynamicSerializer {
         Ok(())
     }
 
-    /// Analyze values and cache type metadata for use in write_prefix
-    pub(crate) fn analyze_values(values: &[Value]) -> Result<()> {
+    /// Analyze values and cache type metadata for use in `write_prefix`
+    pub(crate) fn analyze_values(values: &[Value]) {
         let mut type_map: HashMap<String, (usize, Type)> = HashMap::new();
         let mut type_names: Vec<String> = Vec::new();
 
@@ -117,10 +120,10 @@ impl DynamicSerializer {
                 let value_type = value.guess_type();
                 let type_name = value_type.to_string();
 
-                if !type_map.contains_key(&type_name) {
+                if let std::collections::hash_map::Entry::Vacant(entry) = type_map.entry(type_name.clone()) {
                     let index = type_names.len();
-                    type_names.push(type_name.clone());
-                    drop(type_map.insert(type_name, (index, value_type)));
+                    type_names.push(type_name);
+                    let _ = entry.insert((index, value_type));
                 }
             }
         }
@@ -139,7 +142,6 @@ impl DynamicSerializer {
         let cache = DynamicSerializationCache { type_names, type_map, total_types };
 
         DYNAMIC_CACHE.with(|c| *c.borrow_mut() = Some(cache));
-        Ok(())
     }
 
     pub(crate) async fn write<W: ClickHouseWrite>(
@@ -165,10 +167,10 @@ impl DynamicSerializer {
                     let value_type = value.guess_type();
                     let type_name = value_type.to_string();
 
-                    if !type_map.contains_key(&type_name) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = type_map.entry(type_name.clone()) {
                         let index = type_names.len();
-                        type_names.push(type_name.clone());
-                        drop(type_map.insert(type_name, (index, value_type)));
+                        type_names.push(type_name);
+                        let _ = entry.insert((index, value_type));
                     }
                 }
             }
@@ -200,7 +202,7 @@ impl DynamicSerializer {
                 let type_name = value_type.to_string();
                 let (type_idx, _) = &type_map[&type_name];
                 discriminators.push(*type_idx as u64);
-                rows_by_type.entry(*type_idx).or_insert_with(Vec::new).push(row_idx);
+                rows_by_type.entry(*type_idx).or_default().push(row_idx);
             }
         }
 
@@ -228,6 +230,7 @@ impl DynamicSerializer {
         Ok(())
     }
 
+    #[allow(clippy::used_underscore_binding)]
     pub(crate) fn write_prefix_sync<W: ClickHouseBytesWrite>(
         _type: &Type,
         writer: &mut W,
@@ -288,10 +291,10 @@ impl DynamicSerializer {
                     let value_type = value.guess_type();
                     let type_name = value_type.to_string();
 
-                    if !type_map.contains_key(&type_name) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = type_map.entry(type_name.clone()) {
                         let index = type_names.len();
-                        type_names.push(type_name.clone());
-                        drop(type_map.insert(type_name, (index, value_type)));
+                        type_names.push(type_name);
+                        let _ = entry.insert((index, value_type));
                     }
                 }
             }
@@ -322,7 +325,7 @@ impl DynamicSerializer {
                 let type_name = value_type.to_string();
                 let (type_idx, _) = &type_map[&type_name];
                 discriminators.push(*type_idx as u64);
-                rows_by_type.entry(*type_idx).or_insert_with(Vec::new).push(row_idx);
+                rows_by_type.entry(*type_idx).or_default().push(row_idx);
             }
         }
 
@@ -412,7 +415,7 @@ mod tests {
         let test_cases = vec![
             (Value::Int32(42), "Int32"),
             (Value::String(b"hello".to_vec()), "String"),
-            (Value::Float64(3.14), "Float64"),
+            (Value::Float64(std::f64::consts::PI), "Float64"),
         ];
 
         for (value, expected_type_name) in test_cases {
@@ -468,11 +471,11 @@ mod tests {
         let values = vec![
             Value::Int32(42),
             Value::String(b"hello".to_vec()),
-            Value::Float64(3.141_592_653_589_793),
+            Value::Float64(std::f64::consts::PI),
         ];
 
         // Analyze values first
-        DynamicSerializer::analyze_values(&values).unwrap();
+        DynamicSerializer::analyze_values(&values);
 
         // Write prefix
         DynamicSerializer::write_prefix(&Type::Dynamic, &mut buffer, &mut state).await.unwrap();

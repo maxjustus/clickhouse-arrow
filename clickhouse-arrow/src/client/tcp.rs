@@ -216,7 +216,7 @@ mod tests {
 
     // Helper to create Destination variants
     fn socket_addr() -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9000)
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000)
     }
 
     #[tokio::test]

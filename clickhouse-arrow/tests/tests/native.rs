@@ -113,7 +113,8 @@ pub async fn round_trip<T: Row + std::fmt::Debug + PartialEq + Clone + Send + Sy
 
     // Insert data
     let query_id = Qid::new();
-    header(query_id, format!("Inserting test data with {} rows", data.len()));
+    let data_len = data.len();
+    header(query_id, format!("Inserting test data with {data_len} rows"));
     let query = format!("INSERT INTO {db_name}.{table_name} FORMAT Native");
     let result = client
         .insert_rows(&query, data.clone().into_iter(), Some(table_qid))
@@ -240,7 +241,7 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     let query_id = "dynamic_test";
     let table_name = "test_dynamic";
 
-    header(query_id, format!("Creating table with Dynamic column"));
+    header(query_id, "Creating table with Dynamic column");
     client
         .execute(&format!("DROP TABLE IF EXISTS {table_name}"), None)
         .await
@@ -278,9 +279,9 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     // }
 
     header(query_id, "Testing simple query first");
-    let simple_query = format!("SELECT 1 as num");
+    let simple_query = "SELECT 1 as num";
     let mut simple_stream =
-        client.query::<SimpleRow>(&simple_query, None).await.expect("simple query failed");
+        client.query::<SimpleRow>(simple_query, None).await.expect("simple query failed");
 
     if let Some(Ok(row)) = simple_stream.next().await {
         assert_eq!(row.num, 1);
@@ -302,7 +303,7 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     // Verify each value
     for (i, (expected, received)) in expected_values.iter().zip(received_values.iter()).enumerate()
     {
-        assert_eq!(expected, received, "Value mismatch at index {}", i);
+        assert_eq!(expected, received, "Value mismatch at index {i}");
     }
 
     header(query_id, format!("Dropping table {table_name}"));
@@ -361,7 +362,7 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
     let query_id = "json_test";
     let table_name = "test_json";
 
-    header(query_id, format!("Creating table with JSON column"));
+    header(query_id, "Creating table with JSON column");
     client
         .execute(&format!("DROP TABLE IF EXISTS {table_name}"), None)
         .await
@@ -390,9 +391,9 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
     }
 
     header(query_id, "Testing simple query first");
-    let simple_query = format!("SELECT 1 as num");
+    let simple_query = "SELECT 1 as num";
     let mut simple_stream =
-        client.query::<SimpleRow>(&simple_query, None).await.expect("simple query failed");
+        client.query::<SimpleRow>(simple_query, None).await.expect("simple query failed");
 
     if let Some(Ok(row)) = simple_stream.next().await {
         assert_eq!(row.num, 1, "Simple query should return 1");
@@ -431,7 +432,7 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
         let received_json: serde_json::Value =
             serde_json::from_str(&received_str).expect("Received value should be valid JSON");
 
-        assert_eq!(expected_json, received_json, "JSON value mismatch at index {}", i);
+        assert_eq!(expected_json, received_json, "JSON value mismatch at index {i}");
     }
 
     header(query_id, format!("Dropping table {table_name}"));

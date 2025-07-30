@@ -10,12 +10,11 @@ pub(crate) const ROWS: usize = 100_000;
 const DISABLE_CLEANUP_ENV: &str = "DISABLE_CLEANUP";
 
 pub(crate) fn init(directives: Option<&[(&str, &str)]>) {
-    if let Ok(l) = std::env::var("RUST_LOG") {
-        if !l.is_empty() {
+    if let Ok(l) = std::env::var("RUST_LOG")
+        && !l.is_empty() {
             // Add directives here
             init_tracing(directives);
         }
-    }
 }
 
 pub(crate) async fn setup(directives: Option<&[(&str, &str)]>) -> &'static ClickHouseContainer {

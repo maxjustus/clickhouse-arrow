@@ -1,5 +1,17 @@
 #![doc = include_str!("../README.md")]
 
+// Allow some pedantic clippy warnings for better development experience
+#![allow(
+    clippy::match_same_arms,
+    clippy::uninlined_format_args,
+    clippy::items_after_statements,
+    clippy::semicolon_if_nothing_returned,
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines,
+    clippy::type_complexity,
+    clippy::match_wild_err_arm
+)]
+
 pub mod arrow;
 mod client;
 mod compression;

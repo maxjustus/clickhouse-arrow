@@ -102,11 +102,10 @@ impl VariantSerializer {
                 continue;
             }
 
-            if let Some(values_for_disc) = grouped_values.get(&discriminator) {
-                if let Some(inner_type) = discriminator_map.get_type(discriminator) {
+            if let Some(values_for_disc) = grouped_values.get(&discriminator)
+                && let Some(inner_type) = discriminator_map.get_type(discriminator) {
                     inner_type.serialize_column(values_for_disc.clone(), writer, state).await?;
                 }
-            }
         }
 
         Ok(())
@@ -135,11 +134,10 @@ impl VariantSerializer {
                 continue;
             }
 
-            if let Some(values_for_disc) = grouped_values.get(&discriminator) {
-                if let Some(inner_type) = discriminator_map.get_type(discriminator) {
+            if let Some(values_for_disc) = grouped_values.get(&discriminator)
+                && let Some(inner_type) = discriminator_map.get_type(discriminator) {
                     inner_type.serialize_column_sync(values_for_disc.clone(), writer, state)?;
                 }
-            }
         }
 
         Ok(())

@@ -12,6 +12,7 @@ fn swap_endian_256(mut input: [u8; 32]) -> [u8; 32] {
 }
 
 impl Serializer for SizedSerializer {
+    #[allow(clippy::match_same_arms)]
     async fn write<W: ClickHouseWrite>(
         type_: &Type,
         values: Vec<Value>,
@@ -64,6 +65,7 @@ impl Serializer for SizedSerializer {
         Ok(())
     }
 
+    #[allow(clippy::match_same_arms)]
     fn write_sync(
         type_: &Type,
         values: Vec<Value>,

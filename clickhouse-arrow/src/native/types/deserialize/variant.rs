@@ -10,7 +10,7 @@ use crate::native::types::{Type, Value};
 /// Represents a mapping from discriminator values to types and their string representations
 #[derive(Debug, Clone)]
 pub(crate) struct DiscriminatorMap {
-    /// Maps discriminator byte to (type_string, type)
+    /// Maps discriminator byte to (`type_string`, `type`)
     types: HashMap<u8, (String, Type)>,
 }
 
@@ -86,8 +86,7 @@ impl VariantDeserializer {
                     values.push(Value::Variant(disc, Box::new(column[offset].clone())));
                 } else {
                     return Err(crate::Error::DeserializeError(format!(
-                        "Invalid offset {} for discriminator {}",
-                        offset, disc
+                        "Invalid offset {offset} for discriminator {disc}"
                     )));
                 }
             } else {
@@ -109,8 +108,7 @@ impl VariantDeserializer {
         let version = reader.read_u64_le().await?;
         if version != 0 {
             return Err(crate::Error::DeserializeError(format!(
-                "Unsupported Variant serialization version: {}",
-                version
+                "Unsupported Variant serialization version: {version}"
             )));
         }
 
@@ -143,15 +141,13 @@ impl VariantDeserializer {
         let mut columns: HashMap<u8, Vec<Value>> = HashMap::new();
 
         for discriminator in discriminator_map.discriminators() {
-            if let Some(&count) = row_count_by_type.get(&discriminator) {
-                if count > 0 {
-                    if let Some(inner_type) = discriminator_map.get_type(discriminator) {
+            if let Some(&count) = row_count_by_type.get(&discriminator)
+                && count > 0
+                && let Some(inner_type) = discriminator_map.get_type(discriminator) {
                         let column_values =
                             inner_type.deserialize_column(reader, count, state).await?;
                         drop(columns.insert(discriminator, column_values));
                     }
-                }
-            }
         }
 
         // Reconstruct the values in original order
@@ -166,8 +162,7 @@ impl VariantDeserializer {
         let version = reader.get_u64_le();
         if version != 0 {
             return Err(crate::Error::DeserializeError(format!(
-                "Unsupported Variant serialization version: {}",
-                version
+                "Unsupported Variant serialization version: {version}"
             )));
         }
 
@@ -189,8 +184,7 @@ impl VariantDeserializer {
         // Sanity check
         if rows > 1_000_000 {
             return Err(crate::Error::DeserializeError(format!(
-                "Variant row count too large: {} (likely corrupt data)",
-                rows
+                "Variant row count too large: {rows} (likely corrupt data)"
             )));
         }
 
@@ -208,15 +202,13 @@ impl VariantDeserializer {
         let mut columns: HashMap<u8, Vec<Value>> = HashMap::new();
 
         for discriminator in discriminator_map.discriminators() {
-            if let Some(&count) = row_count_by_type.get(&discriminator) {
-                if count > 0 {
-                    if let Some(inner_type) = discriminator_map.get_type(discriminator) {
+            if let Some(&count) = row_count_by_type.get(&discriminator)
+                && count > 0
+                && let Some(inner_type) = discriminator_map.get_type(discriminator) {
                         let column_values =
                             inner_type.deserialize_column_sync(reader, count, state)?;
                         drop(columns.insert(discriminator, column_values));
                     }
-                }
-            }
         }
 
         // Reconstruct the values in original order

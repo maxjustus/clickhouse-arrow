@@ -209,7 +209,7 @@ impl ProtocolData<Self, ()> for Block {
                 // For Dynamic type, we need to analyze values before writing prefix
                 if matches!(type_, Type::Dynamic) {
                     use crate::native::types::serialize::dynamic::DynamicSerializer;
-                    DynamicSerializer::analyze_values(&values)?;
+                    DynamicSerializer::analyze_values(&values);
                 }
 
                 // For JSON type, we need to analyze values before writing prefix
@@ -275,7 +275,7 @@ impl ProtocolData<Self, ()> for Block {
                 // For Dynamic type, we need to analyze values before writing prefix
                 if matches!(type_, Type::Dynamic) {
                     use crate::native::types::serialize::dynamic::DynamicSerializer;
-                    DynamicSerializer::analyze_values(&values)?;
+                    DynamicSerializer::analyze_values(&values);
                 }
 
                 // For JSON type, we need to analyze values before writing prefix

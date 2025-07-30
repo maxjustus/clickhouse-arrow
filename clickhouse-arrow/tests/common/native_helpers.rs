@@ -2,6 +2,7 @@ use chrono::NaiveDate;
 use chrono_tz::Tz;
 use clickhouse_arrow::native::block::Block;
 use clickhouse_arrow::prelude::*;
+use clickhouse_arrow::native::block_info::BlockInfo;
 use clickhouse_arrow::{ColumnDefinition, Type, Value};
 use uuid::Uuid;
 
@@ -341,7 +342,7 @@ pub fn generate_variant_test_block() -> Vec<TestRowVariant> {
                     Value::String(b"b".to_vec()),
                 ])),
             ), /* Array(String) (discriminator 0) */
-            multi_type_variant: Value::Variant(1, Box::new(Value::Float64(3.14159))), /* Float64 (discriminator 1) */
+            multi_type_variant: Value::Variant(1, Box::new(Value::Float64(std::f64::consts::PI))), /* Float64 (discriminator 1) */
         },
         TestRowVariant {
             id:                 2,
@@ -380,7 +381,7 @@ pub fn generate_dynamic_test_block() -> Block {
     ];
 
     Block {
-        info:         Default::default(),
+        info:         BlockInfo::default(),
         rows:         rows.len() as u64,
         column_types: vec![("dynamic_col".to_string(), Type::Dynamic)],
         column_data:  rows,
@@ -396,7 +397,7 @@ pub fn generate_json_test_block() -> Block {
     ];
 
     Block {
-        info:         Default::default(),
+        info:         BlockInfo::default(),
         rows:         rows.len() as u64,
         column_types: vec![("json_col".to_string(), Type::JSON)],
         column_data:  rows,

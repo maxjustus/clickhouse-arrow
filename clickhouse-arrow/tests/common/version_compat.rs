@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use tracing::{debug, warn};
 
-/// ClickHouse version information
+/// `ClickHouse` version information
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
     pub major: u32,
@@ -57,7 +57,7 @@ impl FromStr for Version {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::parse(s).ok_or_else(|| format!("Invalid version format: {}", s))
+        Self::parse(s).ok_or_else(|| format!("Invalid version format: {s}"))
     }
 }
 
@@ -68,6 +68,7 @@ impl std::fmt::Display for Version {
 }
 
 /// Version compatibility checker for tests
+#[derive(Copy, Clone)]
 pub struct VersionChecker {
     version: Option<Version>,
 }
