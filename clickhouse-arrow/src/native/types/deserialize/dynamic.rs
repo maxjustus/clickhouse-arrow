@@ -8,77 +8,132 @@ use crate::io::{ClickHouseBytesRead, ClickHouseRead};
 use crate::native::types::deserialize::ClickHouseNativeDeserializer;
 use crate::native::types::{Type, Value};
 
-/// State for storing Dynamic type metadata between prefix and data reading phases
-#[derive(Debug, Default)]
-pub(crate) struct DynamicState {
-    version:     Option<u64>,
-    total_types: Option<u64>,
-    types:       Option<Vec<(String, Type)>>,
-}
+const SUPPORTED_VERSION: u64 = 3;
+const VERSION_ERROR: &str = "Use ClickHouse 25.6+ and enable \
+                             'output_format_native_use_flattened_dynamic_and_json_serialization=1' \
+                             for v3 format";
 
 thread_local! {
-    static DYNAMIC_STATE: std::cell::RefCell<DynamicState> = std::cell::RefCell::new(DynamicState::default());
+    // Store metadata between prefix and data reading phases
+    static METADATA: std::cell::RefCell<Option<(u64, Vec<(String, Type)>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Macro to read discriminator based on size
+macro_rules! read_discriminator {
+    (async $reader:expr, $total_types:expr) => {
+        match $total_types {
+            0..=255 => u64::from($reader.read_u8().await?),
+            256..=65535 => u64::from($reader.read_u16_le().await?),
+            65536..=4_294_967_295 => u64::from($reader.read_u32_le().await?),
+            _ => $reader.read_u64_le().await?,
+        }
+    };
+    (sync $reader:expr, $total_types:expr) => {
+        match $total_types {
+            0..=255 => u64::from($reader.get_u8()),
+            256..=65535 => u64::from($reader.get_u16_le()),
+            65536..=4_294_967_295 => u64::from($reader.get_u32_le()),
+            _ => $reader.get_u64_le(),
+        }
+    };
 }
 
 /// Handles deserialization of Dynamic types
-/// Dynamic is internally represented as a Variant with different serialization versions
 pub(crate) struct DynamicDeserializer;
 
 impl DynamicDeserializer {
-    /// Determine discriminator size based on total types count
-    /// (Kept for potential future use when we add v2 support)
-    #[allow(dead_code)]
-    fn discriminator_size(total_types: u64) -> usize {
-        match total_types {
-            0..=255 => 1,               // u8
-            256..=65535 => 2,           // u16
-            65536..=4_294_967_295 => 4, // u32
-            _ => 8,                     // u64
-        }
+    /// Parse type name and create Type instance
+    #[inline]
+    fn parse_type_entry(type_name_bytes: Vec<u8>) -> Result<(String, Type)> {
+        let type_name = String::from_utf8(type_name_bytes).map_err(|e| {
+            crate::Error::DeserializeError(format!("Invalid UTF-8 in type name: {e}"))
+        })?;
+        let typ = type_name
+            .parse::<Type>()
+            .map_err(|_| crate::Error::DeserializeError(format!("Unknown type: {type_name}")))?;
+        Ok((type_name, typ))
     }
 
-    /// Read discriminator based on the total types count
-    async fn read_discriminator<R: ClickHouseRead>(
-        reader: &mut R,
+    /// Build offset mapping and count rows per type
+    fn build_offsets(
+        discriminators: &[u64],
         total_types: u64,
-    ) -> Result<u64> {
-        Ok(match total_types {
-            0..=255 => u64::from(reader.read_u8().await?),
-            256..=65535 => u64::from(reader.read_u16_le().await?),
-            65536..=4_294_967_295 => u64::from(reader.read_u32_le().await?),
-            _ => reader.read_u64_le().await?,
-        })
-    }
+    ) -> (Vec<usize>, HashMap<u64, usize>) {
+        let mut row_count_by_type = HashMap::new();
+        let mut offsets = vec![0; discriminators.len()];
 
-    /// Read discriminator sync version
-    fn read_discriminator_sync<R: ClickHouseBytesRead>(reader: &mut R, total_types: u64) -> u64 {
-        match total_types {
-            0..=255 => u64::from(reader.get_u8()),
-            256..=65535 => u64::from(reader.get_u16_le()),
-            65536..=4_294_967_295 => u64::from(reader.get_u32_le()),
-            _ => reader.get_u64_le(),
+        for (i, &disc) in discriminators.iter().enumerate() {
+            if disc != total_types {
+                // NULL discriminator is total_types
+                let count = row_count_by_type.entry(disc).or_default();
+                offsets[i] = *count;
+                *count += 1;
+            }
         }
+
+        (offsets, row_count_by_type)
     }
 
-    /// Read v3 header (CH 25.6+) - the only supported format
-    async fn read_v3_header<R: ClickHouseRead>(
+    /// Reconstruct values in original order
+    fn reconstruct_values(
+        discriminators: &[u64],
+        offsets: &[usize],
+        columns: &HashMap<u64, Vec<Value>>,
+        total_types: u64,
+    ) -> Result<Vec<Value>> {
+        discriminators
+            .iter()
+            .zip(offsets)
+            .map(|(&disc, &offset)| {
+                if disc == total_types {
+                    Ok(Value::Null)
+                } else {
+                    columns
+                        .get(&disc)
+                        .and_then(|col| col.get(offset))
+                        .cloned()
+                        .ok_or_else(|| {
+                            crate::Error::DeserializeError(format!(
+                                "Invalid offset {} for discriminator {}",
+                                offset, disc
+                            ))
+                        })
+                }
+            })
+            .collect()
+    }
+
+    /// Validate version and return error for unsupported versions
+    fn validate_version(version: u64) -> Result<()> {
+        if version != SUPPORTED_VERSION {
+            let msg = match version {
+                1 | 2 => {
+                    format!("Dynamic v{} serialization not supported. {}", version, VERSION_ERROR)
+                }
+                _ => format!(
+                    "Unknown Dynamic serialization version: {}. Expected version 3. {}",
+                    version, VERSION_ERROR
+                ),
+            };
+            return Err(crate::Error::DeserializeError(msg));
+        }
+        Ok(())
+    }
+
+
+    pub(crate) async fn read_prefix<R: ClickHouseRead>(
+        _type: &Type,
         reader: &mut R,
         state: &mut DeserializerState,
-    ) -> Result<(u64, Vec<(String, Type)>)> {
-        // Read total types count
-        let total_types = reader.read_var_uint().await?;
+    ) -> Result<()> {
+        let version = reader.read_u64_le().await?;
+        Self::validate_version(version)?;
 
-        // Read type names and create types
+        // Read v3 header
+        let total_types = reader.read_var_uint().await?;
         let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
         for _ in 0..total_types {
-            let type_name_bytes = reader.read_string().await?;
-            let type_name = String::from_utf8(type_name_bytes).map_err(|e| {
-                crate::Error::DeserializeError(format!("Invalid UTF-8 in type name: {e}"))
-            })?;
-            let typ = type_name.parse::<Type>().map_err(|_| {
-                crate::Error::DeserializeError(format!("Unknown type: {type_name}"))
-            })?;
-            types.push((type_name, typ));
+            types.push(Self::parse_type_entry(reader.read_string().await?)?);
         }
 
         // Read prefixes for nested types
@@ -86,54 +141,8 @@ impl DynamicDeserializer {
             typ.deserialize_prefix_async(reader, state).await?;
         }
 
-        Ok((total_types, types))
-    }
-
-    pub(crate) async fn read_prefix<R: ClickHouseRead>(
-        _type: &Type,
-        reader: &mut R,
-        state: &mut DeserializerState,
-    ) -> Result<()> {
-        // Read serialization version
-        let version = reader.read_u64_le().await?;
-
-        // Store version and header info in state for use during data reading
-        match version {
-            3 => {
-                // v3 flat format (CH 25.6+) - our primary supported format
-                let (total_types, types) = Self::read_v3_header(reader, state).await?;
-                DYNAMIC_STATE.with(|state| {
-                    let mut state = state.borrow_mut();
-                    state.version = Some(3);
-                    state.total_types = Some(total_types);
-                    state.types = Some(types);
-                });
-            }
-            1 => {
-                return Err(crate::Error::DeserializeError(
-                    "Dynamic v1 serialization not supported. Use ClickHouse 25.6+ and enable \
-                     'output_format_native_use_flattened_dynamic_and_json_serialization=1' for v3 \
-                     format."
-                        .to_string(),
-                ));
-            }
-            2 => {
-                return Err(crate::Error::DeserializeError(
-                    "Dynamic v2 serialization not supported. Use ClickHouse 25.6+ and enable \
-                     'output_format_native_use_flattened_dynamic_and_json_serialization=1' for v3 \
-                     format."
-                        .to_string(),
-                ));
-            }
-            _ => {
-                return Err(crate::Error::DeserializeError(format!(
-                    "Unknown Dynamic serialization version: {version}. Expected version 3. Use \
-                     ClickHouse 25.6+ and enable \
-                     'output_format_native_use_flattened_dynamic_and_json_serialization=1'."
-                )));
-            }
-        }
-
+        // Store metadata for data phase
+        METADATA.with(|m| *m.borrow_mut() = Some((total_types, types)));
         Ok(())
     }
 
@@ -143,78 +152,35 @@ impl DynamicDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        // Get stored metadata from prefix phase
-        let (_version, total_types, types) = DYNAMIC_STATE.with(|state| {
-            let state = state.borrow();
-            let version = state.version.ok_or_else(|| {
-                crate::Error::DeserializeError("Dynamic version not set in state".to_string())
-            })?;
-            let total_types = state.total_types.ok_or_else(|| {
-                crate::Error::DeserializeError("Dynamic total types not set in state".to_string())
-            })?;
-            let types = state.types.clone().ok_or_else(|| {
-                crate::Error::DeserializeError("Dynamic types not set in state".to_string())
-            })?;
-            Ok::<_, crate::Error>((version, total_types, types))
+        let (total_types, types) = METADATA.with(|m| {
+            m.borrow_mut().take().ok_or_else(|| {
+                crate::Error::DeserializeError("Dynamic metadata not set".to_string())
+            })
         })?;
 
         // Read discriminators
         let mut discriminators = Vec::with_capacity(rows);
         for _ in 0..rows {
-            let disc = Self::read_discriminator(reader, total_types).await?;
-            discriminators.push(disc);
+            discriminators.push(read_discriminator!(async reader, total_types));
         }
 
-        // Count rows per type
-        let mut row_count_by_type: HashMap<u64, usize> = HashMap::new();
-        let mut offsets = vec![0; rows];
-
-        for (i, &disc) in discriminators.iter().enumerate() {
-            if disc != total_types {
-                // NULL discriminator is total_types in v2/v3
-                let count = row_count_by_type.entry(disc).or_insert(0);
-                offsets[i] = *count;
-                *count += 1;
-            }
-        }
+        // Build offsets and count rows
+        let (offsets, row_count_by_type) = Self::build_offsets(&discriminators, total_types);
 
         // Read column data for each type
-        let mut columns: HashMap<u64, Vec<Value>> = HashMap::new();
-
+        let mut columns = HashMap::new();
         for (idx, (_, typ)) in types.iter().enumerate() {
             let type_idx = idx as u64;
             if let Some(&count) = row_count_by_type.get(&type_idx)
                 && count > 0
             {
                 let column_values = typ.deserialize_column(reader, count, state).await?;
-                drop(columns.insert(type_idx, column_values));
+                let old = columns.insert(type_idx, column_values);
+                debug_assert!(old.is_none(), "Duplicate type index");
             }
         }
 
-        // Reconstruct values in original order
-        let mut values = Vec::with_capacity(rows);
-        for (i, &disc) in discriminators.iter().enumerate() {
-            if disc == total_types {
-                // NULL value
-                values.push(Value::Null);
-            } else if let Some(column) = columns.get(&disc) {
-                let offset = offsets[i];
-                if offset < column.len() {
-                    // For Dynamic, we return the inner value directly (not wrapped in Variant)
-                    values.push(column[offset].clone());
-                } else {
-                    return Err(crate::Error::DeserializeError(format!(
-                        "Invalid offset {offset} for discriminator {disc}"
-                    )));
-                }
-            } else {
-                return Err(crate::Error::DeserializeError(format!(
-                    "Unknown discriminator value: {disc}"
-                )));
-            }
-        }
-
-        Ok(values)
+        Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
     }
 
     pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
@@ -222,65 +188,24 @@ impl DynamicDeserializer {
         reader: &mut R,
         _state: &mut DeserializerState,
     ) -> Result<()> {
-        // Read serialization version
         let version = reader.get_u64_le();
+        Self::validate_version(version)?;
 
-        match version {
-            3 => {
-                // v3 flat format (CH 25.6+) - our primary supported format
-                // Read total types
-                let total_types = reader.try_get_var_uint()?;
+        // Read v3 header
+        let total_types = reader.try_get_var_uint()?;
+        let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
 
-                // Read type names
-                let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
-                for _ in 0..total_types {
-                    let type_name_bytes = reader.try_get_string()?;
-                    let type_name = String::from_utf8(type_name_bytes.to_vec()).map_err(|e| {
-                        crate::Error::DeserializeError(format!("Invalid UTF-8 in type name: {e}"))
-                    })?;
-                    let typ = type_name.parse::<Type>().map_err(|_| {
-                        crate::Error::DeserializeError(format!("Unknown type: {type_name}"))
-                    })?;
-                    types.push((type_name, typ));
-                }
-
-                // Read prefixes for nested types
-                for (_, typ) in &types {
-                    typ.deserialize_prefix(reader)?;
-                }
-
-                DYNAMIC_STATE.with(|state| {
-                    let mut state = state.borrow_mut();
-                    state.version = Some(3);
-                    state.total_types = Some(total_types);
-                    state.types = Some(types);
-                });
-            }
-            1 => {
-                return Err(crate::Error::DeserializeError(
-                    "Dynamic v1 serialization not supported. Use ClickHouse 25.6+ and enable \
-                     'output_format_native_use_flattened_dynamic_and_json_serialization=1' for v3 \
-                     format."
-                        .to_string(),
-                ));
-            }
-            2 => {
-                return Err(crate::Error::DeserializeError(
-                    "Dynamic v2 serialization not supported. Use ClickHouse 25.6+ and enable \
-                     'output_format_native_use_flattened_dynamic_and_json_serialization=1' for v3 \
-                     format."
-                        .to_string(),
-                ));
-            }
-            _ => {
-                return Err(crate::Error::DeserializeError(format!(
-                    "Unknown Dynamic serialization version: {version}. Expected version 3. Use \
-                     ClickHouse 25.6+ and enable \
-                     'output_format_native_use_flattened_dynamic_and_json_serialization=1'."
-                )));
-            }
+        for _ in 0..total_types {
+            types.push(Self::parse_type_entry(reader.try_get_string()?.to_vec())?);
         }
 
+        // Read prefixes for nested types
+        for (_, typ) in &types {
+            typ.deserialize_prefix(reader)?;
+        }
+
+        // Store metadata for data phase
+        METADATA.with(|m| *m.borrow_mut() = Some((total_types, types)));
         Ok(())
     }
 
@@ -290,90 +215,62 @@ impl DynamicDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        // Get stored metadata
-        let (_version, total_types, types) = DYNAMIC_STATE.with(|state| {
-            let state = state.borrow();
-            let version = state.version.ok_or_else(|| {
-                crate::Error::DeserializeError("Dynamic version not set in state".to_string())
-            })?;
-            let total_types = state.total_types.ok_or_else(|| {
-                crate::Error::DeserializeError("Dynamic total types not set in state".to_string())
-            })?;
-            let types = state.types.clone().ok_or_else(|| {
-                crate::Error::DeserializeError("Dynamic types not set in state".to_string())
-            })?;
-            Ok::<_, crate::Error>((version, total_types, types))
+        let (total_types, types) = METADATA.with(|m| {
+            m.borrow_mut().take().ok_or_else(|| {
+                crate::Error::DeserializeError("Dynamic metadata not set".to_string())
+            })
         })?;
 
         // Read discriminators
         let mut discriminators = Vec::with_capacity(rows);
         for _ in 0..rows {
-            let disc = Self::read_discriminator_sync(reader, total_types);
-            discriminators.push(disc);
+            discriminators.push(read_discriminator!(sync reader, total_types));
         }
 
-        // Count rows per type
-        let mut row_count_by_type: HashMap<u64, usize> = HashMap::new();
-        let mut offsets = vec![0; rows];
+        // Build offsets and count rows
+        let (offsets, row_count_by_type) = Self::build_offsets(&discriminators, total_types);
 
-        for (i, &disc) in discriminators.iter().enumerate() {
-            if disc != total_types {
-                let count = row_count_by_type.entry(disc).or_insert(0);
-                offsets[i] = *count;
-                *count += 1;
-            }
-        }
-
-        // Read column data
-        let mut columns: HashMap<u64, Vec<Value>> = HashMap::new();
-
+        // Read column data for each type
+        let mut columns = HashMap::new();
         for (idx, (_, typ)) in types.iter().enumerate() {
             let type_idx = idx as u64;
             if let Some(&count) = row_count_by_type.get(&type_idx)
                 && count > 0
             {
                 let column_values = typ.deserialize_column_sync(reader, count, state)?;
-                drop(columns.insert(type_idx, column_values));
+                let old = columns.insert(type_idx, column_values);
+                debug_assert!(old.is_none(), "Duplicate type index");
             }
         }
 
-        // Reconstruct values
-        let mut values = Vec::with_capacity(rows);
-        for (i, &disc) in discriminators.iter().enumerate() {
-            if disc == total_types {
-                values.push(Value::Null);
-            } else if let Some(column) = columns.get(&disc) {
-                let offset = offsets[i];
-                if offset < column.len() {
-                    values.push(column[offset].clone());
-                } else {
-                    return Err(crate::Error::DeserializeError(format!(
-                        "Invalid offset {offset} for discriminator {disc}"
-                    )));
-                }
-            } else {
-                return Err(crate::Error::DeserializeError(format!(
-                    "Unknown discriminator value: {disc}"
-                )));
-            }
-        }
-
-        Ok(values)
+        Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_discriminator_size() {
-        assert_eq!(DynamicDeserializer::discriminator_size(100), 1);
-        assert_eq!(DynamicDeserializer::discriminator_size(255), 1);
-        assert_eq!(DynamicDeserializer::discriminator_size(256), 2);
-        assert_eq!(DynamicDeserializer::discriminator_size(65535), 2);
-        assert_eq!(DynamicDeserializer::discriminator_size(65536), 4);
-        assert_eq!(DynamicDeserializer::discriminator_size(4_294_967_295), 4);
-        assert_eq!(DynamicDeserializer::discriminator_size(4_294_967_296), 8);
+        // Test discriminator size calculation for different ranges
+        let test_cases: Vec<(u64, usize)> = vec![
+            (100, 1),
+            (255, 1),
+            (256, 2),
+            (65535, 2),
+            (65536, 4),
+            (4_294_967_295, 4),
+            (4_294_967_296, 8),
+        ];
+
+        for (total_types, expected_size) in test_cases {
+            let size = match total_types {
+                0..=255 => 1,
+                256..=65535 => 2,
+                65536..=4_294_967_295 => 4,
+                _ => 8,
+            };
+            assert_eq!(size, expected_size, "Failed for total_types: {}", total_types);
+        }
     }
 }
