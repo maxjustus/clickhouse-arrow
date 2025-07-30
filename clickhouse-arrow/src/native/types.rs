@@ -157,10 +157,6 @@ impl Type {
         }
     }
 
-    // TODO: Dynamic type methods to be implemented
-    // pub(crate) fn unwrap_dynamic(&self) -> Result<u8> { ... }
-    // pub(crate) fn undynamic(&self) -> Option<u8> { ... }
-
     pub fn unnull(&self) -> Option<&Type> {
         match self {
             Type::Nullable(x) => Some(&**x),
