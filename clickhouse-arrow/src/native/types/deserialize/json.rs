@@ -10,7 +10,7 @@ use crate::{Error, Result};
 // JSON serialization versions
 const JSON_STRING_VERSION: u64 = 1;
 const JSON_OBJECT_VERSION_2: u64 = 2;
-const JSON_OBJECT_VERSION: u64 = 3;
+const JSON_OBJECT_VERSION_3: u64 = 3;
 
 thread_local! {
     // Store version and object data between prefix and data reading phases
@@ -211,7 +211,7 @@ impl Deserializer for JsonDeserializer {
                 JSON_STATE.with(|s| *s.borrow_mut() = (version, None));
                 Ok(())
             }
-            JSON_OBJECT_VERSION_2 | JSON_OBJECT_VERSION => {
+            JSON_OBJECT_VERSION_2 | JSON_OBJECT_VERSION_3 => {
                 // Read total dynamic paths
                 let total_paths = reader.read_var_uint().await?;
 
@@ -279,7 +279,7 @@ impl Deserializer for JsonDeserializer {
                 }
                 Ok(out)
             }
-            JSON_OBJECT_VERSION_2 | JSON_OBJECT_VERSION => {
+            JSON_OBJECT_VERSION_2 | JSON_OBJECT_VERSION_3 => {
                 let (path_names, dynamic_data) = object_data.ok_or_else(|| {
                     Error::DeserializeError("JSON object data not set".to_string())
                 })?;
@@ -348,7 +348,7 @@ impl Deserializer for JsonDeserializer {
                 }
                 Ok(out)
             }
-            JSON_OBJECT_VERSION_2 | JSON_OBJECT_VERSION => {
+            JSON_OBJECT_VERSION_2 | JSON_OBJECT_VERSION_3 => {
                 let (path_names, dynamic_data) = object_data.ok_or_else(|| {
                     Error::DeserializeError("JSON object data not set".to_string())
                 })?;
