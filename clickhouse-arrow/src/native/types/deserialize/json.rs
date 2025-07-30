@@ -205,10 +205,10 @@ impl Deserializer for JsonDeserializer {
             JSON_STRING_VERSION => {
                 // Simple string version - no paths or dynamic data
                 state.type_specific = TypeSpecificState::Json(JsonStateData {
-                    version: Some(version),
-                    paths: Vec::new(),
+                    version:      Some(version),
+                    paths:        Vec::new(),
                     path_columns: None,
-                    rows: None,
+                    rows:         None,
                     dynamic_data: None,
                 });
                 Ok(())
@@ -257,10 +257,10 @@ impl Deserializer for JsonDeserializer {
 
                 // Store metadata in state
                 state.type_specific = TypeSpecificState::Json(JsonStateData {
-                    version: Some(version),
-                    paths: path_names,
+                    version:      Some(version),
+                    paths:        path_names,
                     path_columns: None,
-                    rows: None,
+                    rows:         None,
                     dynamic_data: Some(dynamic_data),
                 });
                 Ok(())
@@ -277,14 +277,17 @@ impl Deserializer for JsonDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (version, path_names, dynamic_data) = if let TypeSpecificState::Json(json_state) = &state.type_specific {
-            let version = json_state.version.ok_or_else(|| {
-                Error::DeserializeError("JSON version not set. read_prefix must be called first".to_string())
-            })?;
-            (version, json_state.paths.clone(), json_state.dynamic_data.clone())
-        } else {
-            return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
-        };
+        let (version, path_names, dynamic_data) =
+            if let TypeSpecificState::Json(json_state) = &state.type_specific {
+                let version = json_state.version.ok_or_else(|| {
+                    Error::DeserializeError(
+                        "JSON version not set. read_prefix must be called first".to_string(),
+                    )
+                })?;
+                (version, json_state.paths.clone(), json_state.dynamic_data.clone())
+            } else {
+                return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
+            };
 
         match version {
             JSON_STRING_VERSION => {
@@ -353,14 +356,17 @@ impl Deserializer for JsonDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (version, path_names, dynamic_data) = if let TypeSpecificState::Json(json_state) = &state.type_specific {
-            let version = json_state.version.ok_or_else(|| {
-                Error::DeserializeError("JSON version not set. read_prefix must be called first".to_string())
-            })?;
-            (version, json_state.paths.clone(), json_state.dynamic_data.clone())
-        } else {
-            return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
-        };
+        let (version, path_names, dynamic_data) =
+            if let TypeSpecificState::Json(json_state) = &state.type_specific {
+                let version = json_state.version.ok_or_else(|| {
+                    Error::DeserializeError(
+                        "JSON version not set. read_prefix must be called first".to_string(),
+                    )
+                })?;
+                (version, json_state.paths.clone(), json_state.dynamic_data.clone())
+            } else {
+                return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
+            };
 
         match version {
             JSON_STRING_VERSION => {

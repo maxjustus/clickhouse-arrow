@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tokio::io::AsyncWriteExt;
 
 use crate::Result;
-use crate::formats::{SerializerState, DynamicState, TypeSpecificState};
+use crate::formats::{DynamicState, SerializerState, TypeSpecificState};
 use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
 use crate::native::types::serialize::ClickHouseNativeSerializer;
 use crate::native::types::{Type, Value};
@@ -179,7 +179,7 @@ impl DynamicSerializer {
             // Clone type_names and type_map to avoid borrowing issues
             let type_names = dynamic_state.type_names.clone();
             let type_map = dynamic_state.type_map.clone();
-            
+
             // Write nested type prefixes
             for type_name in &type_names {
                 let (_, typ) = &type_map[type_name];
@@ -187,7 +187,9 @@ impl DynamicSerializer {
             }
         } else {
             return Err(crate::Error::SerializeError(
-                "Dynamic serialization state not found. `analyze_values` must be called before `write_prefix`.".to_string()
+                "Dynamic serialization state not found. `analyze_values` must be called before \
+                 `write_prefix`."
+                    .to_string(),
             ));
         }
 
@@ -213,14 +215,17 @@ impl DynamicSerializer {
         state: &mut SerializerState,
     ) -> Result<()> {
         // Get metadata from state
-        let (type_names, type_map, total_types) = if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-            let total = usize::try_from(dynamic_state.total_types).unwrap_or(usize::MAX);
-            (dynamic_state.type_names.clone(), dynamic_state.type_map.clone(), total)
-        } else {
-            return Err(crate::Error::SerializeError(
-                "Dynamic serialization state not found. `analyze_values` must be called before `write`.".to_string()
-            ));
-        };
+        let (type_names, type_map, total_types) =
+            if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
+                let total = usize::try_from(dynamic_state.total_types).unwrap_or(usize::MAX);
+                (dynamic_state.type_names.clone(), dynamic_state.type_map.clone(), total)
+            } else {
+                return Err(crate::Error::SerializeError(
+                    "Dynamic serialization state not found. `analyze_values` must be called \
+                     before `write`."
+                        .to_string(),
+                ));
+            };
 
         // Build discriminators and count rows per type
         let (discriminators, rows_by_type) =
@@ -256,7 +261,7 @@ impl DynamicSerializer {
             // Clone type_names and type_map to avoid borrowing issues
             let type_names = dynamic_state.type_names.clone();
             let type_map = dynamic_state.type_map.clone();
-            
+
             // Write nested type prefixes
             for type_name in &type_names {
                 let (_, typ) = &type_map[type_name];
@@ -264,7 +269,9 @@ impl DynamicSerializer {
             }
         } else {
             return Err(crate::Error::SerializeError(
-                "Dynamic serialization state not found. `analyze_values` must be called before `write_prefix`.".to_string()
+                "Dynamic serialization state not found. `analyze_values` must be called before \
+                 `write_prefix`."
+                    .to_string(),
             ));
         }
 
@@ -278,14 +285,17 @@ impl DynamicSerializer {
         state: &mut SerializerState,
     ) -> Result<()> {
         // Get metadata from state
-        let (type_names, type_map, total_types) = if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-            let total = usize::try_from(dynamic_state.total_types).unwrap_or(usize::MAX);
-            (dynamic_state.type_names.clone(), dynamic_state.type_map.clone(), total)
-        } else {
-            return Err(crate::Error::SerializeError(
-                "Dynamic serialization state not found. `analyze_values` must be called before `write`.".to_string()
-            ));
-        };
+        let (type_names, type_map, total_types) =
+            if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
+                let total = usize::try_from(dynamic_state.total_types).unwrap_or(usize::MAX);
+                (dynamic_state.type_names.clone(), dynamic_state.type_map.clone(), total)
+            } else {
+                return Err(crate::Error::SerializeError(
+                    "Dynamic serialization state not found. `analyze_values` must be called \
+                     before `write`."
+                        .to_string(),
+                ));
+            };
 
         // Build discriminators and count rows per type
         let (discriminators, rows_by_type) =
@@ -408,13 +418,11 @@ mod tests {
 
         // Analyze values first
         let type_specific_state = DynamicSerializer::analyze_values(&values);
-        
+
         // Write prefix
         let mut buffer = Vec::new();
-        let mut state = SerializerState {
-            type_specific: type_specific_state,
-            ..Default::default()
-        };
+        let mut state =
+            SerializerState { type_specific: type_specific_state, ..Default::default() };
         DynamicSerializer::write_prefix(&Type::Dynamic, &mut buffer, &mut state).await.unwrap();
 
         // Verify version and type count

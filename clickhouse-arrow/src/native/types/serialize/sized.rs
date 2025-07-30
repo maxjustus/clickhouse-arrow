@@ -25,7 +25,9 @@ impl Serializer for SizedSerializer {
                 Value::Int32(x) | Value::Decimal32(_, x) => writer.write_i32_le(*x).await?,
                 Value::Int64(x) | Value::Decimal64(_, x) => writer.write_i64_le(*x).await?,
                 Value::Int128(x) | Value::Decimal128(_, x) => writer.write_i128_le(*x).await?,
-                Value::Int256(x) | Value::Decimal256(_, x) => writer.write_all(&swap_endian_256(x.0)[..]).await?,
+                Value::Int256(x) | Value::Decimal256(_, x) => {
+                    writer.write_all(&swap_endian_256(x.0)[..]).await?
+                }
                 Value::UInt8(x) => writer.write_u8(*x).await?,
                 Value::UInt16(x) => writer.write_u16_le(*x).await?,
                 Value::UInt32(x) => writer.write_u32_le(*x).await?,

@@ -17,9 +17,7 @@ pub(crate) struct VariantSerializer;
 
 impl VariantSerializer {
     /// Extract discriminators and group values by discriminator
-    fn extract_discriminators_and_values(
-        values: &[Value],
-    ) -> Result<VariantGroupedData> {
+    fn extract_discriminators_and_values(values: &[Value]) -> Result<VariantGroupedData> {
         let mut discriminators = Vec::with_capacity(values.len());
         let mut grouped_values: HashMap<u8, Vec<Value>> = HashMap::new();
 
@@ -161,14 +159,13 @@ mod tests {
     /// Helper to serialize and deserialize variant values
     fn round_trip_test(variant_type: &Type, values: &[Value]) {
         use bytes::Buf;
-        
+
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
 
         // Serialize
         VariantSerializer::write_sync_prefix(variant_type, &mut buffer, &mut state).unwrap();
-        VariantSerializer::write_sync(variant_type, values, &mut buffer, &mut state)
-            .unwrap();
+        VariantSerializer::write_sync(variant_type, values, &mut buffer, &mut state).unwrap();
 
         // Deserialize
         let mut reader = Cursor::new(buffer);
@@ -232,10 +229,11 @@ mod tests {
     #[test]
     fn test_variant_homogeneous() {
         use bytes::Buf;
-        
+
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64, Type::Float64]);
         // All UInt64 (discriminator 2 after sorting)
-        let values: Vec<_> = (100..=500).step_by(100).map(|v| variant!(2, Value::UInt64(v))).collect();
+        let values: Vec<_> =
+            (100..=500).step_by(100).map(|v| variant!(2, Value::UInt64(v))).collect();
 
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
@@ -302,7 +300,7 @@ mod tests {
     #[test]
     fn test_variant_all_nulls() {
         use bytes::Buf;
-        
+
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64, Type::Date]);
         let values = vec![variant!(0xFF, Value::Null); 4];
 
@@ -343,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn test_variant_async() {
         use tokio::io::AsyncReadExt;
-        
+
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
         let values =
             vec![variant!(1, Value::UInt64(999)), variant!(0, Value::String(b"async".to_vec()))];

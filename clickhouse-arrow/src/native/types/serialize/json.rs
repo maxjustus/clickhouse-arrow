@@ -264,9 +264,7 @@ impl JsonSerializer {
     }
 
     /// Group values by type and build discriminator mapping
-    fn group_values_by_type(
-        column_values: &[Value],
-    ) -> JsonPathData {
+    fn group_values_by_type(column_values: &[Value]) -> JsonPathData {
         let mut type_map: HashMap<String, Vec<(usize, Value)>> = HashMap::new();
 
         for (idx, value) in column_values.iter().enumerate() {
@@ -450,13 +448,13 @@ impl JsonSerializer {
         }
 
         let state = JsonState {
-            version: None, // Will be set properly in write_prefix
-            paths: paths.clone(),
+            version:      None, // Will be set properly in write_prefix
+            paths:        paths.clone(),
             path_columns: Some(json_data.path_columns),
-            rows: Some(json_data.rows),
+            rows:         Some(json_data.rows),
             dynamic_data: None,
         };
-        
+
         Ok(TypeSpecificState::Json(state))
     }
 
@@ -503,7 +501,7 @@ impl JsonSerializer {
         }
         Ok(())
     }
-    
+
     /// Write paths header based on version (async)
     async fn write_paths_header_async<W: ClickHouseWrite>(
         paths: &[String],
@@ -537,7 +535,7 @@ impl JsonSerializer {
     ) -> Result<()> {
         let version = Self::get_serialization_version(state);
         writer.put_u64_le(version);
-        
+
         // Update the version in state
         if let TypeSpecificState::Json(json_state) = &mut state.type_specific {
             json_state.version = Some(version);
@@ -558,7 +556,9 @@ impl JsonSerializer {
             }
         } else {
             return Err(Error::SerializeError(
-                "JSON serialization state not found. `analyze_values` must be called before `write_prefix`.".to_string()
+                "JSON serialization state not found. `analyze_values` must be called before \
+                 `write_prefix`."
+                    .to_string(),
             ));
         }
 
@@ -574,7 +574,7 @@ impl Serializer for JsonSerializer {
     ) -> Result<()> {
         let version = Self::get_serialization_version(state);
         writer.write_u64_le(version).await?;
-        
+
         // Update the version in state
         if let TypeSpecificState::Json(json_state) = &mut state.type_specific {
             json_state.version = Some(version);
@@ -595,7 +595,9 @@ impl Serializer for JsonSerializer {
             }
         } else {
             return Err(Error::SerializeError(
-                "JSON serialization state not found. `analyze_values` must be called before `write_prefix`.".to_string()
+                "JSON serialization state not found. `analyze_values` must be called before \
+                 `write_prefix`."
+                    .to_string(),
             ));
         }
 
@@ -611,20 +613,23 @@ impl Serializer for JsonSerializer {
         let use_v3 = Self::supports_flat_dynamic_json(state);
 
         // Get metadata from state
-        let (paths, path_columns, rows) = if let TypeSpecificState::Json(json_state) = &state.type_specific {
-            // Use metadata from analyze_values
-            let path_columns = json_state.path_columns.clone().ok_or_else(|| {
-                Error::SerializeError("JSON path columns not found in state".to_string())
-            })?;
-            let rows = json_state.rows.ok_or_else(|| {
-                Error::SerializeError("JSON rows count not found in state".to_string())
-            })?;
-            (json_state.paths.clone(), path_columns, rows)
-        } else {
-            return Err(Error::SerializeError(
-                "JSON serialization state not found. `analyze_values` must be called before `write`.".to_string()
-            ));
-        };
+        let (paths, path_columns, rows) =
+            if let TypeSpecificState::Json(json_state) = &state.type_specific {
+                // Use metadata from analyze_values
+                let path_columns = json_state.path_columns.clone().ok_or_else(|| {
+                    Error::SerializeError("JSON path columns not found in state".to_string())
+                })?;
+                let rows = json_state.rows.ok_or_else(|| {
+                    Error::SerializeError("JSON rows count not found in state".to_string())
+                })?;
+                (json_state.paths.clone(), path_columns, rows)
+            } else {
+                return Err(Error::SerializeError(
+                    "JSON serialization state not found. `analyze_values` must be called before \
+                     `write`."
+                        .to_string(),
+                ));
+            };
 
         // Write data for each path (using Dynamic column format)
         for path in &paths {
@@ -652,20 +657,23 @@ impl Serializer for JsonSerializer {
         let use_v3 = Self::supports_flat_dynamic_json(state);
 
         // Get metadata from state
-        let (paths, path_columns, rows) = if let TypeSpecificState::Json(json_state) = &state.type_specific {
-            // Use metadata from analyze_values
-            let path_columns = json_state.path_columns.clone().ok_or_else(|| {
-                Error::SerializeError("JSON path columns not found in state".to_string())
-            })?;
-            let rows = json_state.rows.ok_or_else(|| {
-                Error::SerializeError("JSON rows count not found in state".to_string())
-            })?;
-            (json_state.paths.clone(), path_columns, rows)
-        } else {
-            return Err(Error::SerializeError(
-                "JSON serialization state not found. `analyze_values` must be called before `write`.".to_string()
-            ));
-        };
+        let (paths, path_columns, rows) =
+            if let TypeSpecificState::Json(json_state) = &state.type_specific {
+                // Use metadata from analyze_values
+                let path_columns = json_state.path_columns.clone().ok_or_else(|| {
+                    Error::SerializeError("JSON path columns not found in state".to_string())
+                })?;
+                let rows = json_state.rows.ok_or_else(|| {
+                    Error::SerializeError("JSON rows count not found in state".to_string())
+                })?;
+                (json_state.paths.clone(), path_columns, rows)
+            } else {
+                return Err(Error::SerializeError(
+                    "JSON serialization state not found. `analyze_values` must be called before \
+                     `write`."
+                        .to_string(),
+                ));
+            };
 
         // Write data for each path (using Dynamic column format)
         for path in &paths {
@@ -839,7 +847,7 @@ mod tests {
     #[tokio::test]
     async fn test_json_v3_wire_format_verification() -> Result<()> {
         use std::io::{Read, Seek, SeekFrom};
-        
+
         let values = vec![
             Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
             Value::String(b"{\"name\": \"Bob\", \"score\": 95.5}".to_vec()),
@@ -934,10 +942,8 @@ mod tests {
 
         // Test with v3 object serialization (current implementation)
         let mut v3_output = vec![];
-        let mut state = SerializerState {
-            type_specific: type_specific_state,
-            ..Default::default()
-        };
+        let mut state =
+            SerializerState { type_specific: type_specific_state, ..Default::default() };
 
         type_.serialize_prefix_async(&mut v3_output, &mut state).await?;
         type_.serialize_column(values.clone(), &mut v3_output, &mut state).await?;
@@ -988,10 +994,8 @@ mod tests {
         // Test object serialization (v3 - should decompose into paths)
         let type_specific_state = JsonSerializer::analyze_values(&values)?;
         let mut v3_output = vec![];
-        let mut state = SerializerState {
-            type_specific: type_specific_state,
-            ..Default::default()
-        };
+        let mut state =
+            SerializerState { type_specific: type_specific_state, ..Default::default() };
 
         type_.serialize_prefix_async(&mut v3_output, &mut state).await?;
         type_.serialize_column(values.clone(), &mut v3_output, &mut state).await?;
@@ -1042,16 +1046,17 @@ mod tests {
         let type_specific_state = JsonSerializer::analyze_values(&values)?;
 
         // Verify state was populated
-        assert!(matches!(type_specific_state, TypeSpecificState::Json(_)), "Should return Json state");
+        assert!(
+            matches!(type_specific_state, TypeSpecificState::Json(_)),
+            "Should return Json state"
+        );
 
         let type_ = Type::JSON;
         let values_len = values.len();
 
         let mut output = vec![];
-        let mut state = SerializerState {
-            type_specific: type_specific_state,
-            ..Default::default()
-        };
+        let mut state =
+            SerializerState { type_specific: type_specific_state, ..Default::default() };
 
         // This should use the state data
         type_.serialize_prefix_async(&mut output, &mut state).await?;
