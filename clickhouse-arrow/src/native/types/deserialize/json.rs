@@ -320,17 +320,14 @@ impl Deserializer for JsonDeserializer {
 
                     for path_name in &path_names {
                         if let Some(path_column) = path_values.get(path_name)
-                            && row_idx < path_column.len() {
-                                let value = &path_column[row_idx];
-                                if !matches!(value, Value::Null) {
-                                    // Split path by '.' and build nested structure
-                                    Self::set_nested_value(
-                                        &mut row_object,
-                                        path_name,
-                                        value.clone(),
-                                    )?;
-                                }
+                            && row_idx < path_column.len()
+                        {
+                            let value = &path_column[row_idx];
+                            if !matches!(value, Value::Null) {
+                                // Split path by '.' and build nested structure
+                                Self::set_nested_value(&mut row_object, path_name, value.clone())?;
                             }
+                        }
                     }
 
                     // Convert the nested map to a JSON Value, then to our Value type
@@ -416,11 +413,12 @@ impl Deserializer for JsonDeserializer {
                     for (idx, (_, typ)) in types.iter().enumerate() {
                         let type_idx = idx as u64;
                         if let Some(&count) = row_count_by_type.get(&type_idx)
-                            && count > 0 {
-                                let column_values =
-                                    typ.deserialize_column_sync(reader, count, state)?;
-                                drop(columns.insert(type_idx, column_values));
-                            }
+                            && count > 0
+                        {
+                            let column_values =
+                                typ.deserialize_column_sync(reader, count, state)?;
+                            drop(columns.insert(type_idx, column_values));
+                        }
                     }
 
                     // Reconstruct values for this path
@@ -455,17 +453,14 @@ impl Deserializer for JsonDeserializer {
 
                     for path_name in &path_names {
                         if let Some(path_column) = path_values.get(path_name)
-                            && row_idx < path_column.len() {
-                                let value = &path_column[row_idx];
-                                if !matches!(value, Value::Null) {
-                                    // Split path by '.' and build nested structure
-                                    Self::set_nested_value(
-                                        &mut row_object,
-                                        path_name,
-                                        value.clone(),
-                                    )?;
-                                }
+                            && row_idx < path_column.len()
+                        {
+                            let value = &path_column[row_idx];
+                            if !matches!(value, Value::Null) {
+                                // Split path by '.' and build nested structure
+                                Self::set_nested_value(&mut row_object, path_name, value.clone())?;
                             }
+                        }
                     }
 
                     // Convert the nested map to a JSON Value, then to our Value type

@@ -273,12 +273,15 @@ impl JsonSerializer {
         type_names.sort();
 
         // Create discriminator mapping based on alphabetical order
-        let type_to_discriminator: HashMap<String, u8> =
-            type_names.iter().enumerate().map(|(idx, name)| {
+        let type_to_discriminator: HashMap<String, u8> = type_names
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| {
                 #[allow(clippy::cast_possible_truncation)]
                 let idx_u8 = idx as u8;
                 (name.clone(), idx_u8)
-            }).collect();
+            })
+            .collect();
 
         // Write discriminators for each row
         let total_types = type_names.len() as u64;
@@ -295,23 +298,23 @@ impl JsonSerializer {
         // Write column data for each type (in alphabetical order)
         for type_name in &type_names {
             if let Some(values_with_idx) = type_map.get(type_name)
-                && !values_with_idx.is_empty() {
-                    let typ: Type = type_name.parse().map_err(|_| {
-                        Error::SerializeError(format!("Invalid type name: {type_name}"))
-                    })?;
+                && !values_with_idx.is_empty()
+            {
+                let typ: Type = type_name.parse().map_err(|_| {
+                    Error::SerializeError(format!("Invalid type name: {type_name}"))
+                })?;
 
-                    let values: Vec<Value> =
-                        values_with_idx.iter().map(|(_, v)| v.clone()).collect();
+                let values: Vec<Value> = values_with_idx.iter().map(|(_, v)| v.clone()).collect();
 
-                    // Special handling to avoid recursion - JSON type should not appear here
-                    if matches!(typ, Type::JSON) {
-                        return Err(Error::SerializeError(
-                            "JSON type cannot be nested within JSON paths".to_string(),
-                        ));
-                    }
-
-                    typ.serialize_column(values, writer, state).await?;
+                // Special handling to avoid recursion - JSON type should not appear here
+                if matches!(typ, Type::JSON) {
+                    return Err(Error::SerializeError(
+                        "JSON type cannot be nested within JSON paths".to_string(),
+                    ));
                 }
+
+                typ.serialize_column(values, writer, state).await?;
+            }
         }
 
         Ok(())
@@ -354,12 +357,15 @@ impl JsonSerializer {
         type_names.sort();
 
         // Create discriminator mapping based on alphabetical order
-        let type_to_discriminator: HashMap<String, u8> =
-            type_names.iter().enumerate().map(|(idx, name)| {
+        let type_to_discriminator: HashMap<String, u8> = type_names
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| {
                 #[allow(clippy::cast_possible_truncation)]
                 let idx_u8 = idx as u8;
                 (name.clone(), idx_u8)
-            }).collect();
+            })
+            .collect();
 
         // Write discriminators for each row
         let total_types = type_names.len() as u64;
@@ -376,23 +382,23 @@ impl JsonSerializer {
         // Write column data for each type (in alphabetical order)
         for type_name in &type_names {
             if let Some(values_with_idx) = type_map.get(type_name)
-                && !values_with_idx.is_empty() {
-                    let typ: Type = type_name.parse().map_err(|_| {
-                        Error::SerializeError(format!("Invalid type name: {type_name}"))
-                    })?;
+                && !values_with_idx.is_empty()
+            {
+                let typ: Type = type_name.parse().map_err(|_| {
+                    Error::SerializeError(format!("Invalid type name: {type_name}"))
+                })?;
 
-                    let values: Vec<Value> =
-                        values_with_idx.iter().map(|(_, v)| v.clone()).collect();
+                let values: Vec<Value> = values_with_idx.iter().map(|(_, v)| v.clone()).collect();
 
-                    // Special handling to avoid recursion - JSON type should not appear here
-                    if matches!(typ, Type::JSON) {
-                        return Err(Error::SerializeError(
-                            "JSON type cannot be nested within JSON paths".to_string(),
-                        ));
-                    }
-
-                    typ.serialize_column_sync(values, writer, state)?;
+                // Special handling to avoid recursion - JSON type should not appear here
+                if matches!(typ, Type::JSON) {
+                    return Err(Error::SerializeError(
+                        "JSON type cannot be nested within JSON paths".to_string(),
+                    ));
                 }
+
+                typ.serialize_column_sync(values, writer, state)?;
+            }
         }
 
         Ok(())

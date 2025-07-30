@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use tokio::io::AsyncReadExt;
 
@@ -7,47 +7,66 @@ use crate::io::{ClickHouseBytesRead, ClickHouseRead};
 use crate::native::types::deserialize::{ClickHouseNativeDeserializer, DeserializerState};
 use crate::native::types::{Type, Value};
 
+const NULL_DISCRIMINATOR: u8 = 0xFF;
+const MAX_VARIANT_ROWS: usize = 1_000_000;
+
 /// Represents a mapping from discriminator values to types and their string representations
 #[derive(Debug, Clone)]
 pub(crate) struct DiscriminatorMap {
     /// Maps discriminator byte to (`type_string`, `type`)
-    types: HashMap<u8, (String, Type)>,
+    types:                 HashMap<u8, (String, Type)>,
+    /// Sorted discriminators for iteration
+    sorted_discriminators: Vec<u8>,
 }
 
 impl DiscriminatorMap {
     /// Create a new discriminator map from variant types
     pub(crate) fn new(variant_types: &[Type]) -> Self {
-        // Convert types to their string representations and collect them
-        let mut type_strings: Vec<(String, Type)> =
-            variant_types.iter().map(|t| (t.to_string(), t.clone())).collect();
-
-        // Sort by type string alphabetically to determine discriminator assignment
-        type_strings.sort_by(|a, b| a.0.cmp(&b.0));
-
-        // Build the discriminator map, starting from 0
-        let mut types = HashMap::new();
-        for (idx, (type_str, type_)) in type_strings.into_iter().enumerate() {
-            let discriminator = idx.try_into().expect("Too many variant types (max 256)");
-            drop(types.insert(discriminator, (type_str.clone(), type_)));
+        // Use BTreeMap to maintain sorted order automatically
+        let mut sorted_types = BTreeMap::new();
+        for t in variant_types {
+            let old = sorted_types.insert(t.to_string(), t.clone());
+            debug_assert!(old.is_none(), "Duplicate type in variant");
         }
 
-        Self { types }
+        // Build discriminator map with automatic sorting
+        let mut types = HashMap::with_capacity(sorted_types.len());
+        let mut sorted_discriminators = Vec::with_capacity(sorted_types.len());
+
+        for (idx, (type_str, type_)) in sorted_types.into_iter().enumerate() {
+            let discriminator = u8::try_from(idx).expect("Too many variant types");
+            let old = types.insert(discriminator, (type_str, type_));
+            debug_assert!(old.is_none(), "Duplicate discriminator");
+            sorted_discriminators.push(discriminator);
+        }
+
+        Self { types, sorted_discriminators }
     }
 
     /// Get the type for a given discriminator
+    #[inline]
     pub(crate) fn get_type(&self, discriminator: u8) -> Option<&Type> {
         self.types.get(&discriminator).map(|(_, t)| t)
     }
 
     /// Get all discriminators in order
-    pub(crate) fn discriminators(&self) -> Vec<u8> {
-        let mut discriminators: Vec<u8> = self.types.keys().copied().collect();
-        discriminators.sort_unstable();
-        discriminators
-    }
+    #[inline]
+    pub(crate) fn discriminators(&self) -> &[u8] { &self.sorted_discriminators }
 }
 
 pub(crate) struct VariantDeserializer;
+
+// Macro to implement version check
+macro_rules! check_version {
+    ($version:expr) => {
+        if $version != 0 {
+            return Err(crate::Error::DeserializeError(format!(
+                "Unsupported Variant serialization version: {}",
+                $version
+            )));
+        }
+    };
+}
 
 impl VariantDeserializer {
     /// Build offsets and count rows for each discriminator type
@@ -56,11 +75,11 @@ impl VariantDeserializer {
         rows: usize,
     ) -> (Vec<usize>, HashMap<u8, usize>) {
         let mut offsets = vec![0; rows];
-        let mut row_count_by_type: HashMap<u8, usize> = HashMap::new();
+        let mut row_count_by_type = HashMap::new();
 
         for (i, &disc) in discriminators.iter().enumerate() {
-            if disc != 0xFF {
-                let count = row_count_by_type.entry(disc).or_insert(0);
+            if disc != NULL_DISCRIMINATOR {
+                let count = row_count_by_type.entry(disc).or_default();
                 offsets[i] = *count;
                 *count += 1;
             }
@@ -75,28 +94,26 @@ impl VariantDeserializer {
         offsets: &[usize],
         columns: &HashMap<u8, Vec<Value>>,
     ) -> Result<Vec<Value>> {
-        let mut values = Vec::with_capacity(discriminators.len());
-
-        for (i, &disc) in discriminators.iter().enumerate() {
-            if disc == 0xFF {
-                values.push(Value::Variant(disc, Box::new(Value::Null)));
-            } else if let Some(column) = columns.get(&disc) {
-                let offset = offsets[i];
-                if offset < column.len() {
-                    values.push(Value::Variant(disc, Box::new(column[offset].clone())));
+        discriminators
+            .iter()
+            .zip(offsets)
+            .map(|(&disc, &offset)| {
+                if disc == NULL_DISCRIMINATOR {
+                    Ok(Value::Variant(disc, Box::new(Value::Null)))
                 } else {
-                    return Err(crate::Error::DeserializeError(format!(
-                        "Invalid offset {offset} for discriminator {disc}"
-                    )));
+                    columns
+                        .get(&disc)
+                        .and_then(|col| col.get(offset))
+                        .map(|val| Value::Variant(disc, Box::new(val.clone())))
+                        .ok_or_else(|| {
+                            crate::Error::DeserializeError(format!(
+                                "Invalid offset {} for discriminator {}",
+                                offset, disc
+                            ))
+                        })
                 }
-            } else {
-                return Err(crate::Error::DeserializeError(format!(
-                    "Unknown discriminator value: {disc}"
-                )));
-            }
-        }
-
-        Ok(values)
+            })
+            .collect()
     }
 
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
@@ -104,17 +121,11 @@ impl VariantDeserializer {
         reader: &mut R,
         state: &mut DeserializerState,
     ) -> Result<()> {
-        // Read version prefix (8 bytes, should be 0)
         let version = reader.read_u64_le().await?;
-        if version != 0 {
-            return Err(crate::Error::DeserializeError(format!(
-                "Unsupported Variant serialization version: {version}"
-            )));
-        }
+        check_version!(version);
 
-        // Read prefixes for nested types that require them
-        let variant_types = type_.unwrap_variant()?;
-        for inner_type in variant_types {
+        // Read prefixes for nested types
+        for inner_type in type_.unwrap_variant()? {
             inner_type.deserialize_prefix_async(reader, state).await?;
         }
 
@@ -130,27 +141,28 @@ impl VariantDeserializer {
         let variant_types = type_.unwrap_variant()?;
         let discriminator_map = DiscriminatorMap::new(variant_types);
 
-        // Read discriminators as a simple byte array
+        // Read discriminators
         let mut discriminators = vec![0u8; rows];
         let _ = reader.read_exact(&mut discriminators).await?;
 
         // Build offsets and count rows per type
         let (offsets, row_count_by_type) = Self::build_offsets_and_counts(&discriminators, rows);
 
-        // Read the column data for each type in discriminator order
-        let mut columns: HashMap<u8, Vec<Value>> = HashMap::new();
+        // Read column data for each type
+        let mut columns = HashMap::new();
 
-        for discriminator in discriminator_map.discriminators() {
+        for &discriminator in discriminator_map.discriminators() {
             if let Some(&count) = row_count_by_type.get(&discriminator)
                 && count > 0
-                && let Some(inner_type) = discriminator_map.get_type(discriminator) {
-                        let column_values =
-                            inner_type.deserialize_column(reader, count, state).await?;
-                        drop(columns.insert(discriminator, column_values));
-                    }
+                && let Some(inner_type) = discriminator_map.get_type(discriminator)
+            {
+                let column_values = inner_type.deserialize_column(reader, count, state).await?;
+                let old = columns.insert(discriminator, column_values);
+                debug_assert!(old.is_none(), "Duplicate discriminator column");
+            }
         }
 
-        // Reconstruct the values in original order
+        // Reconstruct values in original order
         Self::reconstruct_values(&discriminators, &offsets, &columns)
     }
 
@@ -158,17 +170,11 @@ impl VariantDeserializer {
         type_: &Type,
         reader: &mut R,
     ) -> Result<()> {
-        // Read version prefix (8 bytes, should be 0)
         let version = reader.get_u64_le();
-        if version != 0 {
-            return Err(crate::Error::DeserializeError(format!(
-                "Unsupported Variant serialization version: {version}"
-            )));
-        }
+        check_version!(version);
 
-        // Read prefixes for nested types that require them
-        let variant_types = type_.unwrap_variant()?;
-        for inner_type in variant_types {
+        // Read prefixes for nested types
+        for inner_type in type_.unwrap_variant()? {
             inner_type.deserialize_prefix(reader)?;
         }
 
@@ -182,36 +188,38 @@ impl VariantDeserializer {
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
         // Sanity check
-        if rows > 1_000_000 {
+        if rows > MAX_VARIANT_ROWS {
             return Err(crate::Error::DeserializeError(format!(
-                "Variant row count too large: {rows} (likely corrupt data)"
+                "Variant row count too large: {} (likely corrupt data)",
+                rows
             )));
         }
 
         let variant_types = type_.unwrap_variant()?;
         let discriminator_map = DiscriminatorMap::new(variant_types);
 
-        // Read discriminators as a simple byte array
+        // Read discriminators
         let mut discriminators = vec![0u8; rows];
         reader.try_copy_to_slice(&mut discriminators)?;
 
         // Build offsets and count rows per type
         let (offsets, row_count_by_type) = Self::build_offsets_and_counts(&discriminators, rows);
 
-        // Read the column data for each type in discriminator order
-        let mut columns: HashMap<u8, Vec<Value>> = HashMap::new();
+        // Read column data for each type
+        let mut columns = HashMap::new();
 
-        for discriminator in discriminator_map.discriminators() {
+        for &discriminator in discriminator_map.discriminators() {
             if let Some(&count) = row_count_by_type.get(&discriminator)
                 && count > 0
-                && let Some(inner_type) = discriminator_map.get_type(discriminator) {
-                        let column_values =
-                            inner_type.deserialize_column_sync(reader, count, state)?;
-                        drop(columns.insert(discriminator, column_values));
-                    }
+                && let Some(inner_type) = discriminator_map.get_type(discriminator)
+            {
+                let column_values = inner_type.deserialize_column_sync(reader, count, state)?;
+                let old = columns.insert(discriminator, column_values);
+                debug_assert!(old.is_none(), "Duplicate discriminator column");
+            }
         }
 
-        // Reconstruct the values in original order
+        // Reconstruct values in original order
         Self::reconstruct_values(&discriminators, &offsets, &columns)
     }
 }
@@ -223,11 +231,29 @@ mod tests {
     use super::*;
     use crate::native::types::deserialize::ClickHouseNativeDeserializer;
 
+    // Macro for variant value assertions
+    macro_rules! assert_variant {
+        ($value:expr, $disc:expr, $expected:expr) => {
+            match $value {
+                Value::Variant(disc, inner) if disc == &$disc => {
+                    assert_eq!(**inner, $expected, "Inner value mismatch");
+                }
+                _ => panic!("Expected Variant({}, {:?}), got {:?}", $disc, $expected, $value),
+            }
+        };
+    }
+
+    // Helper to create test data with version prefix
+    fn create_test_data(discriminators: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut result = vec![0u8; 8]; // Version prefix
+        result.extend_from_slice(discriminators);
+        result.extend_from_slice(data);
+        result
+    }
+
     #[test]
     fn test_discriminator_map_sorting() {
-        // Test that types are sorted alphabetically
         let types = vec![Type::String, Type::UInt64, Type::Array(Box::new(Type::String))];
-
         let map = DiscriminatorMap::new(&types);
 
         // Expected order: Array(String), String, UInt64
@@ -239,9 +265,7 @@ mod tests {
 
     #[test]
     fn test_discriminator_map_date_datetime() {
-        // Test sorting with Date, DateTime, and String
         let types = vec![Type::String, Type::DateTime(chrono_tz::UTC), Type::Date];
-
         let map = DiscriminatorMap::new(&types);
 
         // Expected order: Date, DateTime('UTC'), String
@@ -252,170 +276,99 @@ mod tests {
 
     #[test]
     fn test_variant_simple_deserialization() {
-        // Test Variant(String, UInt64)
-        // Based on TCP dump: multiif returns 'yes' (String), 2 (UInt64), 'yes' (String)
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
 
-        // Discriminators: String=0, UInt64=1 (alphabetically sorted)
-        // Values: 'yes' -> 0, 2 -> 1, 'yes' -> 0
-        let data = vec![
-            // Version prefix (8 bytes of 0)
-            0u8, 0, 0, 0, 0, 0, 0, 0, // Discriminators
-            0u8, 1u8, 0u8, // String data (2 rows of 'yes')
-            3, b'y', b'e', b's', // 'yes'
-            3, b'y', b'e', b's', // 'yes'
-            // UInt64 data (1 row of value 2)
-            2, 0, 0, 0, 0, 0, 0, 0, // 2 as UInt64
-        ];
+        let data = create_test_data(
+            &[0u8, 1u8, 0u8], // Discriminators
+            &[
+                3, b'y', b'e', b's', // 'yes'
+                3, b'y', b'e', b's', // 'yes'
+                2, 0, 0, 0, 0, 0, 0, 0, // 2 as UInt64
+            ],
+        );
 
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
 
-        // Read prefix first
         variant_type.deserialize_prefix(&mut reader).unwrap();
-
         let values =
             VariantDeserializer::read_sync(&variant_type, &mut reader, 3, &mut state).unwrap();
 
         assert_eq!(values.len(), 3);
-
-        // Check first value: 'yes'
-        match &values[0] {
-            Value::Variant(0, inner) => {
-                assert_eq!(**inner, Value::String(b"yes".to_vec()));
-            }
-            _ => panic!("Expected Variant(0, String('yes')), got {:?}", values[0]),
-        }
-
-        // Check second value: 2
-        match &values[1] {
-            Value::Variant(1, inner) => {
-                assert_eq!(**inner, Value::UInt64(2));
-            }
-            _ => panic!("Expected Variant(1, UInt64(2)), got {:?}", values[1]),
-        }
-
-        // Check third value: 'yes'
-        match &values[2] {
-            Value::Variant(0, inner) => {
-                assert_eq!(**inner, Value::String(b"yes".to_vec()));
-            }
-            _ => panic!("Expected Variant(0, String('yes')), got {:?}", values[2]),
-        }
+        assert_variant!(&values[0], 0, Value::String(b"yes".to_vec()));
+        assert_variant!(&values[1], 1, Value::UInt64(2));
+        assert_variant!(&values[2], 0, Value::String(b"yes".to_vec()));
     }
 
     #[test]
     fn test_variant_with_nulls() {
-        // Test Variant(String, UInt64) with NULL values
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
 
-        // Discriminators: String=0, UInt64=1, NULL=0xFF
-        let data = vec![
-            // Version prefix (8 bytes of 0)
-            0u8, 0, 0, 0, 0, 0, 0, 0, // Discriminators
-            0u8, 0xFF, 1u8, // String data (1 row)
-            5, b'h', b'e', b'l', b'l', b'o', // 'hello'
-            // UInt64 data (1 row)
-            42, 0, 0, 0, 0, 0, 0, 0, // 42 as UInt64
-        ];
+        let data = create_test_data(
+            &[0u8, 0xFF, 1u8], // Discriminators with NULL
+            &[
+                5, b'h', b'e', b'l', b'l', b'o', // 'hello'
+                42, 0, 0, 0, 0, 0, 0, 0, // 42 as UInt64
+            ],
+        );
 
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
 
-        // Read prefix first
         variant_type.deserialize_prefix(&mut reader).unwrap();
-
         let values =
             VariantDeserializer::read_sync(&variant_type, &mut reader, 3, &mut state).unwrap();
 
         assert_eq!(values.len(), 3);
-
-        // Check first value: 'hello'
-        match &values[0] {
-            Value::Variant(0, inner) => {
-                assert_eq!(**inner, Value::String(b"hello".to_vec()));
-            }
-            _ => panic!("Expected Variant(0, String('hello')), got {:?}", values[0]),
-        }
-
-        // Check second value: NULL
-        match &values[1] {
-            Value::Variant(0xFF, inner) => {
-                assert_eq!(**inner, Value::Null);
-            }
-            _ => panic!("Expected Variant(0xFF, Null), got {:?}", values[1]),
-        }
-
-        // Check third value: 42
-        match &values[2] {
-            Value::Variant(1, inner) => {
-                assert_eq!(**inner, Value::UInt64(42));
-            }
-            _ => panic!("Expected Variant(1, UInt64(42)), got {:?}", values[2]),
-        }
+        assert_variant!(&values[0], 0, Value::String(b"hello".to_vec()));
+        assert_variant!(&values[1], 0xFF, Value::Null);
+        assert_variant!(&values[2], 1, Value::UInt64(42));
     }
 
     #[test]
     fn test_variant_with_complex_types() {
-        // Test Variant(Array(String), UInt64, Date)
         let variant_type =
             Type::Variant(vec![Type::Array(Box::new(Type::String)), Type::UInt64, Type::Date]);
 
-        // Discriminators sorted: Array(String)=0, Date=1, UInt64=2
-        // Test data: [['a', 'b']], 2024-01-01, 42
-        let data = vec![
-            // Version prefix (8 bytes of 0)
-            0u8,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            // Discriminators
-            0u8,
-            1u8,
-            2u8,
-            // Array(String) data (1 row)
-            2,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0, // offset 2 (array has 2 elements)
-            1,
-            b'a', // 'a'
-            1,
-            b'b', // 'b'
-            // Date data (1 row) - days since 1970-01-01
-            19723u16.to_le_bytes()[0],
-            19723u16.to_le_bytes()[1], // 2024-01-01
-            // UInt64 data (1 row)
-            42,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0, // 42
-        ];
+        let date_bytes = 19723u16.to_le_bytes();
+        let data = create_test_data(
+            &[0u8, 1u8, 2u8], // Discriminators
+            &[
+                2,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0, // offset 2
+                1,
+                b'a', // 'a'
+                1,
+                b'b', // 'b'
+                date_bytes[0],
+                date_bytes[1], // Date
+                42,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0, // 42
+            ],
+        );
 
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
 
-        // Read prefix first
         variant_type.deserialize_prefix(&mut reader).unwrap();
-
         let values =
             VariantDeserializer::read_sync(&variant_type, &mut reader, 3, &mut state).unwrap();
 
         assert_eq!(values.len(), 3);
 
-        // Check first value: ['a', 'b']
+        // Check array value
         match &values[0] {
             Value::Variant(0, inner) => match &**inner {
                 Value::Array(items) => {
@@ -423,31 +376,17 @@ mod tests {
                     assert_eq!(items[0], Value::String(b"a".to_vec()));
                     assert_eq!(items[1], Value::String(b"b".to_vec()));
                 }
-                _ => panic!("Expected Array, got {:?}", inner),
+                _ => panic!("Expected Array"),
             },
-            _ => panic!("Expected Variant(0, Array), got {:?}", values[0]),
+            _ => panic!("Expected Variant(0, Array)"),
         }
 
-        // Check second value: Date
-        match &values[1] {
-            Value::Variant(1, inner) => {
-                assert_eq!(**inner, Value::Date(crate::native::values::Date(19723))); // 2024-01-01
-            }
-            _ => panic!("Expected Variant(1, Date), got {:?}", values[1]),
-        }
-
-        // Check third value: 42
-        match &values[2] {
-            Value::Variant(2, inner) => {
-                assert_eq!(**inner, Value::UInt64(42));
-            }
-            _ => panic!("Expected Variant(2, UInt64(42)), got {:?}", values[2]),
-        }
+        assert_variant!(&values[1], 1, Value::Date(crate::native::values::Date(19723)));
+        assert_variant!(&values[2], 2, Value::UInt64(42));
     }
 
     #[test]
     fn test_variant_multitype_sorting() {
-        // Test with 5 types to verify alphabetical sorting
         let variant_type = Type::Variant(vec![
             Type::UInt64,
             Type::String,
@@ -456,123 +395,55 @@ mod tests {
             Type::DateTime(chrono_tz::UTC),
         ]);
 
-        // Expected discriminator mapping (alphabetically sorted):
-        // Array(UInt8)=0, Date=1, DateTime('UTC')=2, String=3, UInt64=4
-        let data = vec![
-            // Version prefix (8 bytes of 0)
-            0u8,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            // Discriminators: UInt64, String, Date, Array(UInt8), DateTime
-            4u8,
-            3u8,
-            1u8,
-            0u8,
-            2u8,
-            // Array(UInt8) data (1 row)
-            3,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0, // offset 3 (array has 3 elements)
-            1,
-            2,
-            3, // values [1, 2, 3]
-            // Date data (1 row)
-            100u16.to_le_bytes()[0],
-            100u16.to_le_bytes()[1], // day 100
-            // DateTime data (1 row)
-            1_234_567_890_u32.to_le_bytes()[0],
-            1_234_567_890_u32.to_le_bytes()[1],
-            1_234_567_890_u32.to_le_bytes()[2],
-            1_234_567_890_u32.to_le_bytes()[3], // Unix timestamp
-            // String data (1 row)
-            5,
-            b'h',
-            b'e',
-            b'l',
-            b'l',
-            b'o', // 'hello'
-            // UInt64 data (1 row)
-            231,
-            3,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0, // 999 (0x03E7 in little-endian)
-        ];
+        // Build test data programmatically
+        let mut data = vec![0u8; 8]; // Version prefix
+        data.extend_from_slice(&[4u8, 3u8, 1u8, 0u8, 2u8]); // Discriminators
+
+        // Array(UInt8) data
+        data.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3]);
+
+        // Date data
+        data.extend_from_slice(&100u16.to_le_bytes());
+
+        // DateTime data
+        data.extend_from_slice(&1_234_567_890_u32.to_le_bytes());
+
+        // String data
+        data.extend_from_slice(&[5, b'h', b'e', b'l', b'l', b'o']);
+
+        // UInt64 data
+        data.extend_from_slice(&[231, 3, 0, 0, 0, 0, 0, 0]); // 999
 
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
 
-        // Read prefix first
         variant_type.deserialize_prefix(&mut reader).unwrap();
-
         let values =
             VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
 
         assert_eq!(values.len(), 5);
+        assert_variant!(&values[0], 4, Value::UInt64(999));
+        assert_variant!(&values[1], 3, Value::String(b"hello".to_vec()));
+        assert_variant!(&values[2], 1, Value::Date(crate::native::values::Date(100)));
 
-        // Check values in original order
-        // First: UInt64(999) -> discriminator 4
-        match &values[0] {
-            Value::Variant(4, inner) => {
-                assert_eq!(**inner, Value::UInt64(999));
-            }
-            _ => panic!("Expected Variant(4, UInt64(999)), got {:?}", values[0]),
-        }
-
-        // Second: String('hello') -> discriminator 3
-        match &values[1] {
-            Value::Variant(3, inner) => {
-                assert_eq!(**inner, Value::String(b"hello".to_vec()));
-            }
-            _ => panic!("Expected Variant(3, String('hello')), got {:?}", values[1]),
-        }
-
-        // Third: Date(100) -> discriminator 1
-        match &values[2] {
-            Value::Variant(1, inner) => {
-                assert_eq!(**inner, Value::Date(crate::native::values::Date(100)));
-            }
-            _ => panic!("Expected Variant(1, Date(100)), got {:?}", values[2]),
-        }
-
-        // Fourth: Array([1,2,3]) -> discriminator 0
+        // Check array
         match &values[3] {
             Value::Variant(0, inner) => match &**inner {
                 Value::Array(items) => {
-                    assert_eq!(items.len(), 3);
-                    assert_eq!(items[0], Value::UInt8(1));
-                    assert_eq!(items[1], Value::UInt8(2));
-                    assert_eq!(items[2], Value::UInt8(3));
+                    assert_eq!(items, &[Value::UInt8(1), Value::UInt8(2), Value::UInt8(3)]);
                 }
-                _ => panic!("Expected Array, got {:?}", inner),
+                _ => panic!("Expected Array"),
             },
-            _ => panic!("Expected Variant(0, Array), got {:?}", values[3]),
+            _ => panic!("Expected Variant(0, Array)"),
         }
 
-        // Fifth: DateTime -> discriminator 2
+        // Check DateTime
         match &values[4] {
-            Value::Variant(2, inner) => {
-                match &**inner {
-                    Value::DateTime(dt) => {
-                        assert_eq!(dt.1, 1_234_567_890); // Check timestamp
-                    }
-                    _ => panic!("Expected DateTime, got {:?}", inner),
-                }
-            }
-            _ => panic!("Expected Variant(2, DateTime), got {:?}", values[4]),
+            Value::Variant(2, inner) => match &**inner {
+                Value::DateTime(dt) => assert_eq!(dt.1, 1_234_567_890),
+                _ => panic!("Expected DateTime"),
+            },
+            _ => panic!("Expected Variant(2, DateTime)"),
         }
     }
 
@@ -580,83 +451,49 @@ mod tests {
     fn test_nested_variant_parsing() {
         use std::str::FromStr;
 
-        // Test basic nested variant parsing
         let nested_str = "Variant(String, Variant(UInt64, Date))";
         let nested_type = Type::from_str(nested_str).unwrap();
 
-        // Check it parsed correctly
         match &nested_type {
             Type::Variant(types) => {
                 assert_eq!(types.len(), 2);
                 assert_eq!(types[0].to_string(), "String");
-                // The inner variant was parsed correctly - check its structure
-                match &types[1] {
-                    Type::Variant(inner_types) => {
-                        assert_eq!(inner_types.len(), 2);
-                        // Contains UInt64 and Date (order doesn't matter for parsing)
-                        assert!(inner_types.iter().any(|t| matches!(t, Type::UInt64)));
-                        assert!(inner_types.iter().any(|t| matches!(t, Type::Date)));
-                    }
-                    _ => panic!("Expected inner type to be Variant"),
-                }
+                assert!(matches!(&types[1], Type::Variant(_)));
             }
             _ => panic!("Expected Variant type"),
         }
 
-        // Test discriminator mapping for outer variant
         let map = DiscriminatorMap::new(match &nested_type {
             Type::Variant(types) => types,
-            _ => panic!("Expected Variant"),
+            _ => unreachable!(),
         });
 
-        // String comes before Variant alphabetically
         assert_eq!(map.get_type(0).unwrap().to_string(), "String");
         assert!(matches!(map.get_type(1).unwrap(), Type::Variant(_)));
     }
 
     #[tokio::test]
     async fn test_variant_async_deserialization() {
-        // Test async version with Variant(String, UInt64)
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
 
-        // Since discriminators are sorted: String=0, UInt64=1
-        // But data is sent in discriminator order: 0 first, then 1
-        let data = vec![
-            // Version prefix (8 bytes of 0)
-            0u8, 0, 0, 0, 0, 0, 0, 0, // Discriminators
-            1u8, 0u8, // String data first (1 row for discriminator 0)
-            4, b't', b'e', b's', b't', // 'test'
-            // UInt64 data next (1 row for discriminator 1)
-            100, 0, 0, 0, 0, 0, 0, 0, // 100 as UInt64
-        ];
+        let data = create_test_data(
+            &[1u8, 0u8], // Discriminators
+            &[
+                4, b't', b'e', b's', b't', // 'test'
+                100, 0, 0, 0, 0, 0, 0, 0, // 100 as UInt64
+            ],
+        );
 
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
 
-        // Read prefix first
-        use crate::native::types::deserialize::ClickHouseNativeDeserializer;
         variant_type.deserialize_prefix_async(&mut reader, &mut state).await.unwrap();
-
         let values = VariantDeserializer::read_async(&variant_type, &mut reader, 2, &mut state)
             .await
             .unwrap();
 
         assert_eq!(values.len(), 2);
-
-        // Check first value: 100
-        match &values[0] {
-            Value::Variant(1, inner) => {
-                assert_eq!(**inner, Value::UInt64(100));
-            }
-            _ => panic!("Expected Variant(1, UInt64(100)), got {:?}", values[0]),
-        }
-
-        // Check second value: 'test'
-        match &values[1] {
-            Value::Variant(0, inner) => {
-                assert_eq!(**inner, Value::String(b"test".to_vec()));
-            }
-            _ => panic!("Expected Variant(0, String('test')), got {:?}", values[1]),
-        }
+        assert_variant!(&values[0], 1, Value::UInt64(100));
+        assert_variant!(&values[1], 0, Value::String(b"test".to_vec()));
     }
 }

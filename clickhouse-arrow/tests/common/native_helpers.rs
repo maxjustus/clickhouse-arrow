@@ -1,8 +1,8 @@
 use chrono::NaiveDate;
 use chrono_tz::Tz;
 use clickhouse_arrow::native::block::Block;
-use clickhouse_arrow::prelude::*;
 use clickhouse_arrow::native::block_info::BlockInfo;
+use clickhouse_arrow::prelude::*;
 use clickhouse_arrow::{ColumnDefinition, Type, Value};
 use uuid::Uuid;
 

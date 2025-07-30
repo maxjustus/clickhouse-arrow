@@ -1,5 +1,4 @@
 #![doc = include_str!("../README.md")]
-
 // Allow some pedantic clippy warnings for better development experience
 #![allow(
     clippy::match_same_arms,

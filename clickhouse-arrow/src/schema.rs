@@ -347,13 +347,13 @@ impl CreateOptions {
 
             // Validate sampling
             if let Some(sample) = self.sampling.as_ref()
-                && !order_by.iter().any(|o| sample.contains(o.as_str())) {
-                    return Err(Error::DDLMalformed(format!(
-                        "Sampling must refer to a primary key: order by = {order_by:?}, \
-                         sampling={:?}",
-                        self.sampling
-                    )));
-                }
+                && !order_by.iter().any(|o| sample.contains(o.as_str()))
+            {
+                return Err(Error::DDLMalformed(format!(
+                    "Sampling must refer to a primary key: order by = {order_by:?}, sampling={:?}",
+                    self.sampling
+                )));
+            }
 
             options.push(format!("ORDER BY ({})", order_by.join(", ")));
         }

@@ -120,7 +120,9 @@ impl DynamicSerializer {
                 let value_type = value.guess_type();
                 let type_name = value_type.to_string();
 
-                if let std::collections::hash_map::Entry::Vacant(entry) = type_map.entry(type_name.clone()) {
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    type_map.entry(type_name.clone())
+                {
                     let index = type_names.len();
                     type_names.push(type_name);
                     let _ = entry.insert((index, value_type));
@@ -167,7 +169,9 @@ impl DynamicSerializer {
                     let value_type = value.guess_type();
                     let type_name = value_type.to_string();
 
-                    if let std::collections::hash_map::Entry::Vacant(entry) = type_map.entry(type_name.clone()) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        type_map.entry(type_name.clone())
+                    {
                         let index = type_names.len();
                         type_names.push(type_name);
                         let _ = entry.insert((index, value_type));
@@ -291,7 +295,9 @@ impl DynamicSerializer {
                     let value_type = value.guess_type();
                     let type_name = value_type.to_string();
 
-                    if let std::collections::hash_map::Entry::Vacant(entry) = type_map.entry(type_name.clone()) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        type_map.entry(type_name.clone())
+                    {
                         let index = type_names.len();
                         type_names.push(type_name);
                         let _ = entry.insert((index, value_type));

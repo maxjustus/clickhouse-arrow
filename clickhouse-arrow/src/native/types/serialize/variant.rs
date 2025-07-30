@@ -96,16 +96,17 @@ impl VariantSerializer {
         writer.write_all(&discriminators).await?;
 
         // Write column data for each discriminator in ascending order
-        for discriminator in discriminator_map.discriminators() {
+        for &discriminator in discriminator_map.discriminators() {
             if discriminator == 0xFF {
                 // Skip NULL discriminator - no data to write
                 continue;
             }
 
             if let Some(values_for_disc) = grouped_values.get(&discriminator)
-                && let Some(inner_type) = discriminator_map.get_type(discriminator) {
-                    inner_type.serialize_column(values_for_disc.clone(), writer, state).await?;
-                }
+                && let Some(inner_type) = discriminator_map.get_type(discriminator)
+            {
+                inner_type.serialize_column(values_for_disc.clone(), writer, state).await?;
+            }
         }
 
         Ok(())
@@ -128,16 +129,17 @@ impl VariantSerializer {
         writer.put_slice(&discriminators);
 
         // Write column data for each discriminator in ascending order
-        for discriminator in discriminator_map.discriminators() {
+        for &discriminator in discriminator_map.discriminators() {
             if discriminator == 0xFF {
                 // Skip NULL discriminator - no data to write
                 continue;
             }
 
             if let Some(values_for_disc) = grouped_values.get(&discriminator)
-                && let Some(inner_type) = discriminator_map.get_type(discriminator) {
-                    inner_type.serialize_column_sync(values_for_disc.clone(), writer, state)?;
-                }
+                && let Some(inner_type) = discriminator_map.get_type(discriminator)
+            {
+                inner_type.serialize_column_sync(values_for_disc.clone(), writer, state)?;
+            }
         }
 
         Ok(())
