@@ -204,17 +204,34 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     // Table create options
     let _options = CreateOptions::new("MergeTree");
 
-    // Create ClientBuilder and ConnectionManager with v3 Dynamic format setting
-    let client: NativeClient = ClientBuilder::new()
+    // Create ClientBuilder and ConnectionManager
+    let mut builder = ClientBuilder::new()
         .with_endpoint(native_url)
         .with_username(&ch.user)
         .with_password(&ch.password)
         .with_ipv4_only(true)
-        .with_compression(CompressionMethod::None)
-        .with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1)
-        .build()
-        .await
-        .expect("Building client");
+        .with_compression(CompressionMethod::None);
+
+    // Only use v3 format setting for servers that support it (25.6+)
+    let version_str = std::env::var("CLICKHOUSE_VERSION").ok();
+    let should_use_v3 = match version_str.as_deref() {
+        Some(v) if v.starts_with("24.") => false,
+        Some(v) if v.starts_with("25.") => {
+            let parts: Vec<&str> = v.split('.').collect();
+            if parts.len() >= 2 {
+                parts[1].parse::<u32>().unwrap_or(0) >= 6
+            } else {
+                false
+            }
+        }
+        _ => true, // Default to v3 for latest
+    };
+
+    if should_use_v3 {
+        builder = builder.with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1);
+    }
+
+    let client: NativeClient = builder.build().await.expect("Building client");
 
     // Check if the server supports Dynamic type
     let version_check_query = "SELECT version() as version";
@@ -228,6 +245,9 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
         if !version_checker.require_dynamic_support("Dynamic type test") {
             return;
         }
+        
+        // Log the actual format we'll be using
+        debug!("Using Dynamic format version: {}", if should_use_v3 { "v3" } else { "v1/v2" });
         version_checker
     } else {
         warn!("Could not determine ClickHouse version, skipping Dynamic type test");
@@ -241,6 +261,12 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     let query_id = "dynamic_test";
     let table_name = "test_dynamic";
 
+    header(query_id, "Setting enable_dynamic_type globally");
+    client
+        .execute("SET enable_dynamic_type = 1", None)
+        .await
+        .expect("set setting failed");
+
     header(query_id, "Creating table with Dynamic column");
     client
         .execute(&format!("DROP TABLE IF EXISTS {table_name}"), None)
@@ -253,6 +279,7 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
         .expect("create table failed");
 
     header(query_id, "Inserting Dynamic data");
+    debug!("Test data: {} rows, column types: {:?}", test_data.rows, test_data.column_types);
     let insert_query = format!("INSERT INTO {table_name} VALUES");
     let mut stream = client.insert(&insert_query, test_data, None).await.expect("insert failed");
 
@@ -325,17 +352,34 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
     // Table create options
     let _options = CreateOptions::new("MergeTree");
 
-    // Create ClientBuilder and ConnectionManager with v3 JSON format setting
-    let client: NativeClient = ClientBuilder::new()
+    // Create ClientBuilder and ConnectionManager
+    let mut builder = ClientBuilder::new()
         .with_endpoint(native_url)
         .with_username(&ch.user)
         .with_password(&ch.password)
         .with_ipv4_only(true)
-        .with_compression(CompressionMethod::None)
-        .with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1)
-        .build()
-        .await
-        .expect("Building client");
+        .with_compression(CompressionMethod::None);
+
+    // Only use v3 format setting for servers that support it (25.6+)
+    let version_str = std::env::var("CLICKHOUSE_VERSION").ok();
+    let should_use_v3 = match version_str.as_deref() {
+        Some(v) if v.starts_with("24.") => false,
+        Some(v) if v.starts_with("25.") => {
+            let parts: Vec<&str> = v.split('.').collect();
+            if parts.len() >= 2 {
+                parts[1].parse::<u32>().unwrap_or(0) >= 6
+            } else {
+                false
+            }
+        }
+        _ => true, // Default to v3 for latest
+    };
+
+    if should_use_v3 {
+        builder = builder.with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1);
+    }
+
+    let client: NativeClient = builder.build().await.expect("Building client");
 
     // Check if the server supports JSON type
     let version_check_query = "SELECT version() as version";

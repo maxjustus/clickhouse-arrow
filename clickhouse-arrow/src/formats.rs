@@ -116,6 +116,7 @@ pub(crate) type DynamicTypeData = Vec<(u64, Vec<(String, Type)>)>;
 /// Metadata for Dynamic type
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DynamicState {
+    pub(crate) version:     Option<u64>,
     pub(crate) total_types: u64,
     pub(crate) type_names:  Vec<String>,
     pub(crate) type_map:    HashMap<String, (usize, Type)>,

@@ -8,10 +8,9 @@ use crate::io::{ClickHouseBytesRead, ClickHouseRead};
 use crate::native::types::deserialize::ClickHouseNativeDeserializer;
 use crate::native::types::{Type, Value};
 
-const SUPPORTED_VERSION: u64 = 3;
-const VERSION_ERROR: &str = "Use ClickHouse 25.6+ and enable \
-                             'output_format_native_use_flattened_dynamic_and_json_serialization=1' \
-                             for v3 format";
+const DYNAMIC_VERSION_V1: u64 = 1;
+const DYNAMIC_VERSION_V2: u64 = 2;
+const DYNAMIC_VERSION_V3: u64 = 3;
 
 /// Macro to read discriminator based on size
 macro_rules! read_discriminator {
@@ -93,22 +92,6 @@ impl DynamicDeserializer {
             .collect()
     }
 
-    /// Validate version and return error for unsupported versions
-    fn validate_version(version: u64) -> Result<()> {
-        if version != SUPPORTED_VERSION {
-            let msg = match version {
-                1 | 2 => {
-                    format!("Dynamic v{version} serialization not supported. {VERSION_ERROR}")
-                }
-                _ => format!(
-                    "Unknown Dynamic serialization version: {version}. Expected version 3. \
-                     {VERSION_ERROR}"
-                ),
-            };
-            return Err(crate::Error::DeserializeError(msg));
-        }
-        Ok(())
-    }
 
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
         _type: &Type,
@@ -116,30 +99,102 @@ impl DynamicDeserializer {
         state: &mut DeserializerState,
     ) -> Result<()> {
         let version = reader.read_u64_le().await?;
-        Self::validate_version(version)?;
+        
+        match version {
+            DYNAMIC_VERSION_V1 => {
+                // v1 format: max_dynamic_types, total_types, then type names
+                let _max_dynamic_types = reader.read_var_uint().await?; // We don't use this
+                let total_types = reader.read_var_uint().await?;
+                let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
+                
+                // Read type names as strings
+                for _ in 0..total_types {
+                    let type_name_bytes = reader.read_string().await?;
+                    let (type_name, typ) = Self::parse_type_entry(type_name_bytes)?;
+                    types.push((type_name, typ));
+                }
+                
+                // Read variant serialization version
+                let _variant_version = reader.read_u64_le().await?;
+                
+                // Read prefixes for nested types
+                for (_, typ) in &types {
+                    typ.deserialize_prefix_async(reader, state).await?;
+                }
+                
+                // Store metadata in state for data phase
+                let mut type_names = Vec::with_capacity(types.len());
+                let mut type_map = HashMap::new();
+                for (idx, (name, typ)) in types.iter().enumerate() {
+                    type_names.push(name.clone());
+                    drop(type_map.insert(name.clone(), (idx, typ.clone())));
+                }
+                
+                state.type_specific =
+                    TypeSpecificState::Dynamic(DynamicState { version: Some(DYNAMIC_VERSION_V1), total_types, type_names, type_map, types });
+            }
+            DYNAMIC_VERSION_V2 => {
+                // v2 format: total_types, then type names
+                let total_types = reader.read_var_uint().await?;
+                let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
+                
+                // Read type names as strings
+                for _ in 0..total_types {
+                    let type_name_bytes = reader.read_string().await?;
+                    let (type_name, typ) = Self::parse_type_entry(type_name_bytes)?;
+                    types.push((type_name, typ));
+                }
+                
+                // Read variant serialization version
+                let _variant_version = reader.read_u64_le().await?;
+                
+                // Read prefixes for nested types
+                for (_, typ) in &types {
+                    typ.deserialize_prefix_async(reader, state).await?;
+                }
+                
+                // Store metadata in state for data phase
+                let mut type_names = Vec::with_capacity(types.len());
+                let mut type_map = HashMap::new();
+                for (idx, (name, typ)) in types.iter().enumerate() {
+                    type_names.push(name.clone());
+                    drop(type_map.insert(name.clone(), (idx, typ.clone())));
+                }
+                
+                state.type_specific =
+                    TypeSpecificState::Dynamic(DynamicState { version: Some(DYNAMIC_VERSION_V2), total_types, type_names, type_map, types });
+            }
+            DYNAMIC_VERSION_V3 => {
+                // v3 format: total_types, then type names, then nested prefixes
+                let total_types = reader.read_var_uint().await?;
+                let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
+                for _ in 0..total_types {
+                    types.push(Self::parse_type_entry(reader.read_string().await?)?);
+                }
 
-        // Read v3 header
-        let total_types = reader.read_var_uint().await?;
-        let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
-        for _ in 0..total_types {
-            types.push(Self::parse_type_entry(reader.read_string().await?)?);
+                // Read prefixes for nested types
+                for (_, typ) in &types {
+                    typ.deserialize_prefix_async(reader, state).await?;
+                }
+
+                // Store metadata in state for data phase
+                let mut type_names = Vec::with_capacity(types.len());
+                let mut type_map = HashMap::new();
+                for (idx, (name, typ)) in types.iter().enumerate() {
+                    type_names.push(name.clone());
+                    drop(type_map.insert(name.clone(), (idx, typ.clone())));
+                }
+
+                state.type_specific =
+                    TypeSpecificState::Dynamic(DynamicState { version: Some(DYNAMIC_VERSION_V3), total_types, type_names, type_map, types });
+            }
+            _ => {
+                return Err(crate::Error::DeserializeError(
+                    format!("Unknown Dynamic serialization version: {version}")
+                ));
+            }
         }
-
-        // Read prefixes for nested types
-        for (_, typ) in &types {
-            typ.deserialize_prefix_async(reader, state).await?;
-        }
-
-        // Store metadata in state for data phase
-        let mut type_names = Vec::with_capacity(types.len());
-        let mut type_map = HashMap::new();
-        for (idx, (name, typ)) in types.iter().enumerate() {
-            type_names.push(name.clone());
-            drop(type_map.insert(name.clone(), (idx, typ.clone())));
-        }
-
-        state.type_specific =
-            TypeSpecificState::Dynamic(DynamicState { total_types, type_names, type_map, types });
+        
         Ok(())
     }
 
@@ -149,38 +204,73 @@ impl DynamicDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (total_types, types) =
+        let (version, total_types, types) =
             if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-                (dynamic_state.total_types, dynamic_state.types.clone())
+                (dynamic_state.version.unwrap_or(DYNAMIC_VERSION_V3), dynamic_state.total_types, dynamic_state.types.clone())
             } else {
                 return Err(crate::Error::DeserializeError(
                     "Dynamic metadata not set in state".to_string(),
                 ));
             };
 
-        // Read discriminators
-        let mut discriminators = Vec::with_capacity(rows);
-        for _ in 0..rows {
-            discriminators.push(read_discriminator!(async reader, total_types));
-        }
-
-        // Build offsets and count rows
-        let (offsets, row_count_by_type) = Self::build_offsets(&discriminators, total_types);
-
-        // Read column data for each type
-        let mut columns = HashMap::new();
-        for (idx, (_, typ)) in types.iter().enumerate() {
-            let type_idx = idx as u64;
-            if let Some(&count) = row_count_by_type.get(&type_idx)
-                && count > 0
-            {
-                let column_values = typ.deserialize_column(reader, count, state).await?;
-                let old = columns.insert(type_idx, column_values);
-                debug_assert!(old.is_none(), "Duplicate type index");
+        if version == DYNAMIC_VERSION_V1 || version == DYNAMIC_VERSION_V2 {
+            // v1/v2 format: read variant discriminators version first
+            let variant_version = reader.read_u64_le().await?;
+            if variant_version != 0 {
+                return Err(crate::Error::DeserializeError(
+                    format!("Invalid variant discriminators version: {variant_version}")
+                ));
             }
-        }
 
-        Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
+            // Read 8-bit discriminators
+            let mut discriminators = Vec::with_capacity(rows);
+            for _ in 0..rows {
+                let disc = reader.read_u8().await?;
+                discriminators.push(if disc == 255 { total_types } else { u64::from(disc) });
+            }
+
+            // Build offsets and count rows
+            let (offsets, row_count_by_type) = Self::build_offsets(&discriminators, total_types);
+
+            // Read column data for each type
+            let mut columns = HashMap::new();
+            for (idx, (_, typ)) in types.iter().enumerate() {
+                let type_idx = idx as u64;
+                if let Some(&count) = row_count_by_type.get(&type_idx)
+                    && count > 0
+                {
+                    let column_values = typ.deserialize_column(reader, count, state).await?;
+                    let old = columns.insert(type_idx, column_values);
+                    debug_assert!(old.is_none(), "Duplicate type index");
+                }
+            }
+
+            Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
+        } else {
+            // v3 format: variable-sized discriminators
+            let mut discriminators = Vec::with_capacity(rows);
+            for _ in 0..rows {
+                discriminators.push(read_discriminator!(async reader, total_types));
+            }
+
+            // Build offsets and count rows
+            let (offsets, row_count_by_type) = Self::build_offsets(&discriminators, total_types);
+
+            // Read column data for each type
+            let mut columns = HashMap::new();
+            for (idx, (_, typ)) in types.iter().enumerate() {
+                let type_idx = idx as u64;
+                if let Some(&count) = row_count_by_type.get(&type_idx)
+                    && count > 0
+                {
+                    let column_values = typ.deserialize_column(reader, count, state).await?;
+                    let old = columns.insert(type_idx, column_values);
+                    debug_assert!(old.is_none(), "Duplicate type index");
+                }
+            }
+
+            Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
+        }
     }
 
     pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
@@ -189,31 +279,102 @@ impl DynamicDeserializer {
         state: &mut DeserializerState,
     ) -> Result<()> {
         let version = reader.get_u64_le();
-        Self::validate_version(version)?;
+        
+        match version {
+            DYNAMIC_VERSION_V1 => {
+                // v1 format: max_dynamic_types, total_types, then type names
+                let _max_dynamic_types = reader.try_get_var_uint()?; // We don't use this
+                let total_types = reader.try_get_var_uint()?;
+                let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
+                
+                // Read type names as strings
+                for _ in 0..total_types {
+                    let type_name_bytes = reader.try_get_string()?.to_vec();
+                    let (type_name, typ) = Self::parse_type_entry(type_name_bytes)?;
+                    types.push((type_name, typ));
+                }
+                
+                // Read variant serialization version
+                let _variant_version = reader.get_u64_le();
+                
+                // Read prefixes for nested types
+                for (_, typ) in &types {
+                    typ.deserialize_prefix(reader)?;
+                }
+                
+                // Store metadata in state for data phase
+                let mut type_names = Vec::with_capacity(types.len());
+                let mut type_map = HashMap::new();
+                for (idx, (name, typ)) in types.iter().enumerate() {
+                    type_names.push(name.clone());
+                    drop(type_map.insert(name.clone(), (idx, typ.clone())));
+                }
+                
+                state.type_specific =
+                    TypeSpecificState::Dynamic(DynamicState { version: Some(DYNAMIC_VERSION_V1), total_types, type_names, type_map, types });
+            }
+            DYNAMIC_VERSION_V2 => {
+                // v2 format: total_types, then type names
+                let total_types = reader.try_get_var_uint()?;
+                let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
+                
+                // Read type names as strings
+                for _ in 0..total_types {
+                    let type_name_bytes = reader.try_get_string()?.to_vec();
+                    let (type_name, typ) = Self::parse_type_entry(type_name_bytes)?;
+                    types.push((type_name, typ));
+                }
+                
+                // Read variant serialization version
+                let _variant_version = reader.get_u64_le();
+                
+                // Read prefixes for nested types
+                for (_, typ) in &types {
+                    typ.deserialize_prefix(reader)?;
+                }
+                
+                // Store metadata in state for data phase
+                let mut type_names = Vec::with_capacity(types.len());
+                let mut type_map = HashMap::new();
+                for (idx, (name, typ)) in types.iter().enumerate() {
+                    type_names.push(name.clone());
+                    drop(type_map.insert(name.clone(), (idx, typ.clone())));
+                }
+                
+                state.type_specific =
+                    TypeSpecificState::Dynamic(DynamicState { version: Some(DYNAMIC_VERSION_V2), total_types, type_names, type_map, types });
+            }
+            DYNAMIC_VERSION_V3 => {
+                // v3 format: total_types, then type names, then nested prefixes
+                let total_types = reader.try_get_var_uint()?;
+                let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
+                for _ in 0..total_types {
+                    types.push(Self::parse_type_entry(reader.try_get_string()?.to_vec())?);
+                }
 
-        // Read v3 header
-        let total_types = reader.try_get_var_uint()?;
-        let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
+                // Read prefixes for nested types
+                for (_, typ) in &types {
+                    typ.deserialize_prefix(reader)?;
+                }
 
-        for _ in 0..total_types {
-            types.push(Self::parse_type_entry(reader.try_get_string()?.to_vec())?);
+                // Store metadata in state for data phase
+                let mut type_names = Vec::with_capacity(types.len());
+                let mut type_map = HashMap::new();
+                for (idx, (name, typ)) in types.iter().enumerate() {
+                    type_names.push(name.clone());
+                    drop(type_map.insert(name.clone(), (idx, typ.clone())));
+                }
+
+                state.type_specific =
+                    TypeSpecificState::Dynamic(DynamicState { version: Some(DYNAMIC_VERSION_V3), total_types, type_names, type_map, types });
+            }
+            _ => {
+                return Err(crate::Error::DeserializeError(
+                    format!("Unknown Dynamic serialization version: {version}")
+                ));
+            }
         }
-
-        // Read prefixes for nested types
-        for (_, typ) in &types {
-            typ.deserialize_prefix(reader)?;
-        }
-
-        // Store metadata in state for data phase
-        let mut type_names = Vec::with_capacity(types.len());
-        let mut type_map = HashMap::new();
-        for (idx, (name, typ)) in types.iter().enumerate() {
-            type_names.push(name.clone());
-            drop(type_map.insert(name.clone(), (idx, typ.clone())));
-        }
-
-        state.type_specific =
-            TypeSpecificState::Dynamic(DynamicState { total_types, type_names, type_map, types });
+        
         Ok(())
     }
 
@@ -223,38 +384,73 @@ impl DynamicDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (total_types, types) =
+        let (version, total_types, types) =
             if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-                (dynamic_state.total_types, dynamic_state.types.clone())
+                (dynamic_state.version.unwrap_or(DYNAMIC_VERSION_V3), dynamic_state.total_types, dynamic_state.types.clone())
             } else {
                 return Err(crate::Error::DeserializeError(
                     "Dynamic metadata not set in state".to_string(),
                 ));
             };
 
-        // Read discriminators
-        let mut discriminators = Vec::with_capacity(rows);
-        for _ in 0..rows {
-            discriminators.push(read_discriminator!(sync reader, total_types));
-        }
-
-        // Build offsets and count rows
-        let (offsets, row_count_by_type) = Self::build_offsets(&discriminators, total_types);
-
-        // Read column data for each type
-        let mut columns = HashMap::new();
-        for (idx, (_, typ)) in types.iter().enumerate() {
-            let type_idx = idx as u64;
-            if let Some(&count) = row_count_by_type.get(&type_idx)
-                && count > 0
-            {
-                let column_values = typ.deserialize_column_sync(reader, count, state)?;
-                let old = columns.insert(type_idx, column_values);
-                debug_assert!(old.is_none(), "Duplicate type index");
+        if version == DYNAMIC_VERSION_V1 || version == DYNAMIC_VERSION_V2 {
+            // v1/v2 format: read variant discriminators version first
+            let variant_version = reader.get_u64_le();
+            if variant_version != 0 {
+                return Err(crate::Error::DeserializeError(
+                    format!("Invalid variant discriminators version: {variant_version}")
+                ));
             }
-        }
 
-        Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
+            // Read 8-bit discriminators
+            let mut discriminators = Vec::with_capacity(rows);
+            for _ in 0..rows {
+                let disc = reader.get_u8();
+                discriminators.push(if disc == 255 { total_types } else { u64::from(disc) });
+            }
+
+            // Build offsets and count rows
+            let (offsets, row_count_by_type) = Self::build_offsets(&discriminators, total_types);
+
+            // Read column data for each type
+            let mut columns = HashMap::new();
+            for (idx, (_, typ)) in types.iter().enumerate() {
+                let type_idx = idx as u64;
+                if let Some(&count) = row_count_by_type.get(&type_idx)
+                    && count > 0
+                {
+                    let column_values = typ.deserialize_column_sync(reader, count, state)?;
+                    let old = columns.insert(type_idx, column_values);
+                    debug_assert!(old.is_none(), "Duplicate type index");
+                }
+            }
+
+            Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
+        } else {
+            // v3 format: variable-sized discriminators
+            let mut discriminators = Vec::with_capacity(rows);
+            for _ in 0..rows {
+                discriminators.push(read_discriminator!(sync reader, total_types));
+            }
+
+            // Build offsets and count rows
+            let (offsets, row_count_by_type) = Self::build_offsets(&discriminators, total_types);
+
+            // Read column data for each type
+            let mut columns = HashMap::new();
+            for (idx, (_, typ)) in types.iter().enumerate() {
+                let type_idx = idx as u64;
+                if let Some(&count) = row_count_by_type.get(&type_idx)
+                    && count > 0
+                {
+                    let column_values = typ.deserialize_column_sync(reader, count, state)?;
+                    let old = columns.insert(type_idx, column_values);
+                    debug_assert!(old.is_none(), "Duplicate type index");
+                }
+            }
+
+            Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
+        }
     }
 }
 

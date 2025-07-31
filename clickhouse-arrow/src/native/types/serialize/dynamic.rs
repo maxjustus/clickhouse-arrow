@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use tokio::io::AsyncWriteExt;
+use tracing::{trace, warn};
 
 use crate::Result;
 use crate::formats::{DynamicState, SerializerState, TypeSpecificState};
@@ -9,6 +10,9 @@ use crate::native::types::serialize::ClickHouseNativeSerializer;
 use crate::native::types::{Type, Value};
 
 const DYNAMIC_VERSION: u64 = 3; // Always use v3 (flattened format)
+const DYNAMIC_VERSION_V2: u64 = 2; // V2 format for servers 24.11-25.5
+const DYNAMIC_VERSION_V1: u64 = 1; // V1 format for servers < 24.11
+const DEFAULT_MAX_DYNAMIC_TYPES: u64 = 32; // Default max types for v1
 
 /// Macro to write discriminator based on size
 macro_rules! write_discriminator {
@@ -47,6 +51,25 @@ macro_rules! write_discriminator {
 pub(crate) struct DynamicSerializer;
 
 impl DynamicSerializer {
+    /// Get Dynamic serialization version based on server version
+    fn get_version(state: &SerializerState) -> u64 {
+        if let Some((major, minor, _)) = state.server_version {
+            let version = match (major, minor) {
+                (maj, _) if maj < 24 => DYNAMIC_VERSION_V1,
+                (24, min) if min < 11 => DYNAMIC_VERSION_V1,
+                (24, min) if min >= 11 => DYNAMIC_VERSION_V2,
+                (25, min) if min < 6 => DYNAMIC_VERSION_V2,
+                _ => DYNAMIC_VERSION, // v3 for 25.6+
+            };
+            trace!("Dynamic version detection: server {}.{} -> format v{}", major, minor, version);
+            version
+        } else {
+            warn!("No server version available, defaulting to Dynamic v3");
+            DYNAMIC_VERSION // Default to v3 if version unknown (for testing)
+        }
+    }
+
+
     /// Build type registry from values
     fn build_type_registry(
         values: &[Value],
@@ -96,7 +119,7 @@ impl DynamicSerializer {
 
         for (row_idx, value) in values.iter().enumerate() {
             if matches!(value, Value::Null) {
-                // NULL discriminator is total_types in v2/v3
+                // NULL discriminator is total_types in v3
                 discriminators.push(total_types as u64);
             } else {
                 let value_type = value.guess_type();
@@ -110,6 +133,91 @@ impl DynamicSerializer {
         (discriminators, rows_by_type)
     }
 
+    /// Build discriminators for v1/v2 (8-bit discriminators, NULL=255)
+    fn build_discriminators_v2(
+        values: &[Value],
+        type_map: &HashMap<String, (usize, Type)>,
+    ) -> Vec<u8> {
+        let mut discriminators = Vec::with_capacity(values.len());
+
+        for value in values.iter() {
+            if matches!(value, Value::Null) {
+                // NULL discriminator is 255 in v1/v2
+                discriminators.push(255);
+            } else {
+                let value_type = value.guess_type();
+                let type_name = value_type.to_string();
+                let (type_idx, _) = &type_map[&type_name];
+                discriminators.push(*type_idx as u8);
+            }
+        }
+
+        discriminators
+    }
+
+    /// Write variant data for v1/v2 using 8-bit discriminators (async)
+    async fn write_variant_data_v2<W: ClickHouseWrite>(
+        type_names: &[String],
+        type_map: &HashMap<String, (usize, Type)>,
+        values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        trace!("Writing variant data v2: {} values, {} types", values.len(), type_names.len());
+        
+        // Write variant discriminator mode (0 = BASIC mode)
+        writer.write_var_uint(0).await?;
+        trace!("Wrote variant discriminator mode: 0 (BASIC)");
+        
+        // Write 8-bit discriminators
+        let discriminators = Self::build_discriminators_v2(values, type_map);
+        trace!("Writing {} discriminators: {:?}", discriminators.len(), discriminators);
+        for disc in &discriminators {
+            writer.write_u8(*disc).await?;
+        }
+
+        // Group rows by type
+        let mut rows_by_type: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (row_idx, disc) in discriminators.iter().enumerate() {
+            if *disc != 255 {
+                rows_by_type.entry(*disc as usize).or_default().push(row_idx);
+            }
+        }
+        trace!("Rows by type: {:?}", rows_by_type);
+
+        // Write column data for each type
+        Self::write_columns(type_names, type_map, &rows_by_type, values, writer, state).await
+    }
+
+    /// Write variant data for v1/v2 using 8-bit discriminators (sync)
+    fn write_variant_data_v2_sync<W: ClickHouseBytesWrite>(
+        type_names: &[String],
+        type_map: &HashMap<String, (usize, Type)>,
+        values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        // Write variant discriminator mode (0 = BASIC mode)
+        writer.put_var_uint(0)?;
+        
+        // Write 8-bit discriminators
+        let discriminators = Self::build_discriminators_v2(values, type_map);
+        for disc in &discriminators {
+            writer.put_u8(*disc);
+        }
+
+        // Group rows by type
+        let mut rows_by_type: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (row_idx, disc) in discriminators.iter().enumerate() {
+            if *disc != 255 {
+                rows_by_type.entry(*disc as usize).or_default().push(row_idx);
+            }
+        }
+
+        // Write column data for each type
+        Self::write_columns_sync(type_names, type_map, &rows_by_type, values, writer, state)
+    }
+
     /// Write column data for each type
     async fn write_columns<W: ClickHouseWrite>(
         type_names: &[String],
@@ -120,16 +228,19 @@ impl DynamicSerializer {
         state: &mut SerializerState,
     ) -> Result<()> {
         for (type_idx, type_name) in type_names.iter().enumerate() {
-            if let Some(row_indices) = rows_by_type.get(&type_idx) {
-                let (_, typ) = &type_map[type_name];
+            let (_, typ) = &type_map[type_name];
 
-                // Collect values for this type
-                let type_values: Vec<Value> =
-                    row_indices.iter().map(|&row_idx| values[row_idx].clone()).collect();
+            // Get values for this type (empty if no rows)
+            let type_values: Vec<Value> = if let Some(row_indices) = rows_by_type.get(&type_idx) {
+                row_indices.iter().map(|&row_idx| values[row_idx].clone()).collect()
+            } else {
+                vec![]
+            };
 
-                // Write the column data
-                typ.serialize_column(type_values, writer, state).await?;
-            }
+            trace!("Writing column {} ({}) with {} values", type_idx, type_name, type_values.len());
+            
+            // Write the column data (even if empty)
+            typ.serialize_column(type_values, writer, state).await?;
         }
         Ok(())
     }
@@ -144,16 +255,17 @@ impl DynamicSerializer {
         state: &mut SerializerState,
     ) -> Result<()> {
         for (type_idx, type_name) in type_names.iter().enumerate() {
-            if let Some(row_indices) = rows_by_type.get(&type_idx) {
-                let (_, typ) = &type_map[type_name];
+            let (_, typ) = &type_map[type_name];
 
-                // Collect values for this type
-                let type_values: Vec<Value> =
-                    row_indices.iter().map(|&row_idx| values[row_idx].clone()).collect();
+            // Get values for this type (empty if no rows)
+            let type_values: Vec<Value> = if let Some(row_indices) = rows_by_type.get(&type_idx) {
+                row_indices.iter().map(|&row_idx| values[row_idx].clone()).collect()
+            } else {
+                vec![]
+            };
 
-                // Write the column data
-                typ.serialize_column_sync(type_values, writer, state)?;
-            }
+            // Write the column data (even if empty)
+            typ.serialize_column_sync(type_values, writer, state)?;
         }
         Ok(())
     }
@@ -164,26 +276,85 @@ impl DynamicSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        writer.write_u64_le(DYNAMIC_VERSION).await?;
+        let version = Self::get_version(state);
+        trace!("Writing Dynamic prefix with version {}", version);
+        writer.write_u64_le(version).await?;
 
         // Check if we have metadata from previous analysis
         if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-            // v3 format: total_types, then type names, then nested prefixes
-            writer.write_var_uint(dynamic_state.total_types).await?;
+            trace!("Dynamic state: {} types: {:?}", dynamic_state.total_types, dynamic_state.type_names);
+            match version {
+                DYNAMIC_VERSION_V1 => {
+                    // v1 format: max_dynamic_types, total_types, then type names as strings
+                    trace!("Writing v1 format: max_types={}, total_types={}", DEFAULT_MAX_DYNAMIC_TYPES, dynamic_state.total_types);
+                    writer.write_var_uint(DEFAULT_MAX_DYNAMIC_TYPES).await?;
+                    writer.write_var_uint(dynamic_state.total_types).await?;
+                    
+                    // Write type names as strings (not DataType format)
+                    for type_name in &dynamic_state.type_names {
+                        writer.write_string(type_name).await?;
+                    }
+                    
+                    // Write variant serialization version (always 0)
+                    writer.write_u64_le(0).await?;
+                    
+                    // Clone to avoid borrowing issues
+                    let type_names = dynamic_state.type_names.clone();
+                    let type_map = dynamic_state.type_map.clone();
+                    
+                    // Write nested type prefixes
+                    for type_name in &type_names {
+                        let (_, typ) = &type_map[type_name];
+                        typ.serialize_prefix_async(writer, state).await?;
+                    }
+                }
+                DYNAMIC_VERSION_V2 => {
+                    // v2 format: total_types, then type names as strings
+                    trace!("Writing v2 format: total_types={}", dynamic_state.total_types);
+                    writer.write_var_uint(dynamic_state.total_types).await?;
+                    
+                    // Write type names as strings (not DataType format)
+                    for type_name in &dynamic_state.type_names {
+                        writer.write_string(type_name).await?;
+                    }
+                    
+                    // Write variant serialization version (always 0)
+                    writer.write_u64_le(0).await?;
+                    
+                    // Clone to avoid borrowing issues
+                    let type_names = dynamic_state.type_names.clone();
+                    let type_map = dynamic_state.type_map.clone();
+                    
+                    // Write nested type prefixes
+                    for type_name in &type_names {
+                        let (_, typ) = &type_map[type_name];
+                        typ.serialize_prefix_async(writer, state).await?;
+                    }
+                }
+                DYNAMIC_VERSION => {
+                    // v3 format: total_types, then type names, then nested prefixes
+                    writer.write_var_uint(dynamic_state.total_types).await?;
 
-            // Write type names
-            for type_name in &dynamic_state.type_names {
-                writer.write_string(type_name).await?;
-            }
+                    // Write type names
+                    for type_name in &dynamic_state.type_names {
+                        writer.write_string(type_name).await?;
+                    }
 
-            // Clone type_names and type_map to avoid borrowing issues
-            let type_names = dynamic_state.type_names.clone();
-            let type_map = dynamic_state.type_map.clone();
+                    // Clone type_names and type_map to avoid borrowing issues
+                    let type_names = dynamic_state.type_names.clone();
+                    let type_map = dynamic_state.type_map.clone();
 
-            // Write nested type prefixes
-            for type_name in &type_names {
-                let (_, typ) = &type_map[type_name];
-                typ.serialize_prefix_async(writer, state).await?;
+                    // Write nested type prefixes
+                    for type_name in &type_names {
+                        let (_, typ) = &type_map[type_name];
+                        typ.serialize_prefix_async(writer, state).await?;
+                    }
+                }
+                _ => {
+                    return Err(crate::Error::SerializeError(
+                        format!("Unsupported Dynamic version: {version}")
+                    ));
+                }
             }
         } else {
             return Err(crate::Error::SerializeError(
@@ -200,6 +371,7 @@ impl DynamicSerializer {
     pub(crate) fn analyze_values(values: &[Value]) -> TypeSpecificState {
         let (type_names, type_map, total_types) = Self::build_type_registry(values);
         let state = DynamicState {
+            version: None, // Will be set during write_prefix
             total_types: total_types as u64,
             type_names,
             type_map,
@@ -227,17 +399,30 @@ impl DynamicSerializer {
                 ));
             };
 
-        // Build discriminators and count rows per type
-        let (discriminators, rows_by_type) =
-            Self::build_discriminators_and_groups(values, &type_map, total_types);
+        let version = Self::get_version(state);
+        match version {
+            DYNAMIC_VERSION_V1 | DYNAMIC_VERSION_V2 => {
+                // v1 and v2 use the same variant data format with 8-bit discriminators
+                Self::write_variant_data_v2(&type_names, &type_map, values, writer, state).await
+            }
+            DYNAMIC_VERSION => {
+                // v3 uses variable-sized discriminators
+                // Build discriminators and count rows per type
+                let (discriminators, rows_by_type) =
+                    Self::build_discriminators_and_groups(values, &type_map, total_types);
 
-        // Write discriminators
-        for &disc in &discriminators {
-            write_discriminator!(async writer, disc, total_types);
+                // Write discriminators
+                for &disc in &discriminators {
+                    write_discriminator!(async writer, disc, total_types);
+                }
+
+                // Write column data for each type
+                Self::write_columns(&type_names, &type_map, &rows_by_type, values, writer, state).await
+            }
+            _ => Err(crate::Error::SerializeError(
+                format!("Unsupported Dynamic version: {version}")
+            ))
         }
-
-        // Write column data for each type
-        Self::write_columns(&type_names, &type_map, &rows_by_type, values, writer, state).await
     }
 
     #[allow(clippy::used_underscore_binding)]
@@ -246,26 +431,81 @@ impl DynamicSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        writer.put_u64_le(DYNAMIC_VERSION);
+        let version = Self::get_version(state);
+        writer.put_u64_le(version);
 
         // Check if we have metadata from previous analysis
         if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-            // v3 format: total_types, then type names, then nested prefixes
-            writer.put_var_uint(dynamic_state.total_types)?;
+            match version {
+                DYNAMIC_VERSION_V1 => {
+                    // v1 format: max_dynamic_types, total_types, then type names as strings
+                    writer.put_var_uint(DEFAULT_MAX_DYNAMIC_TYPES)?;
+                    writer.put_var_uint(dynamic_state.total_types)?;
+                    
+                    // Write type names as strings (not DataType format)
+                    for type_name in &dynamic_state.type_names {
+                        writer.put_string(type_name)?;
+                    }
+                    
+                    // Write variant serialization version (always 0)
+                    writer.put_u64_le(0);
+                    
+                    // Clone to avoid borrowing issues
+                    let type_names = dynamic_state.type_names.clone();
+                    let type_map = dynamic_state.type_map.clone();
+                    
+                    // Write nested type prefixes
+                    for type_name in &type_names {
+                        let (_, typ) = &type_map[type_name];
+                        typ.serialize_prefix(writer, state);
+                    }
+                }
+                DYNAMIC_VERSION_V2 => {
+                    // v2 format: total_types, then type names as strings
+                    writer.put_var_uint(dynamic_state.total_types)?;
+                    
+                    // Write type names as strings (not DataType format)
+                    for type_name in &dynamic_state.type_names {
+                        writer.put_string(type_name)?;
+                    }
+                    
+                    // Write variant serialization version (always 0)
+                    writer.put_u64_le(0);
+                    
+                    // Clone to avoid borrowing issues
+                    let type_names = dynamic_state.type_names.clone();
+                    let type_map = dynamic_state.type_map.clone();
+                    
+                    // Write nested type prefixes
+                    for type_name in &type_names {
+                        let (_, typ) = &type_map[type_name];
+                        typ.serialize_prefix(writer, state);
+                    }
+                }
+                DYNAMIC_VERSION => {
+                    // v3 format: total_types, then type names, then nested prefixes
+                    writer.put_var_uint(dynamic_state.total_types)?;
 
-            // Write type names
-            for type_name in &dynamic_state.type_names {
-                writer.put_string(type_name)?;
-            }
+                    // Write type names
+                    for type_name in &dynamic_state.type_names {
+                        writer.put_string(type_name)?;
+                    }
 
-            // Clone type_names and type_map to avoid borrowing issues
-            let type_names = dynamic_state.type_names.clone();
-            let type_map = dynamic_state.type_map.clone();
+                    // Clone type_names and type_map to avoid borrowing issues
+                    let type_names = dynamic_state.type_names.clone();
+                    let type_map = dynamic_state.type_map.clone();
 
-            // Write nested type prefixes
-            for type_name in &type_names {
-                let (_, typ) = &type_map[type_name];
-                typ.serialize_prefix(writer, state);
+                    // Write nested type prefixes
+                    for type_name in &type_names {
+                        let (_, typ) = &type_map[type_name];
+                        typ.serialize_prefix(writer, state);
+                    }
+                }
+                _ => {
+                    return Err(crate::Error::SerializeError(
+                        format!("Unsupported Dynamic version: {version}")
+                    ));
+                }
             }
         } else {
             return Err(crate::Error::SerializeError(
@@ -297,17 +537,30 @@ impl DynamicSerializer {
                 ));
             };
 
-        // Build discriminators and count rows per type
-        let (discriminators, rows_by_type) =
-            Self::build_discriminators_and_groups(values, &type_map, total_types);
+        let version = Self::get_version(state);
+        match version {
+            DYNAMIC_VERSION_V1 | DYNAMIC_VERSION_V2 => {
+                // v1 and v2 use the same variant data format with 8-bit discriminators
+                Self::write_variant_data_v2_sync(&type_names, &type_map, values, writer, state)
+            }
+            DYNAMIC_VERSION => {
+                // v3 uses variable-sized discriminators
+                // Build discriminators and count rows per type
+                let (discriminators, rows_by_type) =
+                    Self::build_discriminators_and_groups(values, &type_map, total_types);
 
-        // Write discriminators
-        for &disc in &discriminators {
-            write_discriminator!(sync writer, disc, total_types);
+                // Write discriminators
+                for &disc in &discriminators {
+                    write_discriminator!(sync writer, disc, total_types);
+                }
+
+                // Write column data for each type
+                Self::write_columns_sync(&type_names, &type_map, &rows_by_type, values, writer, state)
+            }
+            _ => Err(crate::Error::SerializeError(
+                format!("Unsupported Dynamic version: {version}")
+            ))
         }
-
-        // Write column data for each type
-        Self::write_columns_sync(&type_names, &type_map, &rows_by_type, values, writer, state)
     }
 }
 
@@ -470,5 +723,223 @@ mod tests {
             write_discriminator!(sync &mut buffer, 0, total_types);
             assert_eq!(buffer.len(), expected_bytes, "Failed for total_types={total_types}");
         }
+    }
+
+    #[test]
+    fn test_version_detection() {
+        // Test v1 detection (< 24.11)
+        let mut state = SerializerState::default();
+        state.server_version = Some((24, 8, 1));
+        assert_eq!(DynamicSerializer::get_version(&state), DYNAMIC_VERSION_V1);
+
+        // Test v2 detection (24.11 - 25.5)
+        state.server_version = Some((24, 11, 0));
+        assert_eq!(DynamicSerializer::get_version(&state), DYNAMIC_VERSION_V2);
+
+        state.server_version = Some((25, 1, 0));
+        assert_eq!(DynamicSerializer::get_version(&state), DYNAMIC_VERSION_V2);
+
+        state.server_version = Some((25, 5, 0));
+        assert_eq!(DynamicSerializer::get_version(&state), DYNAMIC_VERSION_V2);
+
+        // Test v3 detection (>= 25.6)
+        state.server_version = Some((25, 6, 0));
+        assert_eq!(DynamicSerializer::get_version(&state), DYNAMIC_VERSION);
+
+        // Test default (no version)
+        state.server_version = None;
+        assert_eq!(DynamicSerializer::get_version(&state), DYNAMIC_VERSION);
+    }
+
+    #[test]
+    fn test_dynamic_v2_prefix() {
+        // Test v2 Dynamic prefix serialization
+        let mut buffer = Vec::new();
+        let mut state = SerializerState::default();
+        state.server_version = Some((25, 1, 0)); // Force v2
+
+        // Create test data
+        let values = vec![
+            Value::Int32(42),
+            Value::String(b"hello".to_vec()),
+            Value::Float64(std::f64::consts::PI),
+        ];
+
+        // Analyze values
+        let type_specific_state = DynamicSerializer::analyze_values(&values);
+        state.type_specific = type_specific_state;
+
+        // Write prefix
+        DynamicSerializer::write_prefix_sync(&Type::Dynamic, &mut buffer, &mut state).unwrap();
+
+        // Verify format
+        let mut reader = &buffer[..];
+        
+        // Read version
+        let version = reader.get_u64_le();
+        assert_eq!(version, DYNAMIC_VERSION_V2);
+
+        // Read total_types (no max_dynamic_types in v2)
+        let total_types = reader.try_get_var_uint().unwrap();
+        assert_eq!(total_types, 3);
+
+        // Read type names as strings
+        let expected_types = vec!["Float64", "Int32", "String"];
+        for expected_type in &expected_types {
+            let bytes = reader.try_get_string().unwrap();
+            let actual_type = String::from_utf8(bytes.to_vec()).unwrap();
+            assert_eq!(&actual_type, expected_type);
+        }
+        
+        // Read variant version
+        let variant_version = reader.get_u64_le();
+        assert_eq!(variant_version, 0);
+    }
+
+    #[test]
+    fn test_dynamic_v1_prefix() {
+        // Test v1 Dynamic prefix serialization
+        let mut buffer = Vec::new();
+        let mut state = SerializerState::default();
+        state.server_version = Some((24, 8, 0)); // Force v1
+
+        // Create test data
+        let values = vec![
+            Value::Int32(42),
+            Value::String(b"hello".to_vec()),
+        ];
+
+        // Analyze values
+        let type_specific_state = DynamicSerializer::analyze_values(&values);
+        state.type_specific = type_specific_state;
+
+        // Write prefix
+        DynamicSerializer::write_prefix_sync(&Type::Dynamic, &mut buffer, &mut state).unwrap();
+
+        // Verify format
+        let mut reader = &buffer[..];
+        
+        // Read version
+        let version = reader.get_u64_le();
+        assert_eq!(version, DYNAMIC_VERSION_V1);
+
+        // Read max_dynamic_types (v1 only)
+        let max_dynamic_types = reader.try_get_var_uint().unwrap();
+        assert_eq!(max_dynamic_types, DEFAULT_MAX_DYNAMIC_TYPES);
+
+        // Read total_types
+        let total_types = reader.try_get_var_uint().unwrap();
+        assert_eq!(total_types, 2);
+
+        // Read type names as strings
+        let expected_types = vec!["Int32", "String"];
+        for expected_type in &expected_types {
+            let bytes = reader.try_get_string().unwrap();
+            let actual_type = String::from_utf8(bytes.to_vec()).unwrap();
+            assert_eq!(&actual_type, expected_type);
+        }
+        
+        // Read variant version
+        let variant_version = reader.get_u64_le();
+        assert_eq!(variant_version, 0);
+    }
+
+    #[test]
+    fn test_discriminators_v2() {
+        // Test v1/v2 discriminator building (8-bit, NULL=255)
+        let values = vec![
+            Value::Int32(42),
+            Value::Null,
+            Value::String(b"test".to_vec()),
+            Value::Int32(99),
+            Value::Null,
+        ];
+
+        let (_, type_map, _) = DynamicSerializer::build_type_registry(&values);
+        let discriminators = DynamicSerializer::build_discriminators_v2(&values, &type_map);
+
+        assert_eq!(discriminators.len(), 5);
+        assert_eq!(discriminators[0], 0); // Int32 (first alphabetically)
+        assert_eq!(discriminators[1], 255); // NULL
+        assert_eq!(discriminators[2], 1); // String (second alphabetically)
+        assert_eq!(discriminators[3], 0); // Int32
+        assert_eq!(discriminators[4], 255); // NULL
+    }
+
+    #[test]
+    fn test_dynamic_v2_data_writing() {
+        // Test v2 data serialization
+        let mut buffer = Vec::new();
+        let mut state = SerializerState::default();
+        state.server_version = Some((25, 1, 0)); // Force v2
+
+        let values = vec![
+            Value::Int32(42),
+            Value::Null,
+            Value::String(b"hello".to_vec()),
+            Value::Int32(99),
+        ];
+
+        // Analyze values
+        let type_specific_state = DynamicSerializer::analyze_values(&values);
+        state.type_specific = type_specific_state;
+
+        // Write data
+        DynamicSerializer::write_sync(&Type::Dynamic, &values, &mut buffer, &mut state).unwrap();
+
+        // Verify discriminators are 8-bit
+        let mut reader = &buffer[..];
+        
+        // Read variant discriminator mode (0 = BASIC)
+        assert_eq!(reader.try_get_var_uint().unwrap(), 0);
+        
+        // Read discriminators (8-bit in v2)
+        assert_eq!(reader.get_u8(), 0); // Int32
+        assert_eq!(reader.get_u8(), 255); // NULL
+        assert_eq!(reader.get_u8(), 1); // String
+        assert_eq!(reader.get_u8(), 0); // Int32
+
+        // The rest would be column data, which is complex to verify manually
+        // but we've tested that the discriminators are written correctly
+    }
+    
+    #[test]
+    fn test_dynamic_v2_full_serialization() {
+        // Test full v2 serialization including prefix
+        let mut buffer = Vec::new();
+        let mut state = SerializerState::default();
+        state.server_version = Some((25, 1, 0)); // Force v2
+
+        let values = vec![
+            Value::Int32(42),
+            Value::String(b"hello".to_vec()),
+            Value::Float64(3.14),
+        ];
+
+        // Analyze values
+        let type_specific_state = DynamicSerializer::analyze_values(&values);
+        state.type_specific = type_specific_state;
+
+        // Write prefix
+        DynamicSerializer::write_prefix_sync(&Type::Dynamic, &mut buffer, &mut state).unwrap();
+        let prefix_len = buffer.len();
+        
+        // Write data
+        DynamicSerializer::write_sync(&Type::Dynamic, &values, &mut buffer, &mut state).unwrap();
+        
+        println!("Dynamic v2 serialization:");
+        println!("  Prefix ({} bytes): {:?}", prefix_len, &buffer[..prefix_len]);
+        println!("  Data ({} bytes): {:?}", buffer.len() - prefix_len, &buffer[prefix_len..]);
+        
+        // Basic validation
+        let mut reader = &buffer[..];
+        
+        // Read version
+        let version = reader.get_u64_le();
+        assert_eq!(version, 2);
+        
+        // Read total_types
+        let total_types = reader.try_get_var_uint().unwrap();
+        assert_eq!(total_types, 3);
     }
 }

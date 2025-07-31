@@ -37,8 +37,8 @@ impl Version {
         Some(Version::new(major, minor, patch))
     }
 
-    /// Check if this version supports the Dynamic type (requires 25.1+)
-    pub fn supports_dynamic(&self) -> bool { self >= &Version::new(25, 1, 0) }
+    /// Check if this version supports the Dynamic type (requires 24.8+)
+    pub fn supports_dynamic(&self) -> bool { self >= &Version::new(24, 8, 0) }
 
     /// Check if this version supports the JSON type (requires 25.1+)
     pub fn supports_json(&self) -> bool { self >= &Version::new(25, 1, 0) }
@@ -92,7 +92,7 @@ impl VersionChecker {
             Some(v) if v.supports_dynamic() => true,
             Some(v) => {
                 warn!(
-                    "Skipping {} - requires Dynamic support (ClickHouse 25.1+), found {}",
+                    "Skipping {} - requires Dynamic support (ClickHouse 24.8+), found {}",
                     test_name, v
                 );
                 false
