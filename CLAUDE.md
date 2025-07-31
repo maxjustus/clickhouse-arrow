@@ -39,14 +39,8 @@ cargo test --test e2e_native --features "test-utils,derive"
 # Run with output visible
 cargo test --features test-utils -- --nocapture
 
-# Run multi-version tests
-./scripts/test-versions.sh
-
-# Test specific versions
-VERSIONS="24.8 25.5" ./scripts/test-versions.sh
-
-# Or test a single version
-CLICKHOUSE_VERSION="25.1" cargo test --all-features
+# Test with specific ClickHouse version
+CLICKHOUSE_VERSION="25.6" cargo test --all-features
 ```
 
 ### Linting and Formatting

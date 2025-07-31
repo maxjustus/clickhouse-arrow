@@ -47,19 +47,16 @@ cargo test --test e2e_native --features test-utils
 cargo test --features test-utils -- --nocapture
 ```
 
-### Multi-Version Testing
+### Testing with Different ClickHouse Versions
 
 The test suite automatically uses testcontainers and respects the `CLICKHOUSE_VERSION` environment variable:
 
 ```bash
 # Test against a specific version
-CLICKHOUSE_VERSION="25.5" cargo test --all-features
+CLICKHOUSE_VERSION="25.6" cargo test --all-features
 
-# Test against multiple versions using the helper script
-./scripts/test-versions.sh
-
-# Test against custom versions
-VERSIONS="24.8 25.1 latest" ./scripts/test-versions.sh
+# Test against latest version (default)
+cargo test --all-features
 ```
 
 ### Code Quality
