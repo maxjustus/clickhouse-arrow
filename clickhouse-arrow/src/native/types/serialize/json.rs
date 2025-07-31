@@ -13,7 +13,6 @@ pub(crate) struct JsonSerializer;
 
 // JSON serialization versions from ClickHouse
 const JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION: u64 = 0;
-const _JSON_STRING_SERIALIZATION_VERSION: u64 = 1; // Reserved for potential future use
 const JSON_OBJECT_SERIALIZATION_VERSION: u64 = 3;
 const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
 const DYNAMIC_VERSION: u64 = 3;
@@ -184,6 +183,15 @@ macro_rules! write_discriminator {
 }
 
 impl JsonSerializer {
+    /// Check if server supports flat Dynamic/JSON serialization (v3)
+    fn supports_flat_dynamic_json(state: &SerializerState) -> bool {
+        if let Some((major, minor, _)) = state.server_version {
+            major > 25 || (major == 25 && minor >= 6)
+        } else {
+            true // Default to v3 if version unknown (for testing)
+        }
+    }
+
     /// Get the `ClickHouse` type name for a Value
     fn get_value_type_name(value: &Value) -> String {
         match value {
@@ -458,15 +466,6 @@ impl JsonSerializer {
         Ok(TypeSpecificState::Json(state))
     }
 
-    /// Check if server supports flat Dynamic/JSON serialization (v3)
-    fn supports_flat_dynamic_json(state: &SerializerState) -> bool {
-        if let Some((major, minor, _)) = state.server_version {
-            major >= 25 && minor >= 6
-        } else {
-            true // Default to v3 if version unknown (for testing)
-        }
-    }
-
     /// Get serialization version based on server support
     fn get_serialization_version(state: &SerializerState) -> u64 {
         if Self::supports_flat_dynamic_json(state) {
@@ -476,7 +475,7 @@ impl JsonSerializer {
         }
     }
 
-    /// Write paths header based on version (sync)
+    /// Write paths header based on version
     fn write_paths_header_sync<W: ClickHouseBytesWrite>(
         paths: &[String],
         version: u64,
@@ -694,6 +693,7 @@ impl Serializer for JsonSerializer {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use std::io::Cursor;
 

@@ -218,17 +218,14 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
         Some(v) if v.starts_with("24.") => false,
         Some(v) if v.starts_with("25.") => {
             let parts: Vec<&str> = v.split('.').collect();
-            if parts.len() >= 2 {
-                parts[1].parse::<u32>().unwrap_or(0) >= 6
-            } else {
-                false
-            }
+            if parts.len() >= 2 { parts[1].parse::<u32>().unwrap_or(0) >= 6 } else { false }
         }
         _ => true, // Default to v3 for latest
     };
 
     if should_use_v3 {
-        builder = builder.with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1);
+        builder = builder
+            .with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1);
     }
 
     let client: NativeClient = builder.build().await.expect("Building client");
@@ -245,7 +242,7 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
         if !version_checker.require_dynamic_support("Dynamic type test") {
             return;
         }
-        
+
         // Log the actual format we'll be using
         debug!("Using Dynamic format version: {}", if should_use_v3 { "v3" } else { "v1/v2" });
         version_checker
@@ -262,10 +259,7 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     let table_name = "test_dynamic";
 
     header(query_id, "Setting enable_dynamic_type globally");
-    client
-        .execute("SET enable_dynamic_type = 1", None)
-        .await
-        .expect("set setting failed");
+    client.execute("SET enable_dynamic_type = 1", None).await.expect("set setting failed");
 
     header(query_id, "Creating table with Dynamic column");
     client
@@ -366,17 +360,14 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
         Some(v) if v.starts_with("24.") => false,
         Some(v) if v.starts_with("25.") => {
             let parts: Vec<&str> = v.split('.').collect();
-            if parts.len() >= 2 {
-                parts[1].parse::<u32>().unwrap_or(0) >= 6
-            } else {
-                false
-            }
+            if parts.len() >= 2 { parts[1].parse::<u32>().unwrap_or(0) >= 6 } else { false }
         }
         _ => true, // Default to v3 for latest
     };
 
     if should_use_v3 {
-        builder = builder.with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1);
+        builder = builder
+            .with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1);
     }
 
     let client: NativeClient = builder.build().await.expect("Building client");
