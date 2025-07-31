@@ -214,6 +214,7 @@ fn json_to_clickhouse_literal(value: &Value) -> Result<String> {
 }
 
 /// Simple base64 encoding helper
+#[cfg(test)]
 fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
