@@ -38,7 +38,7 @@ impl JsonDeserializer {
     fn set_nested_value(
         object: &mut serde_json::Map<String, serde_json::Value>,
         path: &str,
-        value: Value,
+        value: &Value,
     ) -> Result<()> {
         let parts: Vec<&str> = path.split('.').collect();
         if parts.is_empty() {
@@ -63,230 +63,10 @@ impl JsonDeserializer {
         }
 
         // Set final value
-        let json_value = Self::value_to_json(value)?;
+        let json_value = value.to_json()?;
         let old = current.insert(parts[parts.len() - 1].to_string(), json_value);
         debug_assert!(old.is_none() || matches!(old, Some(serde_json::Value::Null)));
         Ok(())
-    }
-
-    /// Format a decimal value with proper decimal point placement
-    fn format_decimal(mut value: String, scale: usize) -> String {
-        if scale == 0 {
-            return value;
-        }
-
-        let is_negative = value.starts_with('-');
-        if is_negative {
-            let _ = value.remove(0);
-        }
-
-        // Pad with leading zeros if needed
-        while value.len() <= scale {
-            value.insert(0, '0');
-        }
-
-        // Insert decimal point
-        let point_pos = value.len() - scale;
-        value.insert(point_pos, '.');
-
-        // Add negative sign back if needed
-        if is_negative {
-            value.insert(0, '-');
-        }
-
-        value
-    }
-
-    /// Convert `ClickHouse` Value to JSON
-    #[expect(clippy::too_many_lines)]
-    fn value_to_json(value: Value) -> Result<serde_json::Value> {
-        use serde_json::{Number, Value as JsonValue};
-
-        Ok(match value {
-            Value::Null => JsonValue::Null,
-
-            // Numeric types that fit in JSON numbers
-            Value::Int8(i) => JsonValue::Number(Number::from(i)),
-            Value::Int16(i) => JsonValue::Number(Number::from(i)),
-            Value::Int32(i) => JsonValue::Number(Number::from(i)),
-            Value::Int64(i) => JsonValue::Number(Number::from(i)),
-            Value::UInt8(i) => JsonValue::Number(Number::from(i)),
-            Value::UInt16(i) => JsonValue::Number(Number::from(i)),
-            Value::UInt32(i) => JsonValue::Number(Number::from(i)),
-            Value::UInt64(i) => JsonValue::Number(Number::from(i)),
-
-            // Large integers as strings
-            Value::Int128(i) => JsonValue::String(i.to_string()),
-            Value::Int256(i) => JsonValue::String(i.to_string()),
-            Value::UInt128(i) => JsonValue::String(i.to_string()),
-            Value::UInt256(i) => JsonValue::String(i.to_string()),
-
-            // Floats
-            Value::Float32(f) => {
-                Number::from_f64(f64::from(f)).map_or(JsonValue::Null, JsonValue::Number)
-            }
-            Value::Float64(f) => Number::from_f64(f).map_or(JsonValue::Null, JsonValue::Number),
-
-            // String
-            Value::String(bytes) => JsonValue::String(
-                String::from_utf8(bytes)
-                    .map_err(|e| Error::DeserializeError(format!("Invalid UTF-8: {e}")))?,
-            ),
-
-            // Decimal types - format with proper decimal point
-            Value::Decimal32(scale, value) => {
-                JsonValue::String(Self::format_decimal(value.to_string(), scale))
-            }
-            Value::Decimal64(scale, value) => {
-                JsonValue::String(Self::format_decimal(value.to_string(), scale))
-            }
-            Value::Decimal128(scale, value) => {
-                JsonValue::String(Self::format_decimal(value.to_string(), scale))
-            }
-            Value::Decimal256(scale, value) => {
-                JsonValue::String(Self::format_decimal(value.to_string(), scale))
-            }
-
-            // Date/Time types - format as ISO strings
-            Value::Date(date) => {
-                let chrono_date: chrono::NaiveDate = date.into();
-                JsonValue::String(chrono_date.format("%Y-%m-%d").to_string())
-            }
-            Value::Date32(date) => {
-                let chrono_date: chrono::NaiveDate = date.into();
-                JsonValue::String(chrono_date.format("%Y-%m-%d").to_string())
-            }
-            Value::DateTime(datetime) => {
-                let chrono_date: chrono::DateTime<chrono_tz::Tz> = datetime
-                    .try_into()
-                    .map_err(|_| Error::DeserializeError("Invalid DateTime".to_string()))?;
-                JsonValue::String(chrono_date.to_rfc3339())
-            }
-            Value::DateTime64(datetime) => {
-                use crate::FromSql;
-                let chrono_date: chrono::DateTime<chrono_tz::Tz> =
-                    FromSql::from_sql(&Type::DateTime64(datetime.2, datetime.0), value.clone())
-                        .map_err(|e| Error::DeserializeError(format!("Invalid DateTime64: {e}")))?;
-                JsonValue::String(chrono_date.to_rfc3339())
-            }
-
-            // UUID - standard hyphenated format
-            Value::Uuid(uuid) => JsonValue::String(uuid.to_string()),
-
-            // Network types
-            Value::Ipv4(ip) => JsonValue::String(ip.to_string()),
-            Value::Ipv6(ip) => JsonValue::String(ip.to_string()),
-
-            // Enum types - just the string value
-            Value::Enum8(name, _) | Value::Enum16(name, _) => JsonValue::String(name),
-
-            // Container types
-            Value::Array(array) => {
-                let mut arr = Vec::with_capacity(array.len());
-                for item in array {
-                    arr.push(Self::value_to_json(item)?);
-                }
-                JsonValue::Array(arr)
-            }
-            Value::Tuple(tuple) => {
-                let mut arr = Vec::with_capacity(tuple.len());
-                for item in tuple {
-                    arr.push(Self::value_to_json(item)?);
-                }
-                JsonValue::Array(arr)
-            }
-            Value::Map(keys, values) => {
-                // Check if all keys are strings
-                let all_string_keys = keys.iter().all(|k| matches!(k, Value::String(_)));
-
-                if all_string_keys && keys.len() == values.len() {
-                    // Create JSON object
-                    let mut map = serde_json::Map::new();
-                    for (key, value) in keys.iter().zip(values.iter()) {
-                        if let Value::String(key_bytes) = key {
-                            let key_str = String::from_utf8(key_bytes.clone()).map_err(|e| {
-                                Error::DeserializeError(format!("Invalid UTF-8 in map key: {e}"))
-                            })?;
-                            drop(map.insert(key_str, Self::value_to_json(value.clone())?));
-                        }
-                    }
-                    JsonValue::Object(map)
-                } else {
-                    // Create array of [key, value] pairs
-                    let mut arr = Vec::with_capacity(keys.len());
-                    for (key, value) in keys.iter().zip(values.iter()) {
-                        arr.push(JsonValue::Array(vec![
-                            Self::value_to_json(key.clone())?,
-                            Self::value_to_json(value.clone())?,
-                        ]));
-                    }
-                    JsonValue::Array(arr)
-                }
-            }
-
-            // Variant - unwrap and serialize contained value
-            Value::Variant(_, boxed_value) => Self::value_to_json(*boxed_value)?,
-
-            // Object type - already JSON, parse it
-            Value::Object(json_bytes) => serde_json::from_slice(&json_bytes)
-                .map_err(|e| Error::DeserializeError(format!("Invalid JSON in Object: {e}")))?,
-
-            // Geo types - as coordinate arrays
-            Value::Point(point) => JsonValue::Array(vec![
-                JsonValue::Number(Number::from_f64(point.0[0]).unwrap_or(Number::from(0))),
-                JsonValue::Number(Number::from_f64(point.0[1]).unwrap_or(Number::from(0))),
-            ]),
-            Value::Ring(ring) => {
-                let mut arr = Vec::with_capacity(ring.0.len());
-                for point in &ring.0 {
-                    arr.push(JsonValue::Array(vec![
-                        JsonValue::Number(Number::from_f64(point.0[0]).unwrap_or(Number::from(0))),
-                        JsonValue::Number(Number::from_f64(point.0[1]).unwrap_or(Number::from(0))),
-                    ]));
-                }
-                JsonValue::Array(arr)
-            }
-            Value::Polygon(polygon) => {
-                let mut arr = Vec::with_capacity(polygon.0.len());
-                for ring in &polygon.0 {
-                    let mut ring_arr = Vec::with_capacity(ring.0.len());
-                    for point in &ring.0 {
-                        ring_arr.push(JsonValue::Array(vec![
-                            JsonValue::Number(
-                                Number::from_f64(point.0[0]).unwrap_or(Number::from(0)),
-                            ),
-                            JsonValue::Number(
-                                Number::from_f64(point.0[1]).unwrap_or(Number::from(0)),
-                            ),
-                        ]));
-                    }
-                    arr.push(JsonValue::Array(ring_arr));
-                }
-                JsonValue::Array(arr)
-            }
-            Value::MultiPolygon(multi) => {
-                let mut arr = Vec::with_capacity(multi.0.len());
-                for polygon in &multi.0 {
-                    let mut poly_arr = Vec::with_capacity(polygon.0.len());
-                    for ring in &polygon.0 {
-                        let mut ring_arr = Vec::with_capacity(ring.0.len());
-                        for point in &ring.0 {
-                            ring_arr.push(JsonValue::Array(vec![
-                                JsonValue::Number(
-                                    Number::from_f64(point.0[0]).unwrap_or(Number::from(0)),
-                                ),
-                                JsonValue::Number(
-                                    Number::from_f64(point.0[1]).unwrap_or(Number::from(0)),
-                                ),
-                            ]));
-                        }
-                        poly_arr.push(JsonValue::Array(ring_arr));
-                    }
-                    arr.push(JsonValue::Array(poly_arr));
-                }
-                JsonValue::Array(arr)
-            }
-        })
     }
 
     /// Parse type entry from bytes
@@ -358,7 +138,7 @@ impl JsonDeserializer {
                     && let Some(value) = path_column.get(row_idx)
                     && !matches!(value, Value::Null)
                 {
-                    Self::set_nested_value(&mut row_object, path_name, value.clone())?;
+                    Self::set_nested_value(&mut row_object, path_name, value)?;
                 }
             }
 
@@ -598,53 +378,33 @@ mod tests {
     #[test]
     fn test_value_to_json_numeric_types() {
         // Small integers
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Int8(42)).unwrap(),
-            serde_json::json!(42)
-        );
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Int16(-1000)).unwrap(),
-            serde_json::json!(-1000)
-        );
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Int32(123_456)).unwrap(),
-            serde_json::json!(123_456)
-        );
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Int64(-999_999_999)).unwrap(),
-            serde_json::json!(-999_999_999)
-        );
+        assert_eq!(Value::Int8(42).to_json().unwrap(), serde_json::json!(42));
+        assert_eq!(Value::Int16(-1000).to_json().unwrap(), serde_json::json!(-1000));
+        assert_eq!(Value::Int32(123_456).to_json().unwrap(), serde_json::json!(123_456));
+        assert_eq!(Value::Int64(-999_999_999).to_json().unwrap(), serde_json::json!(-999_999_999));
 
+        assert_eq!(Value::UInt8(255).to_json().unwrap(), serde_json::json!(255));
+        assert_eq!(Value::UInt16(65_535).to_json().unwrap(), serde_json::json!(65_535));
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::UInt8(255)).unwrap(),
-            serde_json::json!(255)
-        );
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::UInt16(65_535)).unwrap(),
-            serde_json::json!(65_535)
-        );
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::UInt32(4_294_967_295)).unwrap(),
+            Value::UInt32(4_294_967_295).to_json().unwrap(),
             serde_json::json!(4_294_967_295_u32)
         );
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::UInt64(18_446_744_073_709_551_615_u64)).unwrap(),
+            Value::UInt64(18_446_744_073_709_551_615_u64).to_json().unwrap(),
             serde_json::json!(18_446_744_073_709_551_615_u64)
         );
 
         // Large integers as strings
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::Int128(
-                170_141_183_460_469_231_731_687_303_715_884_105_727_i128
-            ))
-            .unwrap(),
+            Value::Int128(170_141_183_460_469_231_731_687_303_715_884_105_727_i128)
+                .to_json()
+                .unwrap(),
             serde_json::json!("170141183460469231731687303715884105727")
         );
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::UInt128(
-                340_282_366_920_938_463_463_374_607_431_768_211_455_u128
-            ))
-            .unwrap(),
+            Value::UInt128(340_282_366_920_938_463_463_374_607_431_768_211_455_u128)
+                .to_json()
+                .unwrap(),
             serde_json::json!("340282366920938463463374607431768211455")
         );
 
@@ -657,16 +417,16 @@ mod tests {
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
             25, 26, 27, 28, 29, 30, 31, 32,
         ]);
-        assert!(JsonDeserializer::value_to_json(Value::Int256(i256_val)).unwrap().is_string());
-        assert!(JsonDeserializer::value_to_json(Value::UInt256(u256_val)).unwrap().is_string());
+        assert!(Value::Int256(i256_val).to_json().unwrap().is_string());
+        assert!(Value::UInt256(u256_val).to_json().unwrap().is_string());
 
         // Floats
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::Float32(std::f32::consts::PI)).unwrap(),
+            Value::Float32(std::f32::consts::PI).to_json().unwrap(),
             serde_json::json!(std::f32::consts::PI)
         );
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::Float64(-std::f64::consts::E)).unwrap(),
+            Value::Float64(-std::f64::consts::E).to_json().unwrap(),
             serde_json::json!(-std::f64::consts::E)
         );
     }
@@ -674,90 +434,58 @@ mod tests {
     #[test]
     fn test_value_to_json_decimal_types() {
         // Decimal32
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Decimal32(2, 1234)).unwrap(),
-            serde_json::json!("12.34")
-        );
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Decimal32(0, 1234)).unwrap(),
-            serde_json::json!("1234")
-        );
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Decimal32(4, 12)).unwrap(),
-            serde_json::json!("0.0012")
-        );
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Decimal32(2, -1234)).unwrap(),
-            serde_json::json!("-12.34")
-        );
+        assert_eq!(Value::Decimal32(2, 1234).to_json().unwrap(), serde_json::json!("12.34"));
+        assert_eq!(Value::Decimal32(0, 1234).to_json().unwrap(), serde_json::json!("1234"));
+        assert_eq!(Value::Decimal32(4, 12).to_json().unwrap(), serde_json::json!("0.0012"));
+        assert_eq!(Value::Decimal32(2, -1234).to_json().unwrap(), serde_json::json!("-12.34"));
 
         // Decimal64
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::Decimal64(6, 123_456_789)).unwrap(),
+            Value::Decimal64(6, 123_456_789).to_json().unwrap(),
             serde_json::json!("123.456789")
         );
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Decimal64(10, 5)).unwrap(),
-            serde_json::json!("0.0000000005")
-        );
+        assert_eq!(Value::Decimal64(10, 5).to_json().unwrap(), serde_json::json!("0.0000000005"));
 
         // Decimal128
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Decimal128(3, 123_456)).unwrap(),
-            serde_json::json!("123.456")
-        );
+        assert_eq!(Value::Decimal128(3, 123_456).to_json().unwrap(), serde_json::json!("123.456"));
 
         // Decimal256
         let d256 = i256([
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 100,
         ]);
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Decimal256(2, d256)).unwrap(),
-            serde_json::json!("1.00")
-        );
+        assert_eq!(Value::Decimal256(2, d256).to_json().unwrap(), serde_json::json!("1.00"));
     }
 
     #[test]
     fn test_value_to_json_string_and_null() {
-        assert_eq!(JsonDeserializer::value_to_json(Value::Null).unwrap(), serde_json::json!(null));
+        assert_eq!(Value::Null.to_json().unwrap(), serde_json::json!(null));
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::String(b"hello world".to_vec())).unwrap(),
+            Value::String(b"hello world".to_vec()).to_json().unwrap(),
             serde_json::json!("hello world")
         );
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::String(b"".to_vec())).unwrap(),
-            serde_json::json!("")
-        );
+        assert_eq!(Value::String(b"".to_vec()).to_json().unwrap(), serde_json::json!(""));
     }
 
     #[test]
     fn test_value_to_json_date_time_types() {
         // Date
         let date = Date::from(chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Date(date)).unwrap(),
-            serde_json::json!("2024-01-15")
-        );
+        assert_eq!(Value::Date(date).to_json().unwrap(), serde_json::json!("2024-01-15"));
 
         // Date32
         let date32 = Date32::from(chrono::NaiveDate::from_ymd_opt(2024, 12, 31).unwrap());
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Date32(date32)).unwrap(),
-            serde_json::json!("2024-12-31")
-        );
+        assert_eq!(Value::Date32(date32).to_json().unwrap(), serde_json::json!("2024-12-31"));
 
-        // DateTime
+        // DateTime - ClickHouse format: "YYYY-MM-DD HH:MM:SS"
         let dt = DateTime(UTC, 1_705_320_600);
-        let json_val = JsonDeserializer::value_to_json(Value::DateTime(dt)).unwrap();
-        assert!(json_val.is_string());
-        assert!(json_val.as_str().unwrap().contains("2024-01-15"));
+        let json_val = Value::DateTime(dt).to_json().unwrap();
+        assert_eq!(json_val, serde_json::json!("2024-01-15 12:10:00"));
 
-        // DateTime64 - we'll test the format but not exact value due to timezone complexities
+        // DateTime64 - ClickHouse format with precision
         let dt64 = DynDateTime64(UTC, 1_705_320_600_123, 3);
-        let json_val = JsonDeserializer::value_to_json(Value::DateTime64(dt64)).unwrap();
-        assert!(json_val.is_string());
-        assert!(json_val.as_str().unwrap().contains("2024"));
+        let json_val = Value::DateTime64(dt64).to_json().unwrap();
+        assert_eq!(json_val, serde_json::json!("2024-01-15 12:10:00.123"));
     }
 
     #[test]
@@ -765,33 +493,27 @@ mod tests {
         // UUID
         let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::Uuid(uuid)).unwrap(),
+            Value::Uuid(uuid).to_json().unwrap(),
             serde_json::json!("550e8400-e29b-41d4-a716-446655440000")
         );
 
         // IPv4
         let ipv4 = Ipv4(Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Ipv4(ipv4)).unwrap(),
-            serde_json::json!("192.168.1.1")
-        );
+        assert_eq!(Value::Ipv4(ipv4).to_json().unwrap(), serde_json::json!("192.168.1.1"));
 
         // IPv6
         let ipv6 = Ipv6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Ipv6(ipv6)).unwrap(),
-            serde_json::json!("2001:db8::1")
-        );
+        assert_eq!(Value::Ipv6(ipv6).to_json().unwrap(), serde_json::json!("2001:db8::1"));
     }
 
     #[test]
     fn test_value_to_json_enum_types() {
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::Enum8("active".to_string(), 1)).unwrap(),
+            Value::Enum8("active".to_string(), 1).to_json().unwrap(),
             serde_json::json!("active")
         );
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::Enum16("pending".to_string(), 2)).unwrap(),
+            Value::Enum16("pending".to_string(), 2).to_json().unwrap(),
             serde_json::json!("pending")
         );
     }
@@ -800,10 +522,7 @@ mod tests {
     fn test_value_to_json_container_types() {
         // Array
         let array = vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)];
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Array(array)).unwrap(),
-            serde_json::json!([1, 2, 3])
-        );
+        assert_eq!(Value::Array(array).to_json().unwrap(), serde_json::json!([1, 2, 3]));
 
         // Tuple
         let tuple = vec![
@@ -812,7 +531,7 @@ mod tests {
             Value::Float64(std::f64::consts::PI),
         ];
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::Tuple(tuple)).unwrap(),
+            Value::Tuple(tuple).to_json().unwrap(),
             serde_json::json!([1, "hello", std::f64::consts::PI])
         );
 
@@ -820,16 +539,28 @@ mod tests {
         let keys = vec![Value::String(b"name".to_vec()), Value::String(b"age".to_vec())];
         let values = vec![Value::String(b"Alice".to_vec()), Value::Int32(30)];
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::Map(keys, values)).unwrap(),
+            Value::Map(keys, values).to_json().unwrap(),
             serde_json::json!({"name": "Alice", "age": 30})
         );
 
-        // Map with non-string keys - becomes array of pairs
+        // Map with non-string keys - ClickHouse converts keys to strings
         let keys = vec![Value::Int32(1), Value::Int32(2)];
         let values = vec![Value::String(b"one".to_vec()), Value::String(b"two".to_vec())];
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::Map(keys, values)).unwrap(),
-            serde_json::json!([[1, "one"], [2, "two"]])
+            Value::Map(keys, values).to_json().unwrap(),
+            serde_json::json!({"1": "one", "2": "two"})
+        );
+
+        // Map with various key types
+        let keys = vec![Value::UInt64(42), Value::Float64(3.5), Value::Null];
+        let values = vec![
+            Value::String(b"forty-two".to_vec()),
+            Value::String(b"float".to_vec()),
+            Value::String(b"null-key".to_vec()),
+        ];
+        assert_eq!(
+            Value::Map(keys, values).to_json().unwrap(),
+            serde_json::json!({"42": "forty-two", "3.5": "float", "null": "null-key"})
         );
     }
 
@@ -837,41 +568,32 @@ mod tests {
     fn test_value_to_json_variant() {
         let inner = Value::String(b"hello".to_vec());
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::Variant(0, Box::new(inner))).unwrap(),
+            Value::Variant(0, Box::new(inner)).to_json().unwrap(),
             serde_json::json!("hello")
         );
 
         let inner = Value::Int32(42);
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Variant(1, Box::new(inner))).unwrap(),
-            serde_json::json!(42)
-        );
+        assert_eq!(Value::Variant(1, Box::new(inner)).to_json().unwrap(), serde_json::json!(42));
     }
 
     #[test]
     fn test_value_to_json_object() {
         let json_obj = b"{\"key\": \"value\", \"number\": 42}";
         let expected = serde_json::json!({"key": "value", "number": 42});
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Object(json_obj.to_vec())).unwrap(),
-            expected
-        );
+        assert_eq!(Value::Object(json_obj.to_vec()).to_json().unwrap(), expected);
     }
 
     #[test]
     fn test_value_to_json_geo_types() {
         // Point
         let point = Point([1.5, 2.5]);
-        assert_eq!(
-            JsonDeserializer::value_to_json(Value::Point(point)).unwrap(),
-            serde_json::json!([1.5, 2.5])
-        );
+        assert_eq!(Value::Point(point).to_json().unwrap(), serde_json::json!([1.5, 2.5]));
 
         // Ring
         let ring =
             Ring(vec![Point([0.0, 0.0]), Point([1.0, 0.0]), Point([1.0, 1.0]), Point([0.0, 0.0])]);
         assert_eq!(
-            JsonDeserializer::value_to_json(Value::Ring(ring)).unwrap(),
+            Value::Ring(ring).to_json().unwrap(),
             serde_json::json!([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]])
         );
 
@@ -892,7 +614,7 @@ mod tests {
                 Point([1.0, 1.0]),
             ]),
         ]);
-        let json_poly = JsonDeserializer::value_to_json(Value::Polygon(polygon)).unwrap();
+        let json_poly = Value::Polygon(polygon).to_json().unwrap();
         assert!(json_poly.is_array());
         assert_eq!(json_poly.as_array().unwrap().len(), 2); // outer ring + hole
 
@@ -903,7 +625,7 @@ mod tests {
             Point([1.0, 1.0]),
             Point([0.0, 0.0]),
         ])])]);
-        let json_multi = JsonDeserializer::value_to_json(Value::MultiPolygon(multi)).unwrap();
+        let json_multi = Value::MultiPolygon(multi).to_json().unwrap();
         assert!(json_multi.is_array());
         assert_eq!(json_multi.as_array().unwrap().len(), 1);
     }
@@ -915,19 +637,13 @@ mod tests {
             Value::Array(vec![Value::Int32(1), Value::Int32(2)]),
             Value::Array(vec![Value::Int32(3), Value::Int32(4)]),
         ]);
-        assert_eq!(
-            JsonDeserializer::value_to_json(nested).unwrap(),
-            serde_json::json!([[1, 2], [3, 4]])
-        );
+        assert_eq!(nested.to_json().unwrap(), serde_json::json!([[1, 2], [3, 4]]));
 
         // Array of tuples
         let array_of_tuples = Value::Array(vec![
             Value::Tuple(vec![Value::String(b"a".to_vec()), Value::Int32(1)]),
             Value::Tuple(vec![Value::String(b"b".to_vec()), Value::Int32(2)]),
         ]);
-        assert_eq!(
-            JsonDeserializer::value_to_json(array_of_tuples).unwrap(),
-            serde_json::json!([["a", 1], ["b", 2]])
-        );
+        assert_eq!(array_of_tuples.to_json().unwrap(), serde_json::json!([["a", 1], ["b", 2]]));
     }
 }

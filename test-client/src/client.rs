@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clickhouse_arrow::{
     Client, ClientBuilder, CompressionMethod, NativeFormat, Qid, Value as ChValue,
 };
@@ -190,137 +190,8 @@ fn block_to_json(block: clickhouse_arrow::native::block::Block) -> Result<Value>
 
 /// Convert ClickHouse Value to JSON
 fn clickhouse_value_to_json(value: ChValue) -> Result<Value> {
-    match value {
-        ChValue::Int8(v) => Ok(Value::Number(v.into())),
-        ChValue::Int16(v) => Ok(Value::Number(v.into())),
-        ChValue::Int32(v) => Ok(Value::Number(v.into())),
-        ChValue::Int64(v) => Ok(Value::Number(v.into())),
-        ChValue::Int128(v) => Ok(Value::Number(serde_json::Number::from(v as i64))),
-        ChValue::Int256(v) => Ok(Value::String(v.to_string())),
-        ChValue::UInt8(v) => Ok(Value::Number(v.into())),
-        ChValue::UInt16(v) => Ok(Value::Number(v.into())),
-        ChValue::UInt32(v) => Ok(Value::Number(v.into())),
-        ChValue::UInt64(v) => Ok(Value::Number(v.into())),
-        ChValue::UInt128(v) => {
-            if let Some(num) = serde_json::Number::from_f64(v as f64) {
-                Ok(Value::Number(num))
-            } else {
-                Ok(Value::String(v.to_string()))
-            }
-        }
-        ChValue::UInt256(v) => Ok(Value::String(v.to_string())),
-        ChValue::Float32(v) => {
-            if let Some(num) = serde_json::Number::from_f64(v as f64) {
-                Ok(Value::Number(num))
-            } else {
-                Ok(Value::Null)
-            }
-        }
-        ChValue::Float64(v) => {
-            if let Some(num) = serde_json::Number::from_f64(v) {
-                Ok(Value::Number(num))
-            } else {
-                Ok(Value::Null)
-            }
-        }
-        ChValue::String(bytes) => {
-            match std::str::from_utf8(&bytes) {
-                Ok(s) => Ok(Value::String(s.to_string())),
-                Err(_) => {
-                    // If it's not valid UTF-8, encode as base64
-                    Ok(Value::String(base64_encode(&bytes)))
-                }
-            }
-        }
-        ChValue::Date(v) => Ok(Value::String(format!("{v:?}"))),
-        ChValue::Date32(v) => Ok(Value::String(format!("{v:?}"))),
-        ChValue::DateTime(v) => Ok(Value::String(format!("{v:?}"))),
-        ChValue::DateTime64(v) => Ok(Value::String(format!("{v:?}"))),
-        ChValue::Uuid(v) => Ok(Value::String(v.to_string())),
-        ChValue::Ipv4(v) => Ok(Value::String(v.to_string())),
-        ChValue::Ipv6(v) => Ok(Value::String(v.to_string())),
-        ChValue::Tuple(values) => {
-            // Unnamed tuples should be serialized as JSON arrays, not objects
-            let mut json_array = Vec::new();
-            for value in values {
-                let json_value = clickhouse_value_to_json(value)?;
-                json_array.push(json_value);
-            }
-            Ok(Value::Array(json_array))
-        }
-        ChValue::Array(values) => {
-            let mut json_array = Vec::new();
-            for value in values {
-                let json_value = clickhouse_value_to_json(value)?;
-                json_array.push(json_value);
-            }
-            Ok(Value::Array(json_array))
-        }
-        ChValue::Map(keys, values) => {
-            let mut json_obj = serde_json::Map::new();
-            for (key, value) in keys.into_iter().zip(values.into_iter()) {
-                let key_str = match clickhouse_value_to_json(key)? {
-                    Value::String(s) => s,
-                    other => other.to_string(),
-                };
-                let json_value = clickhouse_value_to_json(value)?;
-                json_obj.insert(key_str, json_value);
-            }
-            Ok(Value::Object(json_obj))
-        }
-        ChValue::Decimal32(v, scale) => Ok(Value::String(format!(
-            "{:.scale$}",
-            v as f64 / 10_f64.powi(scale),
-            scale = scale as usize
-        ))),
-        ChValue::Decimal64(v, scale) => Ok(Value::String(format!(
-            "{:.scale$}",
-            v as f64 / 10_f64.powi(scale as i32),
-            scale = scale as usize
-        ))),
-        ChValue::Decimal128(v, scale) => Ok(Value::String(format!(
-            "{:.scale$}",
-            v as f64 / 10_f64.powi(scale as i32),
-            scale = scale as usize
-        ))),
-        ChValue::Decimal256(v, scale) => Ok(Value::String(format!("{:?}", (v, scale)))),
-        ChValue::Enum8(name, _) | ChValue::Enum16(name, _) => Ok(Value::String(name)),
-        ChValue::Point(point) => Ok(Value::String(format!("{point:?}"))),
-        ChValue::Ring(ring) => Ok(Value::String(format!("{ring:?}"))),
-        ChValue::Polygon(polygon) => Ok(Value::String(format!("{polygon:?}"))),
-        ChValue::MultiPolygon(multi_polygon) => Ok(Value::String(format!("{multi_polygon:?}"))),
-        ChValue::Object(obj) => {
-            eprintln!("DEBUG: Object bytes length: {}", obj.len());
-            eprintln!("DEBUG: Object bytes: {obj:?}");
-            match std::str::from_utf8(&obj) {
-                Ok(s) => {
-                    eprintln!("DEBUG: Object as string: {s:?}");
-                    // Try to parse as JSON first
-                    match serde_json::from_str::<serde_json::Value>(s) {
-                        Ok(parsed_json) => Ok(parsed_json),
-                        Err(_) => {
-                            // If JSON parsing fails, return as string
-                            Ok(Value::String(s.to_string()))
-                        }
-                    }
-                }
-                Err(_) => {
-                    // If it's not valid UTF-8, encode as base64
-                    Ok(Value::String(base64_encode(&obj)))
-                }
-            }
-        }
-        ChValue::Null => Ok(Value::Null),
-        ChValue::Variant(_discriminator, inner) => {
-            // Just return the inner value directly
-            clickhouse_value_to_json(*inner)
-        }
-        // TODO: Dynamic type not yet implemented
-        // ChValue::Dynamic(_type_name, inner) => {
-        //     // Just return the inner value directly
-        //     clickhouse_value_to_json(*inner)
-        // }
-    }
+    // Use the built-in to_json method from clickhouse-arrow
+    value.to_json().map_err(|e| anyhow!("Failed to convert to JSON: {}", e))
 }
 
 /// Convert JSON value to ClickHouse literal string for INSERT statements
