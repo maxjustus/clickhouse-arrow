@@ -74,11 +74,18 @@ cargo bench --bench query --features test-utils
 ```
 
 ### Protocol Debugging
+
+There's a Python UV script available for debugging ClickHouse native protocol over TCP:
+
 ```bash
 # Analyze raw TCP binary data for ClickHouse protocol debugging
-python3 chc-tcp.py "SELECT if(number % 2 = 0, 'yes', number) as v FROM system.numbers LIMIT 3"
+./scripts/chc-tcp.py "SELECT if(number % 2 = 0, 'yes', number) as v FROM system.numbers LIMIT 3"
 
-# Use this tool to inspect binary wire format when implementing complex types like Variant
+# or write a pcap file
+./scripts/chc-tcp.py "SELECT if(number % 2 = 0, 'yes', number) as v FROM system.numbers LIMIT 3" --pcap capture.pcap
+
+# spawn a test container for specific clickhouse version then run query
+./scripts/chc-tcp.py "SELECT * FROM system.numbers LIMIT 1000" --clickhouse-container-version 25.1
 ```
 
 ## Architecture
@@ -143,66 +150,3 @@ python3 chc-tcp.py "SELECT if(number % 2 = 0, 'yes', number) as v FROM system.nu
 - Extensive clippy lints are configured in the workspace Cargo.toml
 - Custom disallowed methods are defined in clippy.toml
 - Test containers are automatically managed, set `DISABLE_CLEANUP=true` to keep containers running
-
-## Native Protocol Documentation
-
-The `native_protocol/` folder contains generated documentation about ClickHouse's native wire protocol implementation:
-
-- **01-core-protocol.md**: Core protocol concepts, handshake, and basic packet structure
-- **02-packet-types.md**: Detailed packet types (Hello, Data, Query, etc.) and their formats
-- **03-data-serialization.md**: Data type serialization/deserialization, including complex types like Arrays, Maps, Tuples, and Variants
-- **04-state-management.md**: Connection state, query state, and error handling
-- **05-advanced-features.md**: Compression, query parameters, progress reporting, and profiling
-- **TODO.md**: Implementation status and pending tasks
-- **CLAUDE.md**: Additional protocol implementation notes
-
-These documents provide detailed insights into the binary wire format and can be referenced when implementing or debugging protocol features, especially for complex types like Variant.
-
-## Variant Type Implementation
-
-### Overview
-The Variant type in ClickHouse is a discriminated union that can hold one of several possible types. The implementation in this codebase handles the multi-stream architecture used by ClickHouse's native protocol.
-
-### Key Implementation Details
-
-1. **Discriminator Mapping**:
-   - Types within a Variant are sorted alphabetically to determine discriminator values
-   - Discriminator 0xFF (255) is reserved for NULL values
-   - Example: `Variant(String, UInt64)` → String=0, UInt64=1 (alphabetical order)
-
-2. **Wire Format**:
-   - 8-byte version prefix (must be 0) - read during deserialize_prefix phase
-   - Discriminators as byte array (one byte per row)
-   - Column data for each type serialized separately (multi-stream architecture)
-   - Data is grouped by discriminator type, not interleaved
-
-3. **Deserialization Process**:
-   - Read version prefix (8 bytes) during prefix phase
-   - Read all discriminators
-   - Count rows per discriminator type
-   - Read column data for each type in discriminator order
-   - Reconstruct values in original row order using offsets
-
-4. **Current Status**:
-   - Deserialization: ✅ Implemented and tested
-   - Serialization: ✅ Implemented with comprehensive tests
-   - COMPACT mode: ❌ TODO (BASIC mode implemented)
-   - Nested Variants: ⚠️ Partially working (prefix handling implemented)
-
-### Reference Implementation
-The `ctx/clickhouse-go/` directory contains the ClickHouse Go driver source code which has a working Variant implementation. Key files:
-- `ctx/clickhouse-go/lib/column/variant.go` - Main Variant column implementation
-- `ctx/clickhouse-go/lib/chcol/variant.go` - Variant value type
-- `ctx/clickhouse-go/tests/variant_test.go` - Test examples
-
-Use this as a reference when implementing features or debugging issues with the Variant type.
-
-### Technical Specifications
-The `dynamic-containers-technical-spec.md` file contains the official ClickHouse technical specification for Dynamic and Variant types, including:
-- Detailed wire format descriptions
-- Serialization/deserialization algorithms
-- Type registry and discriminator mapping rules
-- SharedVariant handling for Dynamic type overflow
-- Examples and edge cases
-
-This specification should be consulted when implementing or debugging Dynamic and Variant type features.
