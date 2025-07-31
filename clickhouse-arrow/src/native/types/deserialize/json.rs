@@ -9,7 +9,6 @@ use crate::native::values::Value;
 use crate::{Error, Result};
 
 // JSON serialization versions
-const JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION: u64 = 0;
 const JSON_OBJECT_VERSION_3: u64 = 3;
 
 /// Macro to read discriminator based on size
@@ -380,70 +379,60 @@ impl Deserializer for JsonDeserializer {
     ) -> Result<()> {
         let version = reader.read_u64_le().await?;
 
-        match version {
-            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION | JSON_OBJECT_VERSION_3 => {
-                // Read header based on version
-                let total_paths = if version == JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION {
-                    // V0 format: max_dynamic_paths, then total_paths
-                    let _max_dynamic_paths = reader.read_var_uint().await?;
-                    reader.read_var_uint().await?
-                } else {
-                    // V3 format: just total_paths
-                    reader.read_var_uint().await?
-                };
-
-                // Read path names
-                let mut path_names =
-                    Vec::with_capacity(total_paths.try_into().unwrap_or(usize::MAX));
-                for _ in 0..total_paths {
-                    let path_bytes = reader.read_string().await?;
-                    let path_name = String::from_utf8(path_bytes).map_err(|e| {
-                        Error::DeserializeError(format!("Invalid UTF-8 in path: {e}"))
-                    })?;
-                    path_names.push(path_name);
-                }
-
-                // Read Dynamic headers for each path
-                let mut dynamic_data = Vec::with_capacity(path_names.len());
-                for path_name in &path_names {
-                    // Read Dynamic version
-                    let dyn_version = reader.read_u64_le().await?;
-                    if dyn_version != 3 {
-                        return Err(Error::DeserializeError(format!(
-                            "Expected Dynamic v3 for path '{path_name}', got {dyn_version}"
-                        )));
-                    }
-
-                    // Read types
-                    let total_types = reader.read_var_uint().await?;
-                    let mut types =
-                        Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
-                    for _ in 0..total_types {
-                        types.push(Self::parse_type_entry(reader.read_string().await?)?);
-                    }
-
-                    // Read prefixes
-                    for (_, typ) in &types {
-                        typ.deserialize_prefix_async(reader, state).await?;
-                    }
-
-                    dynamic_data.push((total_types, types));
-                }
-
-                // Store metadata in state
-                state.type_specific = TypeSpecificState::Json(JsonStateData {
-                    version:      Some(version),
-                    paths:        path_names,
-                    path_columns: None,
-                    rows:         None,
-                    dynamic_data: Some(dynamic_data),
-                });
-                Ok(())
-            }
-            _ => Err(Error::DeserializeError(format!(
-                "Unsupported JSON version: {version}. Expected 0 or 3."
-            ))),
+        if version != JSON_OBJECT_VERSION_3 {
+            return Err(Error::DeserializeError(format!(
+                "JSON type requires version 3, got version {version}. Please use ClickHouse \
+                 server >= 25.6"
+            )));
         }
+
+        // V3 format: just total_paths
+        let total_paths = reader.read_var_uint().await?;
+
+        // Read path names
+        let mut path_names = Vec::with_capacity(total_paths.try_into().unwrap_or(usize::MAX));
+        for _ in 0..total_paths {
+            let path_bytes = reader.read_string().await?;
+            let path_name = String::from_utf8(path_bytes)
+                .map_err(|e| Error::DeserializeError(format!("Invalid UTF-8 in path: {e}")))?;
+            path_names.push(path_name);
+        }
+
+        // Read Dynamic headers for each path
+        let mut dynamic_data = Vec::with_capacity(path_names.len());
+        for path_name in &path_names {
+            // Read Dynamic version
+            let dyn_version = reader.read_u64_le().await?;
+            if dyn_version != 3 {
+                return Err(Error::DeserializeError(format!(
+                    "Expected Dynamic v3 for path '{path_name}', got {dyn_version}"
+                )));
+            }
+
+            // Read types
+            let total_types = reader.read_var_uint().await?;
+            let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
+            for _ in 0..total_types {
+                types.push(Self::parse_type_entry(reader.read_string().await?)?);
+            }
+
+            // Read prefixes
+            for (_, typ) in &types {
+                typ.deserialize_prefix_async(reader, state).await?;
+            }
+
+            dynamic_data.push((total_types, types));
+        }
+
+        // Store metadata in state
+        state.type_specific = TypeSpecificState::Json(JsonStateData {
+            version:      Some(version),
+            paths:        path_names,
+            path_columns: None,
+            rows:         None,
+            dynamic_data: Some(dynamic_data),
+        });
+        Ok(())
     }
 
     async fn read<R: ClickHouseRead>(
@@ -465,7 +454,7 @@ impl Deserializer for JsonDeserializer {
             };
 
         match version {
-            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION | JSON_OBJECT_VERSION_3 => {
+            JSON_OBJECT_VERSION_3 => {
                 let dynamic_data = dynamic_data.ok_or_else(|| {
                     Error::DeserializeError("JSON object data not set".to_string())
                 })?;
@@ -513,7 +502,10 @@ impl Deserializer for JsonDeserializer {
 
                 Self::build_json_objects(&path_names, &path_values, rows)
             }
-            _ => Err(Error::DeserializeError(format!("Invalid JSON version: {version}"))),
+            _ => Err(Error::DeserializeError(format!(
+                "JSON type requires version 3, got version {version}. Please use ClickHouse \
+                 server >= 25.6"
+            ))),
         }
     }
 
@@ -536,7 +528,7 @@ impl Deserializer for JsonDeserializer {
             };
 
         match version {
-            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION | JSON_OBJECT_VERSION_3 => {
+            JSON_OBJECT_VERSION_3 => {
                 let dynamic_data = dynamic_data.ok_or_else(|| {
                     Error::DeserializeError("JSON object data not set".to_string())
                 })?;
@@ -584,7 +576,10 @@ impl Deserializer for JsonDeserializer {
 
                 Self::build_json_objects(&path_names, &path_values, rows)
             }
-            _ => Err(Error::DeserializeError(format!("Invalid JSON version: {version}"))),
+            _ => Err(Error::DeserializeError(format!(
+                "JSON type requires version 3, got version {version}. Please use ClickHouse \
+                 server >= 25.6"
+            ))),
         }
     }
 }

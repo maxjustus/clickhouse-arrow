@@ -12,9 +12,7 @@ type JsonPathData = (Vec<String>, HashMap<String, Vec<(usize, Value)>>, HashMap<
 pub(crate) struct JsonSerializer;
 
 // JSON serialization versions from ClickHouse
-const JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION: u64 = 0;
 const JSON_OBJECT_SERIALIZATION_VERSION: u64 = 3;
-const DEFAULT_MAX_DYNAMIC_PATHS: u64 = 1024;
 const DYNAMIC_VERSION: u64 = 3;
 
 // JSON v3 object serialization is now supported via thread-local caching
@@ -183,13 +181,16 @@ macro_rules! write_discriminator {
 }
 
 impl JsonSerializer {
-    /// Check if server supports flat Dynamic/JSON serialization (v3)
-    fn supports_flat_dynamic_json(state: &SerializerState) -> bool {
-        if let Some((major, minor, _)) = state.server_version {
-            major > 25 || (major == 25 && minor >= 6)
-        } else {
-            true // Default to v3 if version unknown (for testing)
+    /// Check if server supports JSON v3
+    fn check_server_version(state: &SerializerState) -> Result<()> {
+        if let Some((major, minor, _)) = state.server_version
+            && (major < 25 || (major == 25 && minor < 6))
+        {
+            return Err(Error::SerializeError(format!(
+                "JSON type requires ClickHouse server version >= 25.6, got {major}.{minor}"
+            )));
         }
+        Ok(())
     }
 
     /// Get the `ClickHouse` type name for a Value
@@ -467,12 +468,8 @@ impl JsonSerializer {
     }
 
     /// Get serialization version based on server support
-    fn get_serialization_version(state: &SerializerState) -> u64 {
-        if Self::supports_flat_dynamic_json(state) {
-            JSON_OBJECT_SERIALIZATION_VERSION
-        } else {
-            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION
-        }
+    fn get_serialization_version(_state: &SerializerState) -> u64 {
+        JSON_OBJECT_SERIALIZATION_VERSION
     }
 
     /// Write paths header based on version
@@ -481,18 +478,14 @@ impl JsonSerializer {
         version: u64,
         writer: &mut W,
     ) -> Result<()> {
-        match version {
-            JSON_OBJECT_SERIALIZATION_VERSION => {
-                // V3 format: total dynamic paths count
-                writer.put_var_uint(paths.len() as u64)?;
-            }
-            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION => {
-                // V0 format
-                writer.put_var_uint(DEFAULT_MAX_DYNAMIC_PATHS)?;
-                writer.put_var_uint(paths.len() as u64)?;
-            }
-            _ => {}
+        if version != JSON_OBJECT_SERIALIZATION_VERSION {
+            return Err(Error::SerializeError(format!(
+                "Unsupported JSON serialization version: {version}"
+            )));
         }
+
+        // V3 format: total dynamic paths count
+        writer.put_var_uint(paths.len() as u64)?;
 
         // Write path names
         for path in paths {
@@ -507,18 +500,14 @@ impl JsonSerializer {
         version: u64,
         writer: &mut W,
     ) -> Result<()> {
-        match version {
-            JSON_OBJECT_SERIALIZATION_VERSION => {
-                // V3 format: total dynamic paths count
-                writer.write_var_uint(paths.len() as u64).await?;
-            }
-            JSON_DEPRECATED_OBJECT_SERIALIZATION_VERSION => {
-                // V0 format
-                writer.write_var_uint(DEFAULT_MAX_DYNAMIC_PATHS).await?;
-                writer.write_var_uint(paths.len() as u64).await?;
-            }
-            _ => {}
+        if version != JSON_OBJECT_SERIALIZATION_VERSION {
+            return Err(Error::SerializeError(format!(
+                "Unsupported JSON serialization version: {version}"
+            )));
         }
+
+        // V3 format: total dynamic paths count
+        writer.write_var_uint(paths.len() as u64).await?;
 
         // Write path names
         for path in paths {
@@ -532,6 +521,9 @@ impl JsonSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
+        // Check server version support
+        Self::check_server_version(state)?;
+
         let version = Self::get_serialization_version(state);
         writer.put_u64_le(version);
 
@@ -571,6 +563,9 @@ impl Serializer for JsonSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
+        // Check server version support
+        Self::check_server_version(state)?;
+
         let version = Self::get_serialization_version(state);
         writer.write_u64_le(version).await?;
 
@@ -609,7 +604,8 @@ impl Serializer for JsonSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        let use_v3 = Self::supports_flat_dynamic_json(state);
+        // Always use v3 now (server version already checked in write_prefix)
+        let use_v3 = true;
 
         // Get metadata from state
         let (paths, path_columns, rows) =
@@ -653,7 +649,8 @@ impl Serializer for JsonSerializer {
         writer: &mut impl ClickHouseBytesWrite,
         state: &mut SerializerState,
     ) -> Result<()> {
-        let use_v3 = Self::supports_flat_dynamic_json(state);
+        // Always use v3 now (server version already checked in write_prefix)
+        let use_v3 = true;
 
         // Get metadata from state
         let (paths, path_columns, rows) =
