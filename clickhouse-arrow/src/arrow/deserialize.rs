@@ -389,22 +389,14 @@ impl ClickHouseArrowDeserializer for Type {
             }
             // Variant
             Type::Variant(_) => {
-                todo!("Variant deserialization not yet implemented");
+                todo!("Variant deserialization not yet implemented")
             }
             Type::Dynamic => {
-                // Dynamic is not directly representable in Arrow
-                // Return empty Binary array as placeholder
-                Arc::new(BinaryArray::from(vec![] as Vec<Option<&[u8]>>))
+                todo!("Dynamic deserialization not yet implemented")
             }
             Type::JSON => {
-                // JSON uses same serialization as Dynamic
-                // Return empty Binary array as placeholder
-                Arc::new(BinaryArray::from(vec![] as Vec<Option<&[u8]>>))
+                todo!("JSON deserialization not yet implemented")
             }
-            // TODO: Dynamic type not yet implemented
-            // Type::Dynamic(_) => {
-            //     todo!("Dynamic deserialization not yet implemented");
-            // }
         })
     }
 
@@ -560,9 +552,15 @@ impl ClickHouseArrowDeserializer for Type {
                 nulls,
                 rbuffer
             )},
-            // Variant
+            // Unimplemented types
             (_, Type::Variant(_)) => {
-                Err(Error::ArrowDeserialize("Variant deserialization not yet implemented".into()))
+                todo!("Variant deserialization not yet implemented")
+            },
+            (_, Type::Dynamic) => {
+                todo!("Dynamic deserialization not yet implemented")
+            },
+            (_, Type::JSON) => {
+                todo!("JSON deserialization not yet implemented")
             },
             (builder, _) => {
                 // Finish the builder and return an ArrayRef
