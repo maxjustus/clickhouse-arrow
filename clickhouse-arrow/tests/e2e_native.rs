@@ -20,3 +20,12 @@ e2e_test!(e2e_native_dynamic, tests::native::test_dynamic_round_trip, TRACING_DI
 // Test JSON e2e
 #[cfg(feature = "derive")]
 e2e_test!(e2e_native_json, tests::native::test_json_round_trip, TRACING_DIRECTIVES, None);
+
+// Test mixed Dynamic and JSON e2e
+#[cfg(feature = "derive")]
+e2e_test!(
+    e2e_native_mixed_dynamic_json,
+    tests::native::test_mixed_dynamic_json,
+    TRACING_DIRECTIVES,
+    None
+);

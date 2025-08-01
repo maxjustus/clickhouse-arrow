@@ -15,6 +15,11 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use super::protocol::MAX_STRING_SIZE;
+
+// Default parameter values based on ClickHouse documentation and clickhouse-go
+const DEFAULT_DYNAMIC_MAX_TYPES: u32 = 32;
+const DEFAULT_JSON_MAX_DYNAMIC_PATHS: u32 = 1024;
+const DEFAULT_JSON_MAX_DYNAMIC_TYPES: u32 = 32;
 use super::values::{
     Date, DateTime, DynDateTime64, Ipv4, Ipv6, MultiPolygon, Point, Polygon, Ring, Value, i256,
     u256,
@@ -82,8 +87,15 @@ pub enum Type {
     Tuple(Vec<Type>),
     Map(Box<Type>, Box<Type>),
     Variant(Vec<Type>),
-    Dynamic,
-    JSON,
+    Dynamic {
+        max_types: Option<u32>, // Default: 32 if None
+    },
+    JSON {
+        max_dynamic_paths: Option<u32>,              // Default: 1024 if None
+        max_dynamic_types: Option<u32>,              // Default: 32 if None
+        typed_paths:       Vec<(String, Box<Type>)>, // (path, type) pairs like ("Name", String)
+        skip_paths:        Vec<String>,              // Paths to skip, including REGEXP patterns
+    },
 
     Object,
 }
@@ -164,6 +176,55 @@ impl Type {
         }
     }
 
+    /// Get Dynamic type parameters, returning defaults if None
+    pub fn dynamic_max_types(&self) -> Option<u32> {
+        match self {
+            Type::Dynamic { max_types } => Some(max_types.unwrap_or(DEFAULT_DYNAMIC_MAX_TYPES)),
+            _ => None,
+        }
+    }
+
+    /// Get JSON type parameters, returning defaults if None
+    pub fn json_max_dynamic_paths(&self) -> Option<u32> {
+        match self {
+            Type::JSON { max_dynamic_paths, .. } => {
+                Some(max_dynamic_paths.unwrap_or(DEFAULT_JSON_MAX_DYNAMIC_PATHS))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn json_max_dynamic_types(&self) -> Option<u32> {
+        match self {
+            Type::JSON { max_dynamic_types, .. } => {
+                Some(max_dynamic_types.unwrap_or(DEFAULT_JSON_MAX_DYNAMIC_TYPES))
+            }
+            _ => None,
+        }
+    }
+
+    /// Get JSON typed paths
+    pub fn json_typed_paths(&self) -> Option<&[(String, Box<Type>)]> {
+        match self {
+            Type::JSON { typed_paths, .. } => Some(typed_paths),
+            _ => None,
+        }
+    }
+
+    /// Get JSON skip paths
+    pub fn json_skip_paths(&self) -> Option<&[String]> {
+        match self {
+            Type::JSON { skip_paths, .. } => Some(skip_paths),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a Dynamic type
+    pub fn is_dynamic(&self) -> bool { matches!(self, Type::Dynamic { .. }) }
+
+    /// Check if this is a JSON type  
+    pub fn is_json(&self) -> bool { matches!(self, Type::JSON { .. }) }
+
     pub fn strip_null(&self) -> &Type {
         match self {
             Type::Nullable(x) => x,
@@ -224,7 +285,9 @@ impl Type {
             Type::LowCardinality(x) => x.default_value(),
             Type::Array(_) => Value::Array(vec![]),
             Type::Tuple(types) => Value::Tuple(types.iter().map(Type::default_value).collect()),
-            Type::Nullable(_) | Type::Variant(_) | Type::Dynamic | Type::JSON => Value::Null,
+            Type::Nullable(_) | Type::Variant(_) | Type::Dynamic { .. } | Type::JSON { .. } => {
+                Value::Null
+            }
             Type::Map(_, _) => Value::Map(vec![], vec![]),
             Type::Point => Value::Point(Point::default()),
             Type::Ring => Value::Ring(Ring::default()),
@@ -310,8 +373,41 @@ impl Display for Type {
                 "Variant({})",
                 items.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
             ),
-            Type::Dynamic => write!(f, "Dynamic"),
-            Type::JSON => write!(f, "JSON"),
+            Type::Dynamic { max_types } => match max_types {
+                Some(max_types) => write!(f, "Dynamic(max_types={max_types})"),
+                None => write!(f, "Dynamic"),
+            },
+            Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_paths } => {
+                let mut params = Vec::new();
+
+                // Add typed paths (Name String, Age Int64, etc.)
+                for (path, typ) in typed_paths {
+                    params.push(format!("{path} {typ}"));
+                }
+
+                // Add skip paths
+                for skip_path in skip_paths {
+                    if skip_path.starts_with("SKIP REGEXP") {
+                        params.push(skip_path.clone());
+                    } else {
+                        params.push(format!("SKIP {skip_path}"));
+                    }
+                }
+
+                // Add config parameters
+                if let Some(paths) = max_dynamic_paths {
+                    params.push(format!("max_dynamic_paths={paths}"));
+                }
+                if let Some(types) = max_dynamic_types {
+                    params.push(format!("max_dynamic_types={types}"));
+                }
+
+                if params.is_empty() {
+                    write!(f, "JSON")
+                } else {
+                    write!(f, "JSON({})", params.join(", "))
+                }
+            }
             Type::Object => write!(f, "Object"), // TODO: JSON type alias
         }
     }
@@ -388,10 +484,12 @@ impl Type {
                 Type::Variant(_) => {
                     variant::VariantDeserializer::read_async(self, reader, rows, state).await?
                 }
-                Type::Dynamic => {
+                Type::Dynamic { .. } => {
                     dynamic::DynamicDeserializer::read_async(self, reader, rows, state).await?
                 }
-                Type::JSON => json::JsonDeserializer::read(self, reader, rows, state).await?,
+                Type::JSON { .. } => {
+                    json::JsonDeserializer::read(self, reader, rows, state).await?
+                }
             })
         }
         .boxed()
@@ -459,8 +557,10 @@ impl Type {
             }
             Type::Object => object::ObjectDeserializer::read_sync(self, reader, rows, state)?,
             Type::Variant(_) => variant::VariantDeserializer::read_sync(self, reader, rows, state)?,
-            Type::Dynamic => dynamic::DynamicDeserializer::read_sync(self, reader, rows, state)?,
-            Type::JSON => json::JsonDeserializer::read_sync(self, reader, rows, state)?,
+            Type::Dynamic { .. } => {
+                dynamic::DynamicDeserializer::read_sync(self, reader, rows, state)?
+            }
+            Type::JSON { .. } => json::JsonDeserializer::read_sync(self, reader, rows, state)?,
         })
     }
 
@@ -536,10 +636,12 @@ impl Type {
                 Type::Variant(_) => {
                     variant::VariantSerializer::write(self, values, writer, state).await?;
                 }
-                Type::Dynamic => {
+                Type::Dynamic { .. } => {
                     dynamic::DynamicSerializer::write(self, &values, writer, state).await?;
                 }
-                Type::JSON => json::JsonSerializer::write(self, values, writer, state).await?,
+                Type::JSON { .. } => {
+                    json::JsonSerializer::write(self, values, writer, state).await?;
+                }
             }
             Ok(())
         }
@@ -613,8 +715,10 @@ impl Type {
             Type::Variant(_) => {
                 variant::VariantSerializer::write_sync(self, &values, writer, state)?;
             }
-            Type::Dynamic => dynamic::DynamicSerializer::write_sync(self, &values, writer, state)?,
-            Type::JSON => json::JsonSerializer::write_sync(self, values, writer, state)?,
+            Type::Dynamic { .. } => {
+                dynamic::DynamicSerializer::write_sync(self, &values, writer, state)?;
+            }
+            Type::JSON { .. } => json::JsonSerializer::write_sync(self, values, writer, state)?,
         }
         Ok(())
     }
@@ -749,8 +853,8 @@ impl Type {
                 }
             }
             // No validation needed for simple scalar types and special types
-            Type::Dynamic
-            | Type::JSON
+            Type::Dynamic { .. }
+            | Type::JSON { .. }
             | Type::Object
             | Type::Binary
             | Type::FixedSizedBinary(_)
@@ -823,7 +927,7 @@ impl Type {
             | (Type::Polygon, Value::Polygon(_))
             | (Type::MultiPolygon, Value::MultiPolygon(_))
             | (Type::Variant(_), Value::Null)  // NULL is valid for Variant
-            | (Type::Dynamic, _) => true,      // Dynamic accepts any value
+            | (Type::Dynamic { .. }, _) => true,      // Dynamic accepts any value
             (Type::DateTime(tz1), Value::DateTime(date)) => tz1 == &date.0,
             (Type::DateTime64(precision1, tz1), Value::DateTime64(tz2)) => {
                 tz1 == &tz2.0 && precision1 == &tz2.2
@@ -917,7 +1021,7 @@ impl Type {
                 };
                 1 + avg_capacity
             }
-            Type::Dynamic => {
+            Type::Dynamic { .. } => {
                 // Variable discriminator size + some estimated capacity for dynamic data
                 // This is a rough estimate since Dynamic can contain any type
                 4 + 32

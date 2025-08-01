@@ -478,3 +478,172 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
 
     header(query_id, "JSON type test completed successfully");
 }
+
+// Helper struct for mixed Dynamic and JSON columns
+#[derive(Debug, Clone, Row)]
+struct MixedRow {
+    dynamic_col: Value,
+    json_col:    Value,
+}
+
+/// Test mixed Dynamic and JSON columns in the same insert to verify per-column state handling
+/// # Panics
+pub async fn test_mixed_dynamic_json(ch: Arc<ClickHouseContainer>) {
+    let native_url = ch.get_native_url();
+    debug!("ClickHouse Native URL: {native_url}");
+
+    header("native/mixed", "Testing mixed Dynamic and JSON columns");
+
+    // Create ClientBuilder and ConnectionManager
+    let mut builder = ClientBuilder::new()
+        .with_endpoint(native_url)
+        .with_username(&ch.user)
+        .with_password(&ch.password)
+        .with_ipv4_only(true)
+        .with_compression(CompressionMethod::None);
+
+    // Only use v3 format setting for servers that support it (25.6+)
+    let version_str = std::env::var("CLICKHOUSE_VERSION").ok();
+    let should_use_v3 = match version_str.as_deref() {
+        Some(v) if v.starts_with("24.") => false,
+        Some(v) if v.starts_with("25.") => {
+            let parts: Vec<&str> = v.split('.').collect();
+            if parts.len() >= 2 { parts[1].parse::<u32>().unwrap_or(0) >= 6 } else { false }
+        }
+        _ => true, // Default to v3 for latest
+    };
+
+    if should_use_v3 {
+        builder = builder
+            .with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1);
+    }
+
+    let client: NativeClient = builder.build().await.expect("Building client");
+
+    // Check if the server supports both Dynamic and JSON types
+    let version_check_query = "SELECT version() as version";
+    let mut stream =
+        client.query::<VersionRow>(version_check_query, None).await.expect("version query failed");
+
+    let _version_checker = if let Some(Ok(row)) = stream.next().await {
+        let version_checker = VersionChecker::new(Some(&row.version));
+        version_checker.log_compatibility_info();
+
+        if !version_checker.require_dynamic_support("Mixed Dynamic/JSON test") {
+            return;
+        }
+        if !version_checker.require_json_support("Mixed Dynamic/JSON test") {
+            return;
+        }
+        version_checker
+    } else {
+        warn!("Could not determine ClickHouse version, skipping mixed Dynamic/JSON test");
+        return;
+    };
+
+    // Generate test data with both Dynamic and JSON columns
+    let dynamic_test_data = generate_dynamic_test_block().column_data;
+    let json_test_data = generate_json_test_block().column_data;
+
+    // Create mixed test block with both columns
+    let mixed_test_block = generate_mixed_dynamic_json_test_block();
+
+    let query_id = "mixed_test";
+    let table_name = "test_mixed_dynamic_json";
+
+    header(query_id, "Setting enable_dynamic_type globally");
+    client.execute("SET enable_dynamic_type = 1", None).await.expect("set setting failed");
+
+    header(query_id, "Creating table with both Dynamic and JSON columns");
+    client
+        .execute(&format!("DROP TABLE IF EXISTS {table_name}"), None)
+        .await
+        .expect("drop table failed");
+
+    client
+        .execute(
+            &format!(
+                "CREATE TABLE {table_name} (dynamic_col Dynamic, json_col JSON) ENGINE = Memory"
+            ),
+            None,
+        )
+        .await
+        .expect("create table failed");
+
+    header(query_id, "Inserting mixed Dynamic and JSON data");
+    debug!(
+        "Test data: {} rows, column types: {:?}",
+        mixed_test_block.rows, mixed_test_block.column_types
+    );
+    let insert_query = format!("INSERT INTO {table_name} VALUES");
+    let mut stream =
+        client.insert(&insert_query, mixed_test_block, None).await.expect("insert failed");
+
+    while let Some(result) = stream.next().await {
+        result.expect("insert stream failed");
+    }
+
+    header(query_id, "Checking row count");
+    let count_query = format!("SELECT count() FROM {table_name}");
+    let mut count_stream =
+        client.query::<CountRow>(&count_query, None).await.expect("count query failed");
+
+    if let Some(Ok(row)) = count_stream.next().await {
+        assert!(row.count > 0, "Expected rows in table");
+    }
+
+    header(query_id, "Querying mixed Dynamic and JSON data");
+    let query = format!("SELECT dynamic_col, json_col FROM {table_name}");
+    let mut stream = client.query::<MixedRow>(&query, None).await.expect("query failed");
+
+    let mut received_rows = Vec::new();
+    while let Some(Ok(row)) = stream.next().await {
+        received_rows.push(row);
+    }
+
+    header(query_id, "Verifying mixed data");
+    assert_eq!(received_rows.len(), dynamic_test_data.len(), "Row count mismatch");
+
+    // Verify each row
+    for (i, received_row) in received_rows.iter().enumerate() {
+        // Check Dynamic column
+        let expected_dynamic = &dynamic_test_data[i];
+        assert_eq!(
+            expected_dynamic, &received_row.dynamic_col,
+            "Dynamic value mismatch at index {i}"
+        );
+
+        // Check JSON column
+        let expected_json = &json_test_data[i];
+
+        // Extract JSON strings from Value::String for comparison
+        let expected_str = match expected_json {
+            Value::String(bytes) => String::from_utf8(bytes.clone()).expect("Valid UTF-8"),
+            _ => panic!("Expected Value::String for expected JSON"),
+        };
+
+        let received_str = match &received_row.json_col {
+            Value::String(bytes) => String::from_utf8(bytes.clone()).expect("Valid UTF-8"),
+            _ => panic!("Expected Value::String for received JSON"),
+        };
+
+        // Parse both as JSON to compare semantically
+        let expected_json_value: serde_json::Value =
+            serde_json::from_str(&expected_str).expect("Expected value should be valid JSON");
+        let received_json_value: serde_json::Value =
+            serde_json::from_str(&received_str).expect("Received value should be valid JSON");
+
+        assert_eq!(expected_json_value, received_json_value, "JSON value mismatch at index {i}");
+    }
+
+    header(query_id, format!("Dropping table {table_name}"));
+    client
+        .execute(&format!("DROP TABLE {table_name}"), None)
+        .await
+        .expect("drop table failed");
+
+    header(
+        query_id,
+        "Mixed Dynamic/JSON test completed successfully - this confirms per-column state works!",
+    );
+}

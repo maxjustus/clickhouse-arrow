@@ -9,6 +9,8 @@ use crate::deserialize::ClickHouseNativeDeserializer;
 use crate::formats::protocol_data::ProtocolData;
 use crate::formats::{DeserializerState, SerializerState};
 use crate::io::{ClickHouseBytesRead, ClickHouseBytesWrite, ClickHouseRead, ClickHouseWrite};
+use crate::native::types::serialize::dynamic::DynamicSerializer;
+use crate::native::types::serialize::json::JsonSerializer;
 use crate::native::values::Value;
 use crate::prelude::*;
 use crate::serialize::ClickHouseNativeSerializer;
@@ -207,15 +209,13 @@ impl ProtocolData<Self, ()> for Block {
                 }
 
                 // For Dynamic type, we need to analyze values before writing prefix
-                if matches!(type_, Type::Dynamic) {
-                    use crate::native::types::serialize::dynamic::DynamicSerializer;
+                if matches!(type_, Type::Dynamic { .. }) {
                     let type_specific_state = DynamicSerializer::analyze_values(&values);
                     state.type_specific = type_specific_state;
                 }
 
                 // For JSON type, we need to analyze values before writing prefix
-                if matches!(type_, Type::JSON) {
-                    use crate::native::types::serialize::json::JsonSerializer;
+                if matches!(type_, Type::JSON { .. }) {
                     let type_specific_state = JsonSerializer::analyze_values(&values)?;
                     state.type_specific = type_specific_state;
                 }
@@ -275,15 +275,13 @@ impl ProtocolData<Self, ()> for Block {
                 }
 
                 // For Dynamic type, we need to analyze values before writing prefix
-                if matches!(type_, Type::Dynamic) {
-                    use crate::native::types::serialize::dynamic::DynamicSerializer;
+                if matches!(type_, Type::Dynamic { .. }) {
                     let type_specific_state = DynamicSerializer::analyze_values(&values);
                     state.type_specific = type_specific_state;
                 }
 
                 // For JSON type, we need to analyze values before writing prefix
-                if matches!(type_, Type::JSON) {
-                    use crate::native::types::serialize::json::JsonSerializer;
+                if matches!(type_, Type::JSON { .. }) {
                     let type_specific_state = JsonSerializer::analyze_values(&values)?;
                     state.type_specific = type_specific_state;
                 }

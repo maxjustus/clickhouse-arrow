@@ -477,12 +477,12 @@ pub fn ch_to_arrow_type(ch_type: &Type, options: Option<ArrowOptions>) -> Result
                 "Variant type is not yet supported in Arrow conversion".to_string(),
             ));
         }
-        Type::Dynamic => {
+        Type::Dynamic { .. } => {
             return Err(Error::ArrowUnsupportedType(
                 "Dynamic type is not yet supported in Arrow conversion".to_string(),
             ));
         }
-        Type::JSON => {
+        Type::JSON { .. } => {
             return Err(Error::ArrowUnsupportedType(
                 "JSON type is not yet supported in Arrow conversion".to_string(),
             ));

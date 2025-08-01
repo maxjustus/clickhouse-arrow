@@ -461,7 +461,13 @@ mod tests {
         let mut buffer = Vec::new();
         let mut state =
             SerializerState { type_specific: type_specific_state, ..Default::default() };
-        DynamicSerializer::write_prefix(&Type::Dynamic, &mut buffer, &mut state).await.unwrap();
+        DynamicSerializer::write_prefix(
+            &Type::Dynamic { max_types: None },
+            &mut buffer,
+            &mut state,
+        )
+        .await
+        .unwrap();
 
         // Verify version and type count
         let mut reader = &buffer[..];
@@ -504,7 +510,11 @@ mod tests {
         // Test with server version < 25.6
         state.server_version = Some((25, 1, 0));
         let mut buffer = Vec::new();
-        let result = DynamicSerializer::write_prefix_sync(&Type::Dynamic, &mut buffer, &mut state);
+        let result = DynamicSerializer::write_prefix_sync(
+            &Type::Dynamic { max_types: None },
+            &mut buffer,
+            &mut state,
+        );
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("requires ClickHouse server version >= 25.6")
@@ -513,7 +523,11 @@ mod tests {
         // Test with server version >= 25.6
         state.server_version = Some((25, 6, 0));
         buffer.clear();
-        let result = DynamicSerializer::write_prefix_sync(&Type::Dynamic, &mut buffer, &mut state);
+        let result = DynamicSerializer::write_prefix_sync(
+            &Type::Dynamic { max_types: None },
+            &mut buffer,
+            &mut state,
+        );
         assert!(result.is_ok());
     }
 

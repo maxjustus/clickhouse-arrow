@@ -126,7 +126,6 @@ impl<T: ClientFormat> InternalConn<T> {
         let conn_id = CONN_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let cid = Box::leak(format!("{}.{conn_id}", metadata.client_id).into_boxed_str());
 
-
         let state = DeserializerState::default().with_arrow_options(metadata.arrow_options);
         InternalConn {
             cid,

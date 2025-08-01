@@ -98,10 +98,10 @@ impl ClickHouseNativeDeserializer for Type {
                 Type::Variant(_) => {
                     variant::VariantDeserializer::read_prefix(self, reader, state).await?;
                 }
-                Type::Dynamic => {
+                Type::Dynamic { .. } => {
                     dynamic::DynamicDeserializer::read_prefix(self, reader, state).await?;
                 }
-                Type::JSON => {
+                Type::JSON { .. } => {
                     json::JsonDeserializer::read_prefix(self, reader, state).await?;
                 }
             }
@@ -141,7 +141,7 @@ impl ClickHouseNativeDeserializer for Type {
             Type::Variant(_) => {
                 variant::VariantDeserializer::read_prefix_sync(self, reader)?;
             }
-            Type::Dynamic => {
+            Type::Dynamic { .. } => {
                 dynamic::DynamicDeserializer::read_prefix_sync(
                     self,
                     reader,
@@ -505,7 +505,88 @@ impl FromStr for Type {
                         args.into_iter().map(Type::from_str).collect::<Result<_, _>>()?;
                     Type::Variant(inner)
                 }
-                "Dynamic" => Type::Dynamic,
+                "Dynamic" => {
+                    let args = parse_variable_args(following)?;
+                    let mut max_types = None;
+
+                    for arg in args {
+                        let arg = arg.trim();
+                        if let Some(value_str) = arg.strip_prefix("max_types=") {
+                            let value: u32 = value_str.parse().map_err(|_| {
+                                Error::TypeParseError(format!(
+                                    "Invalid max_types value: '{value_str}'"
+                                ))
+                            })?;
+                            max_types = Some(value);
+                        } else {
+                            return Err(Error::TypeParseError(format!(
+                                "Unknown Dynamic parameter: '{arg}'. Valid parameter is: max_types"
+                            )));
+                        }
+                    }
+                    Type::Dynamic { max_types }
+                }
+                "JSON" => {
+                    let args = parse_variable_args(following)?;
+                    let mut max_dynamic_paths = None;
+                    let mut max_dynamic_types = None;
+                    let mut typed_paths = Vec::new();
+                    let mut skip_paths = Vec::new();
+
+                    for arg in args {
+                        let arg = arg.trim();
+                        if let Some(value_str) = arg.strip_prefix("max_dynamic_paths=") {
+                            let value: u32 = value_str.parse().map_err(|_| {
+                                Error::TypeParseError(format!(
+                                    "Invalid max_dynamic_paths value: '{value_str}'"
+                                ))
+                            })?;
+                            max_dynamic_paths = Some(value);
+                        } else if let Some(value_str) = arg.strip_prefix("max_dynamic_types=") {
+                            let value: u32 = value_str.parse().map_err(|_| {
+                                Error::TypeParseError(format!(
+                                    "Invalid max_dynamic_types value: '{value_str}'"
+                                ))
+                            })?;
+                            max_dynamic_types = Some(value);
+                        } else if let Some(skip_path) = arg.strip_prefix("SKIP REGEXP ") {
+                            // Handle regex skip paths: SKIP REGEXP 'pattern'
+                            let pattern = skip_path
+                                .trim()
+                                .trim_start_matches('\'')
+                                .trim_end_matches('\'')
+                                .trim_start_matches('"')
+                                .trim_end_matches('"');
+                            skip_paths.push(pattern.to_string());
+                        } else if let Some(skip_path) = arg.strip_prefix("SKIP ") {
+                            // Handle literal skip paths: SKIP field_name
+                            let field =
+                                skip_path.trim().trim_start_matches('`').trim_end_matches('`');
+                            skip_paths.push(field.to_string());
+                        } else if arg.contains(' ')
+                            && !arg.starts_with("max_")
+                            && !arg.starts_with("SKIP")
+                        {
+                            // Handle typed paths: Name String, Age Int64, etc.
+                            let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+                            if parts.len() == 2 {
+                                let path =
+                                    parts[0].trim().trim_start_matches('`').trim_end_matches('`');
+                                let type_str = parts[1].trim();
+                                if let Ok(parsed_type) = Type::from_str(type_str) {
+                                    typed_paths.push((path.to_string(), Box::new(parsed_type)));
+                                } else {
+                                    // If we can't parse the type, silently ignore for
+                                    // compatibility
+                                    // This maintains backward compatibility with unknown types
+                                }
+                            }
+                        } else {
+                            // Silently ignore unrecognized parameters for forward compatibility
+                        }
+                    }
+                    Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_paths }
+                }
                 // Unsupported
                 "Nested" => {
                     return Err(Error::TypeParseError("unsupported Nested type".to_string()));
@@ -546,8 +627,101 @@ impl FromStr for Type {
             "Polygon" => Type::Polygon,
             "MultiPolygon" => Type::MultiPolygon,
             "Object" | "Json" | "OBJECT" => Type::Object,
-            "JSON" => Type::JSON,
-            "Dynamic" => Type::Dynamic,
+            "JSON" => {
+                if following.is_empty() {
+                    Type::JSON {
+                        max_dynamic_paths: None,
+                        max_dynamic_types: None,
+                        typed_paths:       Vec::new(),
+                        skip_paths:        Vec::new(),
+                    }
+                } else {
+                    let args = parse_variable_args(following)?;
+                    let mut max_dynamic_paths = None;
+                    let mut max_dynamic_types = None;
+                    let mut typed_paths = Vec::new();
+                    let mut skip_paths = Vec::new();
+
+                    for arg in args {
+                        let arg = arg.trim();
+                        if let Some(value_str) = arg.strip_prefix("max_dynamic_paths=") {
+                            let value: u32 = value_str.parse().map_err(|_| {
+                                Error::TypeParseError(format!(
+                                    "Invalid max_dynamic_paths value: '{value_str}'"
+                                ))
+                            })?;
+                            max_dynamic_paths = Some(value);
+                        } else if let Some(value_str) = arg.strip_prefix("max_dynamic_types=") {
+                            let value: u32 = value_str.parse().map_err(|_| {
+                                Error::TypeParseError(format!(
+                                    "Invalid max_dynamic_types value: '{value_str}'"
+                                ))
+                            })?;
+                            max_dynamic_types = Some(value);
+                        } else if let Some(skip_path) = arg.strip_prefix("SKIP REGEXP ") {
+                            // Handle regex skip paths: SKIP REGEXP 'pattern'
+                            let pattern = skip_path
+                                .trim()
+                                .trim_start_matches('\'')
+                                .trim_end_matches('\'')
+                                .trim_start_matches('"')
+                                .trim_end_matches('"');
+                            skip_paths.push(pattern.to_string());
+                        } else if let Some(skip_path) = arg.strip_prefix("SKIP ") {
+                            // Handle literal skip paths: SKIP field_name
+                            let field =
+                                skip_path.trim().trim_start_matches('`').trim_end_matches('`');
+                            skip_paths.push(field.to_string());
+                        } else if arg.contains(' ')
+                            && !arg.starts_with("max_")
+                            && !arg.starts_with("SKIP")
+                        {
+                            // Handle typed paths: Name String, Age Int64, etc.
+                            let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+                            if parts.len() == 2 {
+                                let path =
+                                    parts[0].trim().trim_start_matches('`').trim_end_matches('`');
+                                let type_str = parts[1].trim();
+                                if let Ok(parsed_type) = Type::from_str(type_str) {
+                                    typed_paths.push((path.to_string(), Box::new(parsed_type)));
+                                } else {
+                                    // If we can't parse the type, silently ignore for
+                                    // compatibility
+                                    // This maintains backward compatibility with unknown types
+                                }
+                            }
+                        } else {
+                            // Silently ignore unrecognized parameters for forward compatibility
+                        }
+                    }
+                    Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_paths }
+                }
+            }
+            "Dynamic" => {
+                if following.is_empty() {
+                    Type::Dynamic { max_types: None }
+                } else {
+                    let args = parse_variable_args(following)?;
+                    let mut max_types = None;
+
+                    for arg in args {
+                        let arg = arg.trim();
+                        if let Some(value_str) = arg.strip_prefix("max_types=") {
+                            let value: u32 = value_str.parse().map_err(|_| {
+                                Error::TypeParseError(format!(
+                                    "Invalid max_types value: '{value_str}'"
+                                ))
+                            })?;
+                            max_types = Some(value);
+                        } else {
+                            return Err(Error::TypeParseError(format!(
+                                "Unknown Dynamic parameter: '{arg}'. Valid parameter is: max_types"
+                            )));
+                        }
+                    }
+                    Type::Dynamic { max_types }
+                }
+            }
             _ => {
                 return Err(Error::TypeParseError(format!("invalid type name: '{ident}'")));
             }
@@ -881,7 +1055,12 @@ mod tests {
             Type::from_str("Map(String, Int32)").unwrap(),
             Type::Map(Box::new(Type::String), Box::new(Type::Int32))
         );
-        assert_eq!(Type::from_str("JSON").unwrap(), Type::JSON);
+        assert_eq!(Type::from_str("JSON").unwrap(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        });
         assert_eq!(Type::from_str("Object").unwrap(), Type::Object);
         assert_eq!(Type::from_str("Json").unwrap(), Type::Object);
 
@@ -951,6 +1130,236 @@ mod tests {
         assert!(Type::from_str("Nested(String)").is_err()); // Unsupported Nested
         assert!(Type::from_str("Int8(").is_err()); // Unclosed paren
         assert!(Type::from_str("Tuple(String,)").is_err()); // Trailing comma
+    }
+
+    /// Tests parsing of parameterized Dynamic and JSON types.
+    #[test]
+    fn test_from_str_parameterized_types() {
+        // Test Dynamic with parameters
+        assert_eq!(Type::from_str("Dynamic").unwrap(), Type::Dynamic { max_types: None });
+        assert_eq!(Type::from_str("Dynamic(max_types=16)").unwrap(), Type::Dynamic {
+            max_types: Some(16),
+        });
+        assert_eq!(Type::from_str("Dynamic(max_types=100)").unwrap(), Type::Dynamic {
+            max_types: Some(100),
+        });
+
+        // Test JSON with parameters
+        assert_eq!(Type::from_str("JSON").unwrap(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        });
+        assert_eq!(Type::from_str("JSON(max_dynamic_paths=16)").unwrap(), Type::JSON {
+            max_dynamic_paths: Some(16),
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        });
+        assert_eq!(Type::from_str("JSON(max_dynamic_types=64)").unwrap(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: Some(64),
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        });
+        assert_eq!(
+            Type::from_str("JSON(max_dynamic_paths=100, max_dynamic_types=32)").unwrap(),
+            Type::JSON {
+                max_dynamic_paths: Some(100),
+                max_dynamic_types: Some(32),
+                typed_paths:       vec![],
+                skip_paths:        vec![],
+            }
+        );
+        assert_eq!(
+            Type::from_str("JSON(max_dynamic_types=32, max_dynamic_paths=100)").unwrap(),
+            Type::JSON {
+                max_dynamic_paths: Some(100),
+                max_dynamic_types: Some(32),
+                typed_paths:       vec![],
+                skip_paths:        vec![],
+            }
+        );
+
+        // Test error cases
+        assert!(Type::from_str("Dynamic(invalid_param=16)").is_err());
+        assert!(Type::from_str("Dynamic(max_types=abc)").is_err());
+        assert!(Type::from_str("JSON(max_dynamic_paths=abc)").is_err());
+        assert!(Type::from_str("JSON(max_dynamic_types=xyz)").is_err());
+
+        // Test typed paths parsing
+        assert_eq!(
+            Type::from_str("JSON(Name String, max_dynamic_paths=100)").unwrap(),
+            Type::JSON {
+                max_dynamic_paths: Some(100),
+                max_dynamic_types: None,
+                typed_paths:       vec![("Name".to_string(), Box::new(Type::String))],
+                skip_paths:        vec![],
+            }
+        );
+        assert_eq!(Type::from_str("JSON(Name String, Age Int64)").unwrap(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![
+                ("Name".to_string(), Box::new(Type::String)),
+                ("Age".to_string(), Box::new(Type::Int64))
+            ],
+            skip_paths:        vec![],
+        });
+
+        // Test skip paths parsing
+        assert_eq!(
+            Type::from_str("JSON(SKIP fake.field, max_dynamic_types=32)").unwrap(),
+            Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: Some(32),
+                typed_paths:       vec![],
+                skip_paths:        vec!["fake.field".to_string()],
+            }
+        );
+        assert_eq!(Type::from_str("JSON(SKIP REGEXP '.*\\.debug')").unwrap(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![".*\\.debug".to_string()],
+        });
+
+        // Test combined typed paths and skip paths
+        assert_eq!(
+            Type::from_str(
+                "JSON(Name String, Age Int64, SKIP REGEXP '.*\\.debug', SKIP temp.field)"
+            )
+            .unwrap(),
+            Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: None,
+                typed_paths:       vec![
+                    ("Name".to_string(), Box::new(Type::String)),
+                    ("Age".to_string(), Box::new(Type::Int64))
+                ],
+                skip_paths:        vec![".*\\.debug".to_string(), "temp.field".to_string()],
+            }
+        );
+    }
+
+    /// Tests parsing of JSON typed paths and skip paths.
+    #[test]
+    fn test_json_typed_and_skip_paths() {
+        // Test basic typed paths
+        let json_type = Type::from_str("JSON(Name String, Age UInt32, Score Float64)").unwrap();
+        if let Type::JSON { typed_paths, skip_paths, .. } = json_type {
+            assert_eq!(typed_paths.len(), 3);
+            assert_eq!(typed_paths[0], ("Name".to_string(), Box::new(Type::String)));
+            assert_eq!(typed_paths[1], ("Age".to_string(), Box::new(Type::UInt32)));
+            assert_eq!(typed_paths[2], ("Score".to_string(), Box::new(Type::Float64)));
+            assert!(skip_paths.is_empty());
+        } else {
+            panic!("Expected JSON type");
+        }
+
+        // Test basic skip paths
+        let json_type = Type::from_str("JSON(SKIP debug.info, SKIP REGEXP '.*\\.temp')").unwrap();
+        if let Type::JSON { typed_paths, skip_paths, .. } = json_type {
+            assert!(typed_paths.is_empty());
+            assert_eq!(skip_paths.len(), 2);
+            assert_eq!(skip_paths[0], "debug.info");
+            assert_eq!(skip_paths[1], ".*\\.temp");
+        } else {
+            panic!("Expected JSON type");
+        }
+
+        // Test complex nested types in typed paths
+        let json_type =
+            Type::from_str("JSON(UserData Nullable(String), Scores Array(Float64))").unwrap();
+        if let Type::JSON { typed_paths, .. } = json_type {
+            assert_eq!(typed_paths.len(), 2);
+            assert_eq!(
+                typed_paths[0],
+                ("UserData".to_string(), Box::new(Type::Nullable(Box::new(Type::String))))
+            );
+            assert_eq!(
+                typed_paths[1],
+                ("Scores".to_string(), Box::new(Type::Array(Box::new(Type::Float64))))
+            );
+        } else {
+            panic!("Expected JSON type");
+        }
+
+        // Test backtick-quoted field names
+        let json_type = Type::from_str("JSON(`user.name` String, `data.count` Int32)").unwrap();
+        if let Type::JSON { typed_paths, .. } = json_type {
+            assert_eq!(typed_paths.len(), 2);
+            assert_eq!(typed_paths[0], ("user.name".to_string(), Box::new(Type::String)));
+            assert_eq!(typed_paths[1], ("data.count".to_string(), Box::new(Type::Int32)));
+        } else {
+            panic!("Expected JSON type");
+        }
+
+        // Test invalid type in typed path should be silently ignored
+        let json_type =
+            Type::from_str("JSON(ValidName String, InvalidType UnknownType, AnotherValid UInt64)")
+                .unwrap();
+        if let Type::JSON { typed_paths, .. } = json_type {
+            // Should only have the valid types
+            assert_eq!(typed_paths.len(), 2);
+            assert_eq!(typed_paths[0], ("ValidName".to_string(), Box::new(Type::String)));
+            assert_eq!(typed_paths[1], ("AnotherValid".to_string(), Box::new(Type::UInt64)));
+        } else {
+            panic!("Expected JSON type");
+        }
+    }
+
+    /// Tests round-trip serialization/parsing of parameterized types.
+    #[test]
+    fn test_round_trip_parameterized_types() {
+        // Test that Display and FromStr are consistent for parameterized types
+        let test_cases = vec![
+            Type::Dynamic { max_types: None },
+            Type::Dynamic { max_types: Some(16) },
+            Type::Dynamic { max_types: Some(100) },
+            Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: None,
+                typed_paths:       vec![],
+                skip_paths:        vec![],
+            },
+            Type::JSON {
+                max_dynamic_paths: Some(16),
+                max_dynamic_types: None,
+                typed_paths:       vec![],
+                skip_paths:        vec![],
+            },
+            Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: Some(64),
+                typed_paths:       vec![],
+                skip_paths:        vec![],
+            },
+            Type::JSON {
+                max_dynamic_paths: Some(100),
+                max_dynamic_types: Some(32),
+                typed_paths:       vec![],
+                skip_paths:        vec![],
+            },
+            Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: None,
+                typed_paths:       vec![("Name".to_string(), Box::new(Type::String))],
+                skip_paths:        vec!["debug.field".to_string()],
+            },
+        ];
+
+        for original_type in test_cases {
+            let type_string = original_type.to_string();
+            let parsed_type = Type::from_str(&type_string)
+                .unwrap_or_else(|e| panic!("Failed to parse '{type_string}': {e}"));
+            assert_eq!(
+                original_type, parsed_type,
+                "Round-trip failed: {} -> {} -> {}",
+                original_type, type_string, parsed_type
+            );
+        }
     }
 
     /// Tests parsing of simple Variant types

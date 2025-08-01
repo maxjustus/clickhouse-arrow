@@ -95,10 +95,10 @@ impl ClickHouseNativeSerializer for Type {
                 Type::Variant(_) => {
                     variant::VariantSerializer::write_prefix(self, writer, state).await?;
                 }
-                Type::Dynamic => {
+                Type::Dynamic { .. } => {
                     dynamic::DynamicSerializer::write_prefix(self, writer, state).await?;
                 }
-                Type::JSON => {
+                Type::JSON { .. } => {
                     json::JsonSerializer::write_prefix(self, writer, state).await?;
                 } /* TODO: Dynamic type not yet implemented
                    * Type::Dynamic(_) => {
@@ -142,11 +142,11 @@ impl ClickHouseNativeSerializer for Type {
                 variant::VariantSerializer::write_sync_prefix(self, writer, state).unwrap();
                 return;
             }
-            Type::Dynamic => {
+            Type::Dynamic { .. } => {
                 dynamic::DynamicSerializer::write_prefix_sync(self, writer, state).unwrap();
                 return;
             }
-            Type::JSON => {
+            Type::JSON { .. } => {
                 json::JsonSerializer::write_prefix_sync(self, writer, state).unwrap();
                 return;
             }

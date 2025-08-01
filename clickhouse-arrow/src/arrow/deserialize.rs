@@ -391,10 +391,10 @@ impl ClickHouseArrowDeserializer for Type {
             Type::Variant(_) => {
                 todo!("Variant deserialization not yet implemented")
             }
-            Type::Dynamic => {
+            Type::Dynamic { .. } => {
                 todo!("Dynamic deserialization not yet implemented")
             }
-            Type::JSON => {
+            Type::JSON { .. } => {
                 todo!("JSON deserialization not yet implemented")
             }
         })
@@ -556,10 +556,10 @@ impl ClickHouseArrowDeserializer for Type {
             (_, Type::Variant(_)) => {
                 todo!("Variant deserialization not yet implemented")
             },
-            (_, Type::Dynamic) => {
+            (_, Type::Dynamic { .. }) => {
                 todo!("Dynamic deserialization not yet implemented")
             },
-            (_, Type::JSON) => {
+            (_, Type::JSON { .. }) => {
                 todo!("JSON deserialization not yet implemented")
             },
             (builder, _) => {

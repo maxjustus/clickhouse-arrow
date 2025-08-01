@@ -383,7 +383,7 @@ pub fn generate_dynamic_test_block() -> Block {
     Block {
         info:         BlockInfo::default(),
         rows:         rows.len() as u64,
-        column_types: vec![("dynamic_col".to_string(), Type::Dynamic)],
+        column_types: vec![("dynamic_col".to_string(), Type::Dynamic { max_types: None })],
         column_data:  rows,
     }
 }
@@ -399,7 +399,47 @@ pub fn generate_json_test_block() -> Block {
     Block {
         info:         BlockInfo::default(),
         rows:         rows.len() as u64,
-        column_types: vec![("json_col".to_string(), Type::JSON)],
+        column_types: vec![("json_col".to_string(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        })],
         column_data:  rows,
+    }
+}
+
+pub fn generate_mixed_dynamic_json_test_block() -> Block {
+    // Use data from both Dynamic and JSON test blocks
+    let dynamic_data = vec![
+        Value::Int32(42),
+        Value::String(b"hello".to_vec()),
+        Value::Float64(std::f64::consts::PI),
+    ];
+
+    let json_data = vec![
+        Value::String(b"{\"id\": 42}".to_vec()),
+        Value::String(b"{\"name\": \"Alice\"}".to_vec()),
+        Value::String(b"{\"score\": 95.5}".to_vec()),
+    ];
+
+    // Column-wise data: all dynamic values first, then all JSON values
+    let mut mixed_data = Vec::new();
+    mixed_data.extend(dynamic_data.clone()); // All Dynamic column values
+    mixed_data.extend(json_data.clone()); // All JSON column values
+
+    Block {
+        info:         BlockInfo::default(),
+        rows:         dynamic_data.len() as u64, // Number of rows
+        column_types: vec![
+            ("dynamic_col".to_string(), Type::Dynamic { max_types: None }),
+            ("json_col".to_string(), Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: None,
+                typed_paths:       vec![],
+                skip_paths:        vec![],
+            }),
+        ],
+        column_data:  mixed_data,
     }
 }

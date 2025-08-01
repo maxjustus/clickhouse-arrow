@@ -70,3 +70,6 @@ dynamic-containers-technical-spec.md
 # Network capture files
 *.pcap
 *.pcapng
+
+# crush files
+.crush

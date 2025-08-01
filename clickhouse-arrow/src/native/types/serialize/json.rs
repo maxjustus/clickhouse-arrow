@@ -355,7 +355,7 @@ impl JsonSerializer {
                 let values: Vec<Value> = values_with_idx.iter().map(|(_, v)| v.clone()).collect();
 
                 // Special handling to avoid recursion - JSON type should not appear here
-                if matches!(typ, Type::JSON) {
+                if matches!(typ, Type::JSON { .. }) {
                     return Err(Error::SerializeError(
                         "JSON type cannot be nested within JSON paths".to_string(),
                     ));
@@ -385,7 +385,7 @@ impl JsonSerializer {
                 let values: Vec<Value> = values_with_idx.iter().map(|(_, v)| v.clone()).collect();
 
                 // Special handling to avoid recursion - JSON type should not appear here
-                if matches!(typ, Type::JSON) {
+                if matches!(typ, Type::JSON { .. }) {
                     return Err(Error::SerializeError(
                         "JSON type cannot be nested within JSON paths".to_string(),
                     ));
@@ -706,7 +706,12 @@ mod tests {
             Value::String(b"{\"name\": \"Bob\", \"age\": 25}".to_vec()),
         ];
 
-        let type_ = Type::JSON;
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        };
         let values_len = values.len();
 
         let mut output = vec![];
@@ -738,7 +743,12 @@ mod tests {
             Value::String(b"{\"user\": {\"name\": \"Bob\"}, \"score\": 95.5}".to_vec()),
         ];
 
-        let type_ = Type::JSON;
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        };
         let values_len = values.len();
 
         let mut output = vec![];
@@ -771,7 +781,12 @@ mod tests {
             Value::String(b"{\"id\": 3, \"score\": 88.1, \"metadata\": \"extra\"}".to_vec()),
         ];
 
-        let type_ = Type::JSON;
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        };
         let values_len = values.len();
 
         let mut output = vec![];
@@ -802,7 +817,12 @@ mod tests {
             Value::String(b"{\"name\": \"Bob\", \"active\": true}".to_vec()),
         ];
 
-        let type_ = Type::JSON;
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        };
         let values_len = values.len();
 
         let mut output = vec![];
@@ -833,7 +853,12 @@ mod tests {
             Value::String(b"{}".to_vec()),
         ];
 
-        let type_ = Type::JSON;
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        };
         let values_len = values.len();
 
         let mut output = vec![];
@@ -865,7 +890,12 @@ mod tests {
             Value::String(b"{\"name\": \"Bob\", \"score\": 95.5}".to_vec()),
         ];
 
-        let type_ = Type::JSON;
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        };
         let values_len = values.len();
 
         let mut output = vec![];
@@ -947,7 +977,12 @@ mod tests {
             ),
         ];
 
-        let type_ = Type::JSON;
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        };
 
         // First analyze the values (this is normally done by Block serialization)
         let type_specific_state = JsonSerializer::analyze_values(&values)?;
@@ -1001,7 +1036,12 @@ mod tests {
             Value::String(b"{\"name\": \"Bob\", \"age\": 25}".to_vec()),
         ];
 
-        let type_ = Type::JSON;
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        };
 
         // Test object serialization (v3 - should decompose into paths)
         let type_specific_state = JsonSerializer::analyze_values(&values)?;
@@ -1063,7 +1103,12 @@ mod tests {
             "Should return Json state"
         );
 
-        let type_ = Type::JSON;
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        };
         let values_len = values.len();
 
         let mut output = vec![];
@@ -1096,7 +1141,12 @@ mod tests {
             ),
         ];
 
-        let type_ = Type::JSON;
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        };
         let values_len = values.len();
         // Test JSON serialization round-trip
 
