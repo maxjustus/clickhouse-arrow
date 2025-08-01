@@ -358,8 +358,8 @@ mod tests {
                 let complex_values = vec![
                     variant!(0, Value::Array(vec![Value::Int32(10), Value::Int32(20)])),
                     variant!(0xFF, Value::Null),
-                    variant!(1, Value::String(b"complex".to_vec())),
-                    variant!(2, Value::Date(Date(20000))),
+                    variant!(2, Value::String(b"complex".to_vec())),
+                    variant!(1, Value::Date(Date(20000))),
                 ];
                 let mut complex_buffer = Vec::new();
                 let mut complex_state = SerializerState::default();
