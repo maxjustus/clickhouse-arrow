@@ -390,6 +390,7 @@ mod tests {
         ($name:ident, $major:expr, $minor:expr, $patch:expr, $should_succeed:expr) => {
             #[tokio::test]
             async fn $name() {
+                println!("Testing scenario: {}", stringify!($name));
                 let values = vec![Value::Int32(42), Value::String(b"test".to_vec())];
                 let mut state = create_test_state(&values);
                 state.server_version = Some(($major, $minor, $patch));
@@ -466,6 +467,7 @@ mod tests {
         ($name:ident, $total_types:expr, $expected_bytes:expr, $description:expr) => {
             #[tokio::test]
             async fn $name() {
+                println!("Testing scenario: {}", stringify!($name));
                 // Test sync discriminator
                 let mut sync_buffer = Vec::new();
                 write_discriminator!(sync &mut sync_buffer, 0, $total_types);
@@ -520,6 +522,7 @@ mod tests {
         ($name:ident, $values:expr, $expected_type_count:expr) => {
             #[tokio::test]
             async fn $name() {
+                println!("Testing scenario: {}", stringify!($name));
                 let values = $values;
 
                 // Test async path

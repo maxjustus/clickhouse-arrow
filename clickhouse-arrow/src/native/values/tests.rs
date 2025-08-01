@@ -21,6 +21,7 @@ macro_rules! test_value_roundtrips {
     () => {
         #[test]
         fn test_all_primitive_value_roundtrips() {
+            println!("Testing scenario: test_all_primitive_value_roundtrips");
             // Unsigned integers
             assert_eq!(0u8, roundtrip(0u8, &Type::UInt8));
             assert_eq!(5u8, roundtrip(5u8, &Type::UInt8));

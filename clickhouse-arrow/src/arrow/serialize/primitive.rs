@@ -964,6 +964,7 @@ mod tests {
         ($name:ident, $hint:expr, $array:expr, $dt:expr, $expected:expr) => {
             #[tokio::test]
             async fn $name() {
+                println!("Testing scenario: {}", stringify!($name));
                 let col = Arc::new($array) as ArrayRef;
                 let expected = $expected;
                 // async

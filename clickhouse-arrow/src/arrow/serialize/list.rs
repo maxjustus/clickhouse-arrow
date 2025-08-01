@@ -247,6 +247,7 @@ mod tests {
         ($name:ident, $type_:expr, $field:expr, $array:expr, $expected:expr) => {
             #[tokio::test]
             async fn $name() {
+                println!("Testing scenario: {}", stringify!($name));
                 let type_ = $type_;
                 let field = $field;
                 let array = Arc::new($array) as ArrayRef;
