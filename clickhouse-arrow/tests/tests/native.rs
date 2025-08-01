@@ -10,6 +10,25 @@ use crate::common::header;
 use crate::common::native_helpers::*;
 use crate::common::version_compat::VersionChecker;
 
+/// Helper function to create a test table with DROP IF EXISTS + CREATE TABLE
+async fn create_test_table(client: &NativeClient, table_name: &str, column_spec: &str, query_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    header(query_id, &format!("Creating table {table_name}"));
+    
+    // Drop table if exists
+    client
+        .execute(&format!("DROP TABLE IF EXISTS {table_name}"), None)
+        .await
+        .expect("drop table failed");
+
+    // Create table
+    client
+        .execute(&format!("CREATE TABLE {table_name} ({column_spec}) ENGINE = Memory"), None)
+        .await
+        .expect("create table failed");
+        
+    Ok(())
+}
+
 /// Helper function to check version and return VersionChecker, or return early if unsupported
 async fn check_version_support(client: &NativeClient, test_name: &str, needs_dynamic: bool, needs_json: bool) -> Option<VersionChecker> {
     let version_check_query = "SELECT version() as version";
@@ -271,16 +290,7 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     header(query_id, "Setting enable_dynamic_type globally");
     client.execute("SET enable_dynamic_type = 1", None).await.expect("set setting failed");
 
-    header(query_id, "Creating table with Dynamic column");
-    client
-        .execute(&format!("DROP TABLE IF EXISTS {table_name}"), None)
-        .await
-        .expect("drop table failed");
-
-    client
-        .execute(&format!("CREATE TABLE {table_name} (dynamic_col Dynamic) ENGINE = Memory"), None)
-        .await
-        .expect("create table failed");
+    create_test_table(&client, table_name, "dynamic_col Dynamic", query_id).await.expect("table creation failed");
 
     header(query_id, "Inserting Dynamic data");
     debug!("Test data: {} rows, column types: {:?}", test_data.rows, test_data.column_types);
@@ -395,16 +405,7 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
     let query_id = "json_test";
     let table_name = "test_json";
 
-    header(query_id, "Creating table with JSON column");
-    client
-        .execute(&format!("DROP TABLE IF EXISTS {table_name}"), None)
-        .await
-        .expect("drop table failed");
-
-    client
-        .execute(&format!("CREATE TABLE {table_name} (json_col JSON) ENGINE = Memory"), None)
-        .await
-        .expect("create table failed");
+    create_test_table(&client, table_name, "json_col JSON", query_id).await.expect("table creation failed");
 
     header(query_id, "Inserting JSON data");
     let insert_query = format!("INSERT INTO {table_name} VALUES");
@@ -537,21 +538,7 @@ pub async fn test_mixed_dynamic_json(ch: Arc<ClickHouseContainer>) {
     header(query_id, "Setting enable_dynamic_type globally");
     client.execute("SET enable_dynamic_type = 1", None).await.expect("set setting failed");
 
-    header(query_id, "Creating table with both Dynamic and JSON columns");
-    client
-        .execute(&format!("DROP TABLE IF EXISTS {table_name}"), None)
-        .await
-        .expect("drop table failed");
-
-    client
-        .execute(
-            &format!(
-                "CREATE TABLE {table_name} (dynamic_col Dynamic, json_col JSON) ENGINE = Memory"
-            ),
-            None,
-        )
-        .await
-        .expect("create table failed");
+    create_test_table(&client, table_name, "dynamic_col Dynamic, json_col JSON", query_id).await.expect("table creation failed");
 
     header(query_id, "Inserting mixed Dynamic and JSON data");
     debug!(
