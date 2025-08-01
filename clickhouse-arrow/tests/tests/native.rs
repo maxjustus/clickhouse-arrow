@@ -4,7 +4,7 @@ use clickhouse_arrow::prelude::*;
 use clickhouse_arrow::test_utils::ClickHouseContainer;
 use clickhouse_arrow::{CompressionMethod, CreateOptions, Result as ClickHouseResult};
 use futures_util::StreamExt;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::common::header;
 use crate::common::native_helpers::*;

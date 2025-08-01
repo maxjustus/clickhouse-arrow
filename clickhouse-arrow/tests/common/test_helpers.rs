@@ -1,4 +1,5 @@
 use clickhouse_arrow::prelude::*;
+use clickhouse_arrow::native::block::Block;
 use futures_util::StreamExt;
 use tracing::warn;
 
@@ -31,10 +32,7 @@ pub async fn create_test_table(client: &NativeClient, table_name: &str, column_s
 }
 
 /// Helper function to insert test data into a table
-pub async fn insert_test_data<T>(client: &NativeClient, table_name: &str, data: T, query_id: &str) -> Result<(), Box<dyn std::error::Error>> 
-where
-    T: Send,
-{
+pub async fn insert_test_data(client: &NativeClient, table_name: &str, data: Block, query_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     header(query_id, "Inserting test data");
     let insert_query = format!("INSERT INTO {table_name} VALUES");
     let mut stream = client.insert(&insert_query, data, None).await.expect("insert failed");
