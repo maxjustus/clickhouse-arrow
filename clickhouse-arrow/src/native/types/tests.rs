@@ -41,87 +41,99 @@ fn roundtrip_values_sync(type_: &Type, values: &[Value]) -> Result<Vec<Value>> {
     Ok(deserialized)
 }
 
-/// Macro to generate comprehensive roundtrip tests for all primitive types
-/// Eliminates 600+ lines of repetitive test functions while maintaining identical coverage
-macro_rules! test_primitive_roundtrips {
-    () => {
-        #[tokio::test]
-        async fn test_all_primitive_roundtrips() {
-            let test_cases = vec![
-                // Unsigned integers
-                (Type::UInt8, vec![Value::UInt8(12), Value::UInt8(24), Value::UInt8(30)]),
-                (Type::UInt16, vec![Value::UInt16(12), Value::UInt16(24), Value::UInt16(30000)]),
-                (Type::UInt32, vec![Value::UInt32(12), Value::UInt32(24), Value::UInt32(900_000)]),
-                (Type::UInt64, vec![Value::UInt64(12), Value::UInt64(24), Value::UInt64(9_000_000_000)]),
-                (Type::UInt128, vec![Value::UInt128(12), Value::UInt128(24), Value::UInt128(9_000_000_000_u128 * 9_000_000_000)]),
-                (Type::UInt256, vec![Value::UInt256(u256([0u8; 32])), Value::UInt256(u256([7u8; 32]))]),
-                
-                // Signed integers
-                (Type::Int8, vec![Value::Int8(12), Value::Int8(24), Value::Int8(30), Value::Int8(-30)]),
-                (Type::Int16, vec![Value::Int16(12), Value::Int16(24), Value::Int16(30000), Value::Int16(-30000)]),
-                (Type::Int32, vec![Value::Int32(12), Value::Int32(24), Value::Int32(900_000), Value::Int32(-900_000)]),
-                (Type::Int64, vec![Value::Int64(12), Value::Int64(24), Value::Int64(9_000_000_000), Value::Int64(-9_000_000_000)]),
-                (Type::Int128, vec![Value::Int128(12), Value::Int128(24), Value::Int128(9_000_000_000_i128 * 9_000_000_000)]),
-                (Type::Int256, vec![Value::Int256(i256([0u8; 32])), Value::Int256(i256([7u8; 32]))]),
-                
-                // Floats
-                (Type::Float32, vec![Value::Float32(1.0), Value::Float32(0.0), Value::Float32(100.0), Value::Float32(-100.0)]),
-                (Type::Float64, vec![Value::Float64(1.0), Value::Float64(0.0), Value::Float64(100_000.0), Value::Float64(-1_000_000.0)]),
-                
-                // Decimals
-                (Type::Decimal32(5), vec![Value::Decimal32(5, 12), Value::Decimal32(5, 24), Value::Decimal32(5, -900_000)]),
-                (Type::Decimal64(5), vec![Value::Decimal64(5, 12), Value::Decimal64(5, 9_000_000_000), Value::Decimal64(5, -9_000_000_000)]),
-                (Type::Decimal128(5), vec![Value::Decimal128(5, 12), Value::Decimal128(5, 9_000_000_000_i128 * 9_000_000_000)]),
-                (Type::Decimal256(5), vec![Value::Decimal256(5, i256([0u8; 32])), Value::Decimal256(5, i256([7u8; 32]))]),
-                
-                // Strings
-                (Type::String, vec![Value::string(""), Value::string("test"), Value::string("日本語")]),
-            ];
-            
-            for (type_, values) in test_cases {
-                let result = roundtrip_values(&type_, &values).await.unwrap();
-                assert_eq!(values, result, "Roundtrip failed for type: {:?}", type_);
-            }
-        }
-        
-        #[tokio::test]
-        async fn test_nullable_types() {
-            let nullable_cases = vec![
-                (Type::Nullable(Box::new(Type::UInt32)), vec![Value::UInt32(35), Value::Null, Value::UInt32(120)]),
-                (Type::Nullable(Box::new(Type::String)), vec![Value::string("test"), Value::Null, Value::string("hello")]),
-                (Type::Nullable(Box::new(Type::Float64)), vec![Value::Float64(1.5), Value::Null, Value::Float64(-3.14)]),
-            ];
-            
-            for (type_, values) in nullable_cases {
-                let result = roundtrip_values(&type_, &values).await.unwrap();
-                assert_eq!(values, result, "Nullable roundtrip failed for type: {:?}", type_);
-            }
-        }
-        
-        #[tokio::test]
-        async fn test_date_time_types() {
-            use chrono::NaiveDate;
-            let date_cases = vec![
-                (Type::Date, vec![Value::Date(Date::from(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()))]),
-                (Type::Date32, vec![Value::Date32(Date32::from(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()))]),
-                (Type::DateTime(Tz::UTC), vec![Value::DateTime(DateTime(Tz::UTC, 0))]),
-            ];
-            
-            for (type_, values) in date_cases {
-                let result = roundtrip_values(&type_, &values).await.unwrap();
-                assert_eq!(values, result, "DateTime roundtrip failed for type: {:?}", type_);
-            }
-        }
-    };
+#[tokio::test]
+async fn test_uint_roundtrips() {
+    let cases = vec![
+        (Type::UInt8, vec![Value::UInt8(12), Value::UInt8(24), Value::UInt8(30)]),
+        (Type::UInt16, vec![Value::UInt16(12), Value::UInt16(24), Value::UInt16(30000)]),
+        (Type::UInt32, vec![Value::UInt32(12), Value::UInt32(24), Value::UInt32(900_000)]),
+        (Type::UInt64, vec![Value::UInt64(12), Value::UInt64(24), Value::UInt64(9_000_000_000)]),
+        (Type::UInt128, vec![Value::UInt128(12), Value::UInt128(24), Value::UInt128(9_000_000_000_u128 * 9_000_000_000)]),
+        (Type::UInt256, vec![Value::UInt256(u256([0u8; 32])), Value::UInt256(u256([7u8; 32]))]),
+    ];
+    for (type_, values) in cases {
+        let result = roundtrip_values(&type_, &values).await.unwrap();
+        assert_eq!(values, result, "UInt roundtrip failed for type: {:?}", type_);
+    }
 }
 
-test_primitive_roundtrips!();
+#[tokio::test]
+async fn test_int_roundtrips() {
+    let cases = vec![
+        (Type::Int8, vec![Value::Int8(12), Value::Int8(24), Value::Int8(30), Value::Int8(-30)]),
+        (Type::Int16, vec![Value::Int16(12), Value::Int16(24), Value::Int16(30000), Value::Int16(-30000)]),
+        (Type::Int32, vec![Value::Int32(12), Value::Int32(24), Value::Int32(900_000), Value::Int32(-900_000)]),
+        (Type::Int64, vec![Value::Int64(12), Value::Int64(24), Value::Int64(9_000_000_000), Value::Int64(-9_000_000_000)]),
+        (Type::Int128, vec![Value::Int128(12), Value::Int128(24), Value::Int128(9_000_000_000_i128 * 9_000_000_000)]),
+        (Type::Int256, vec![Value::Int256(i256([0u8; 32])), Value::Int256(i256([7u8; 32]))]),
+    ];
+    for (type_, values) in cases {
+        let result = roundtrip_values(&type_, &values).await.unwrap();
+        assert_eq!(values, result, "Int roundtrip failed for type: {:?}", type_);
+    }
+}
 
-// All primitive roundtrip tests have been consolidated into the test_primitive_roundtrips! macro above
+#[tokio::test]
+async fn test_float_roundtrips() {
+    let cases = vec![
+        (Type::Float32, vec![Value::Float32(1.0), Value::Float32(0.0), Value::Float32(100.0), Value::Float32(-100.0)]),
+        (Type::Float64, vec![Value::Float64(1.0), Value::Float64(0.0), Value::Float64(100_000.0), Value::Float64(-1_000_000.0)]),
+    ];
+    for (type_, values) in cases {
+        let result = roundtrip_values(&type_, &values).await.unwrap();
+        assert_eq!(values, result, "Float roundtrip failed for type: {:?}", type_);
+    }
+}
 
+#[tokio::test]
+async fn test_decimal_roundtrips() {
+    let cases = vec![
+        (Type::Decimal32(5), vec![Value::Decimal32(5, 12), Value::Decimal32(5, 24), Value::Decimal32(5, -900_000)]),
+        (Type::Decimal64(5), vec![Value::Decimal64(5, 12), Value::Decimal64(5, 9_000_000_000), Value::Decimal64(5, -9_000_000_000)]),
+        (Type::Decimal128(5), vec![Value::Decimal128(5, 12), Value::Decimal128(5, 9_000_000_000_i128 * 9_000_000_000)]),
+        (Type::Decimal256(5), vec![Value::Decimal256(5, i256([0u8; 32])), Value::Decimal256(5, i256([7u8; 32]))]),
+    ];
+    for (type_, values) in cases {
+        let result = roundtrip_values(&type_, &values).await.unwrap();
+        assert_eq!(values, result, "Decimal roundtrip failed for type: {:?}", type_);
+    }
+}
 
-// Removed 270+ lines of repetitive primitive roundtrip tests
-// All basic primitive type testing is now handled by the consolidated macro above
+#[tokio::test]
+async fn test_string_roundtrips() {
+    let values = vec![Value::string(""), Value::string("test"), Value::string("日本語")];
+    let result = roundtrip_values(&Type::String, &values).await.unwrap();
+    assert_eq!(values, result, "String roundtrip failed");
+}
+
+#[tokio::test]
+async fn test_nullable_types() {
+    let nullable_cases = vec![
+        (Type::Nullable(Box::new(Type::UInt32)), vec![Value::UInt32(35), Value::Null, Value::UInt32(120)]),
+        (Type::Nullable(Box::new(Type::String)), vec![Value::string("test"), Value::Null, Value::string("hello")]),
+        (Type::Nullable(Box::new(Type::Float64)), vec![Value::Float64(1.5), Value::Null, Value::Float64(-3.14)]),
+    ];
+    
+    for (type_, values) in nullable_cases {
+        let result = roundtrip_values(&type_, &values).await.unwrap();
+        assert_eq!(values, result, "Nullable roundtrip failed for type: {:?}", type_);
+    }
+}
+
+#[tokio::test]
+async fn test_date_time_types() {
+    use chrono::NaiveDate;
+    let date_cases = vec![
+        (Type::Date, vec![Value::Date(Date::from(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()))]),
+        (Type::Date32, vec![Value::Date32(Date32::from(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()))]),
+        (Type::DateTime(Tz::UTC), vec![Value::DateTime(DateTime(Tz::UTC, 0))]),
+    ];
+    
+    for (type_, values) in date_cases {
+        let result = roundtrip_values(&type_, &values).await.unwrap();
+        assert_eq!(values, result, "DateTime roundtrip failed for type: {:?}", type_);
+    }
+}
 
 #[tokio::test]
 async fn roundtrip_enum8() {

@@ -723,7 +723,8 @@ mod tests {
             Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
             Value::String(b"{\"name\": \"Bob\", \"age\": 25}".to_vec()),
         ];
-        let _ = test_json_roundtrip(values).await?;
+        let deserialized = test_json_roundtrip(values.clone()).await?;
+        assert_eq!(deserialized.len(), values.len());
         Ok(())
     }
 
@@ -735,7 +736,8 @@ mod tests {
             ),
             Value::String(b"{\"user\": {\"name\": \"Bob\"}, \"score\": 95.5}".to_vec()),
         ];
-        let _ = test_json_roundtrip(values).await?;
+        let deserialized = test_json_roundtrip(values.clone()).await?;
+        assert_eq!(deserialized.len(), values.len());
         Ok(())
     }
 
@@ -748,7 +750,8 @@ mod tests {
             Value::String(b"{\"id\": 2, \"name\": \"example\", \"active\": false}".to_vec()),
             Value::String(b"{\"id\": 3, \"score\": 88.1, \"metadata\": \"extra\"}".to_vec()),
         ];
-        let _ = test_json_roundtrip(values).await?;
+        let deserialized = test_json_roundtrip(values.clone()).await?;
+        assert_eq!(deserialized.len(), values.len());
         Ok(())
     }
 
@@ -759,7 +762,8 @@ mod tests {
             Value::Null,
             Value::String(b"{\"name\": \"Bob\", \"active\": true}".to_vec()),
         ];
-        let _ = test_json_roundtrip(values).await?;
+        let deserialized = test_json_roundtrip(values.clone()).await?;
+        assert_eq!(deserialized.len(), values.len());
         Ok(())
     }
 
@@ -770,7 +774,8 @@ mod tests {
             Value::String(b"{\"name\": \"test\"}".to_vec()),
             Value::String(b"{}".to_vec()),
         ];
-        let _ = test_json_roundtrip(values).await?;
+        let deserialized = test_json_roundtrip(values.clone()).await?;
+        assert_eq!(deserialized.len(), values.len());
         Ok(())
     }
 
@@ -897,7 +902,8 @@ mod tests {
             "Should return Json state"
         );
 
-        let _ = test_json_roundtrip(values).await?;
+        let deserialized = test_json_roundtrip(values.clone()).await?;
+        assert_eq!(deserialized.len(), values.len());
         Ok(())
     }
 
