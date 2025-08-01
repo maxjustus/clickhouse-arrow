@@ -556,23 +556,28 @@ fn test_value_justify_null_ref() {
 }
 
 #[test]
-fn test_value_guess_type_comprehensive() {
-    // Test all basic types
+fn test_value_guess_type_basic_types() {
     assert_eq!(Value::Int8(42).guess_type(), Type::Int8);
     assert_eq!(Value::UInt64(42).guess_type(), Type::UInt64);
     assert_eq!(Value::Float32(1.0).guess_type(), Type::Float32);
     assert_eq!(Value::String(b"test".to_vec()).guess_type(), Type::String);
     assert_eq!(Value::Null.guess_type(), Type::Nullable(Box::new(Type::String)));
+}
 
-    // Test decimal types preserve precision
+#[test]
+fn test_value_guess_type_decimal_precision() {
     assert_eq!(Value::Decimal32(3, 123).guess_type(), Type::Decimal32(3));
     assert_eq!(Value::Decimal64(5, 12345).guess_type(), Type::Decimal64(5));
+}
 
-    // Test datetime types
+#[test]
+fn test_value_guess_type_datetime() {
     let dt = DateTime(UTC, 1_234_567_890);
     assert_eq!(Value::DateTime(dt).guess_type(), Type::DateTime(UTC));
+}
 
-    // Test enum types
+#[test]
+fn test_value_guess_type_enums() {
     assert_eq!(
         Value::Enum8("test".to_string(), 42).guess_type(),
         Type::Enum8(vec![(String::new(), 42)])
@@ -581,20 +586,26 @@ fn test_value_guess_type_comprehensive() {
         Value::Enum16("test".to_string(), -1).guess_type(),
         Type::Enum16(vec![(String::new(), -1)])
     );
+}
 
-    // Test array type inference
+#[test]
+fn test_value_guess_type_arrays() {
     let array_int = Value::Array(vec![Value::Int32(1), Value::Int32(2)]);
     assert_eq!(array_int.guess_type(), Type::Array(Box::new(Type::Int32)));
 
     // Test empty array defaults to String
     let empty_array = Value::Array(vec![]);
     assert_eq!(empty_array.guess_type(), Type::Array(Box::new(Type::String)));
+}
 
-    // Test tuple type inference
+#[test]
+fn test_value_guess_type_tuples() {
     let tuple = Value::Tuple(vec![Value::Int32(1), Value::String(b"test".to_vec())]);
     assert_eq!(tuple.guess_type(), Type::Tuple(vec![Type::Int32, Type::String]));
+}
 
-    // Test map type inference
+#[test]
+fn test_value_guess_type_maps() {
     let map = Value::Map(vec![Value::String(b"key".to_vec())], vec![Value::Int32(42)]);
     assert_eq!(map.guess_type(), Type::Map(Box::new(Type::String), Box::new(Type::Int32)));
 
@@ -604,16 +615,19 @@ fn test_value_guess_type_comprehensive() {
 }
 
 #[test]
-fn test_escape_string_comprehensive() {
-    // Test escape_string functionality indirectly through Value::String display
-    // since escape_string is a private helper function that takes a formatter
-
-    // Test basic string
+fn test_escape_string_basic() {
+    // Test basic string without special characters
     assert_eq!(Value::String(b"hello".to_vec()).to_string(), "'hello'");
+}
 
-    // Test all escape sequences
+#[test]
+fn test_escape_string_backslash_and_quote() {
     assert_eq!(Value::String(b"\\".to_vec()).to_string(), "'\\\\'");
     assert_eq!(Value::String(b"'".to_vec()).to_string(), "'\\''");
+}
+
+#[test]
+fn test_escape_string_control_characters() {
     assert_eq!(Value::String(b"\x08".to_vec()).to_string(), "'\\b'"); // backspace
     assert_eq!(Value::String(b"\x0C".to_vec()).to_string(), "'\\f'"); // form feed
     assert_eq!(Value::String(b"\r".to_vec()).to_string(), "'\\r'");
@@ -622,14 +636,22 @@ fn test_escape_string_comprehensive() {
     assert_eq!(Value::String(b"\0".to_vec()).to_string(), "'\\0'");
     assert_eq!(Value::String(b"\x07".to_vec()).to_string(), "'\\a'"); // bell
     assert_eq!(Value::String(b"\x0B".to_vec()).to_string(), "'\\v'"); // vertical tab
+}
 
+#[test]
+fn test_escape_string_high_bytes() {
     // Test high bytes (non-ASCII)
     assert_eq!(Value::String(vec![0xFF]).to_string(), "'\\xFF'");
     assert_eq!(Value::String(vec![0x80, 0x81]).to_string(), "'\\x80\\x81'");
+}
 
-    // Test mixed content
+#[test]
+fn test_escape_string_mixed_content() {
     assert_eq!(Value::String(b"hello\nworld\t!".to_vec()).to_string(), "'hello\\nworld\\t!'");
+}
 
+#[test]
+fn test_escape_string_unicode() {
     // Test unicode emoji (should be escaped as bytes)
     assert_eq!(Value::String("🎉".as_bytes().to_vec()).to_string(), "'\\xF0\\x9F\\x8E\\x89'");
 }
