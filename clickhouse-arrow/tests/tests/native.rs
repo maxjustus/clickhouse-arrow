@@ -10,6 +10,28 @@ use crate::common::header;
 use crate::common::native_helpers::*;
 use crate::common::version_compat::VersionChecker;
 
+/// Helper function to check version and return VersionChecker, or return early if unsupported
+async fn check_version_support(client: &NativeClient, test_name: &str, needs_dynamic: bool, needs_json: bool) -> Option<VersionChecker> {
+    let version_check_query = "SELECT version() as version";
+    let mut stream = client.query::<VersionRow>(version_check_query, None).await.expect("version query failed");
+    
+    if let Some(Ok(row)) = stream.next().await {
+        let version_checker = VersionChecker::new(Some(&row.version));
+        version_checker.log_compatibility_info();
+        
+        if needs_dynamic && !version_checker.require_dynamic_support(test_name) {
+            return None;
+        }
+        if needs_json && !version_checker.require_json_support(test_name) {
+            return None;
+        }
+        Some(version_checker)
+    } else {
+        warn!("Could not determine ClickHouse version, skipping {}", test_name);
+        None
+    }
+}
+
 // Helper struct for version query
 #[derive(Debug, Clone, Row)]
 struct VersionRow {
@@ -231,25 +253,13 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     let client: NativeClient = builder.build().await.expect("Building client");
 
     // Check if the server supports Dynamic type
-    let version_check_query = "SELECT version() as version";
-    let mut stream =
-        client.query::<VersionRow>(version_check_query, None).await.expect("version query failed");
-
-    let _version_checker = if let Some(Ok(row)) = stream.next().await {
-        let version_checker = VersionChecker::new(Some(&row.version));
-        version_checker.log_compatibility_info();
-
-        if !version_checker.require_dynamic_support("Dynamic type test") {
-            return;
-        }
-
-        // Log the actual format we'll be using
-        debug!("Using Dynamic format version: {}", if should_use_v3 { "v3" } else { "v1/v2" });
-        version_checker
-    } else {
-        warn!("Could not determine ClickHouse version, skipping Dynamic type test");
-        return;
+    let _version_checker = match check_version_support(&client, "Dynamic type test", true, false).await {
+        Some(checker) => checker,
+        None => return,
     };
+    
+    // Log the actual format we'll be using
+    debug!("Using Dynamic format version: {}", if should_use_v3 { "v3" } else { "v1/v2" });
 
     // Test Dynamic type with direct block operations
     let test_data = generate_dynamic_test_block();
@@ -373,21 +383,9 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
     let client: NativeClient = builder.build().await.expect("Building client");
 
     // Check if the server supports JSON type
-    let version_check_query = "SELECT version() as version";
-    let mut stream =
-        client.query::<VersionRow>(version_check_query, None).await.expect("version query failed");
-
-    let _version_checker = if let Some(Ok(row)) = stream.next().await {
-        let version_checker = VersionChecker::new(Some(&row.version));
-        version_checker.log_compatibility_info();
-
-        if !version_checker.require_json_support("JSON type test") {
-            return;
-        }
-        version_checker
-    } else {
-        warn!("Could not determine ClickHouse version, skipping JSON type test");
-        return;
+    let _version_checker = match check_version_support(&client, "JSON type test", false, true).await {
+        Some(checker) => checker,
+        None => return,
     };
 
     // Test JSON type with direct block operations
@@ -521,24 +519,9 @@ pub async fn test_mixed_dynamic_json(ch: Arc<ClickHouseContainer>) {
     let client: NativeClient = builder.build().await.expect("Building client");
 
     // Check if the server supports both Dynamic and JSON types
-    let version_check_query = "SELECT version() as version";
-    let mut stream =
-        client.query::<VersionRow>(version_check_query, None).await.expect("version query failed");
-
-    let _version_checker = if let Some(Ok(row)) = stream.next().await {
-        let version_checker = VersionChecker::new(Some(&row.version));
-        version_checker.log_compatibility_info();
-
-        if !version_checker.require_dynamic_support("Mixed Dynamic/JSON test") {
-            return;
-        }
-        if !version_checker.require_json_support("Mixed Dynamic/JSON test") {
-            return;
-        }
-        version_checker
-    } else {
-        warn!("Could not determine ClickHouse version, skipping mixed Dynamic/JSON test");
-        return;
+    let _version_checker = match check_version_support(&client, "Mixed Dynamic/JSON test", true, true).await {
+        Some(checker) => checker,
+        None => return,
     };
 
     // Generate test data with both Dynamic and JSON columns
