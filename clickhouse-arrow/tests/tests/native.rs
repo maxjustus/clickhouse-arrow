@@ -29,6 +29,31 @@ async fn create_test_table(client: &NativeClient, table_name: &str, column_spec:
     Ok(())
 }
 
+/// Helper function to insert test data into a table
+async fn insert_test_data<T>(client: &NativeClient, table_name: &str, data: T, query_id: &str) -> Result<(), Box<dyn std::error::Error>> 
+where
+    T: Send,
+{
+    header(query_id, "Inserting test data");
+    let insert_query = format!("INSERT INTO {table_name} VALUES");
+    let mut stream = client.insert(&insert_query, data, None).await.expect("insert failed");
+
+    while let Some(result) = stream.next().await {
+        result.expect("insert stream failed");
+    }
+    Ok(())
+}
+
+/// Helper function to drop a test table with logging
+async fn drop_test_table(client: &NativeClient, table_name: &str, query_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    header(query_id, &format!("Dropping table {table_name}"));
+    client
+        .execute(&format!("DROP TABLE {table_name}"), None)
+        .await
+        .expect("drop table failed");
+    Ok(())
+}
+
 /// Helper function to check version and return VersionChecker, or return early if unsupported
 async fn check_version_support(client: &NativeClient, test_name: &str, needs_dynamic: bool, needs_json: bool) -> Option<VersionChecker> {
     let version_check_query = "SELECT version() as version";
@@ -292,14 +317,8 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
 
     create_test_table(&client, table_name, "dynamic_col Dynamic", query_id).await.expect("table creation failed");
 
-    header(query_id, "Inserting Dynamic data");
     debug!("Test data: {} rows, column types: {:?}", test_data.rows, test_data.column_types);
-    let insert_query = format!("INSERT INTO {table_name} VALUES");
-    let mut stream = client.insert(&insert_query, test_data, None).await.expect("insert failed");
-
-    while let Some(result) = stream.next().await {
-        result.expect("insert stream failed");
-    }
+    insert_test_data(&client, table_name, test_data, query_id).await.expect("insert failed");
 
     header(query_id, "Checking row count");
     let count_query = format!("SELECT count() FROM {table_name}");
@@ -347,11 +366,7 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
         assert_eq!(expected, received, "Value mismatch at index {i}");
     }
 
-    header(query_id, format!("Dropping table {table_name}"));
-    client
-        .execute(&format!("DROP TABLE {table_name}"), None)
-        .await
-        .expect("drop table failed");
+    drop_test_table(&client, table_name, query_id).await.expect("drop table failed");
 
     header(query_id, "Dynamic type test completed successfully");
 }
@@ -407,13 +422,7 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
 
     create_test_table(&client, table_name, "json_col JSON", query_id).await.expect("table creation failed");
 
-    header(query_id, "Inserting JSON data");
-    let insert_query = format!("INSERT INTO {table_name} VALUES");
-    let mut stream = client.insert(&insert_query, test_data, None).await.expect("insert failed");
-
-    while let Some(result) = stream.next().await {
-        result.expect("insert stream failed");
-    }
+    insert_test_data(&client, table_name, test_data, query_id).await.expect("insert failed");
 
     header(query_id, "Checking row count");
     let count_query = format!("SELECT count() FROM {table_name}");
@@ -469,11 +478,7 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
         assert_eq!(expected_json, received_json, "JSON value mismatch at index {i}");
     }
 
-    header(query_id, format!("Dropping table {table_name}"));
-    client
-        .execute(&format!("DROP TABLE {table_name}"), None)
-        .await
-        .expect("drop table failed");
+    drop_test_table(&client, table_name, query_id).await.expect("drop table failed");
 
     header(query_id, "JSON type test completed successfully");
 }
@@ -540,18 +545,11 @@ pub async fn test_mixed_dynamic_json(ch: Arc<ClickHouseContainer>) {
 
     create_test_table(&client, table_name, "dynamic_col Dynamic, json_col JSON", query_id).await.expect("table creation failed");
 
-    header(query_id, "Inserting mixed Dynamic and JSON data");
     debug!(
         "Test data: {} rows, column types: {:?}",
         mixed_test_block.rows, mixed_test_block.column_types
     );
-    let insert_query = format!("INSERT INTO {table_name} VALUES");
-    let mut stream =
-        client.insert(&insert_query, mixed_test_block, None).await.expect("insert failed");
-
-    while let Some(result) = stream.next().await {
-        result.expect("insert stream failed");
-    }
+    insert_test_data(&client, table_name, mixed_test_block, query_id).await.expect("insert failed");
 
     header(query_id, "Checking row count");
     let count_query = format!("SELECT count() FROM {table_name}");
@@ -606,11 +604,7 @@ pub async fn test_mixed_dynamic_json(ch: Arc<ClickHouseContainer>) {
         assert_eq!(expected_json_value, received_json_value, "JSON value mismatch at index {i}");
     }
 
-    header(query_id, format!("Dropping table {table_name}"));
-    client
-        .execute(&format!("DROP TABLE {table_name}"), None)
-        .await
-        .expect("drop table failed");
+    drop_test_table(&client, table_name, query_id).await.expect("drop table failed");
 
     header(
         query_id,
