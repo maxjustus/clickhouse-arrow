@@ -960,53 +960,146 @@ mod tests {
 
     type MockWriter = Vec<u8>;
 
-    #[tokio::test]
-    async fn test_serialize_int8() {
-        let column = Arc::new(Int8Array::from(vec![1, -2, 0])) as ArrayRef;
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Int8, &mut writer, &column, &DataType::Int8).await.unwrap();
-        let expected = vec![1, 254, 0]; // -2 = 254 in u8
-        assert_eq!(writer, expected);
+    macro_rules! primitive_test {
+        ($name:ident, $hint:expr, $array:expr, $dt:expr, $expected:expr) => {
+            #[tokio::test]
+            async fn $name() {
+                let col = Arc::new($array) as ArrayRef;
+                let expected = $expected;
+                // async
+                let mut w = MockWriter::new();
+                serialize_async(&$hint, &mut w, &col, &$dt).await.unwrap();
+                assert_eq!(w, expected);
+                // sync
+                let mut w2 = Vec::new();
+                serialize(&$hint, &mut w2, &col, &$dt).unwrap();
+                assert_eq!(w2, expected);
+            }
+        };
     }
+
+    /// Helper macro to test both sync and async serialize functions with identical inputs
+    /// Returns (sync_result, async_result, sync_writer, async_writer) for flexible assertions
+    macro_rules! test_both_serialize {
+        ($type:expr, $column:expr, $data_type:expr) => {{
+            // Test async
+            let mut async_writer = MockWriter::new();
+            let async_result =
+                serialize_async(&$type, &mut async_writer, &$column, &$data_type).await;
+
+            // Test sync
+            let mut sync_writer = MockWriter::new();
+            let sync_result = serialize(&$type, &mut sync_writer, &$column, &$data_type);
+
+            (sync_result, async_result, sync_writer, async_writer)
+        }};
+    }
+
+    primitive_test!(
+        test_serialize_int8,
+        Type::Int8,
+        Int8Array::from(vec![1, -2, 0]),
+        DataType::Int8,
+        vec![1, 254, 0] // -2 = 254 in u8
+    );
+
+    primitive_test!(
+        test_serialize_float32,
+        Type::Float32,
+        Float32Array::from(vec![1.5, -2.0, 0.0]),
+        DataType::Float32,
+        vec![
+            0, 0, 192, 63, // 1.5 (0x3FC00000)
+            0, 0, 0, 192, // -2.0 (0xC0000000)
+            0, 0, 0, 0, // 0.0 (0x00000000)
+        ]
+    );
+
+    primitive_test!(
+        test_serialize_float64,
+        Type::Float64,
+        Float64Array::from(vec![1.5, -2.0, 0.0]),
+        DataType::Float64,
+        vec![
+            0, 0, 0, 0, 0, 0, 248, 63, // 1.5 (0x3FF8000000000000)
+            0, 0, 0, 0, 0, 0, 0, 192, // -2.0 (0xC000000000000000)
+            0, 0, 0, 0, 0, 0, 0, 0, // 0.0 (0x0000000000000000)
+        ]
+    );
+
+    primitive_test!(
+        test_serialize_decimal128,
+        Type::Decimal128(0),
+        Decimal128Array::from(vec![0, 1]),
+        DataType::Decimal128(38, 0),
+        vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 0
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 1
+        ]
+    );
+
+    primitive_test!(
+        test_serialize_date,
+        Type::Date,
+        Date32Array::from(vec![0, 1]), // 1970-01-01, 1970-01-02
+        DataType::Date32,
+        vec![0, 0, 1, 0] // 0, 1 (u16 LE)
+    );
+
+    primitive_test!(
+        test_serialize_uint8,
+        Type::UInt8,
+        UInt8Array::from(vec![0, u8::MAX, 42]),
+        DataType::UInt8,
+        vec![0, 255, 42]
+    );
+
+    primitive_test!(
+        test_serialize_int32,
+        Type::Int32,
+        Int32Array::from(vec![1, -2, 0]),
+        DataType::Int32,
+        vec![1, 0, 0, 0, 254, 255, 255, 255, 0, 0, 0, 0] // -2 = 0xFFFF_FFFE
+    );
 
     #[tokio::test]
     async fn test_serialize_int8_min_max() {
         let column = Arc::new(Int8Array::from(vec![i8::MIN, i8::MAX, 0])) as ArrayRef;
         let field = Field::new("int", DataType::Int8, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Int8, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Int8, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![128, 127, 0]; // i8::MIN = -128, i8::MAX = 127
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_uint8_bool() {
         let column = Arc::new(BooleanArray::from(vec![true, false, true])) as ArrayRef;
         let field = Field::new("bool", DataType::Boolean, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::UInt8, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::UInt8, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![1, 0, 1];
-        assert_eq!(writer, expected);
-    }
-
-    #[tokio::test]
-    async fn test_serialize_uint8() {
-        let column = Arc::new(UInt8Array::from(vec![0, u8::MAX, 42])) as ArrayRef;
-        let field = Field::new("uint", DataType::UInt8, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::UInt8, &mut writer, &column, field.data_type()).await.unwrap();
-        let expected = vec![0, 255, 42];
-        assert_eq!(writer, expected);
-    }
-
-    #[tokio::test]
-    async fn test_serialize_int32() {
-        let column = Arc::new(Int32Array::from(vec![1, -2, 0])) as ArrayRef;
-        let field = Field::new("int", DataType::Int32, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Int32, &mut writer, &column, field.data_type()).await.unwrap();
-        let expected = vec![1, 0, 0, 0, 254, 255, 255, 255, 0, 0, 0, 0]; // -2 = 0xFFFF_FFFE
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1022,14 +1115,24 @@ mod tests {
             .unwrap(),
         ) as ArrayRef;
         let field = Field::new("int", DataType::FixedSizeBinary(16), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Int128, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Int128, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             123, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 123
             56, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
             255, // -456
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1038,18 +1141,26 @@ mod tests {
             FixedSizeBinaryArray::try_from_iter(vec![&[0_u8; 17] as &[u8]].into_iter()).unwrap(),
         ) as ArrayRef;
         let field = Field::new("int", DataType::FixedSizeBinary(16), false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::Int128, &mut writer, &column, field.data_type()).await;
-        assert!(result.is_err());
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::Int128, column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
     }
 
     #[tokio::test]
     async fn test_serialize_int128_binary_invalid() {
         let column = Arc::new(BinaryArray::from(vec![Some(&[0_u8; 17] as &[u8])])) as ArrayRef;
         let field = Field::new("int", DataType::Binary, false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::Int128, &mut writer, &column, field.data_type()).await;
-        assert!(result.is_err());
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::Int128, column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
     }
 
     #[tokio::test]
@@ -1061,78 +1172,43 @@ mod tests {
             .unwrap(),
         ) as ArrayRef;
         let field = Field::new("int", DataType::FixedSizeBinary(32), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Int256, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Int256, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // Upper 16 bytes (0)
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 123, // Lower 16 bytes (123)
         ];
-        assert_eq!(writer, expected);
-    }
-
-    #[tokio::test]
-    async fn test_serialize_float32() {
-        let column = Arc::new(Float32Array::from(vec![1.5, -2.0, 0.0])) as ArrayRef;
-        let field = Field::new("float", DataType::Float32, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Float32, &mut writer, &column, field.data_type()).await.unwrap();
-        let expected = vec![
-            0, 0, 192, 63, // 1.5 (0x3FC00000)
-            0, 0, 0, 192, // -2.0 (0xC0000000)
-            0, 0, 0, 0, // 0.0 (0x00000000)
-        ];
-        assert_eq!(writer, expected);
-    }
-
-    #[tokio::test]
-    async fn test_serialize_float64() {
-        let column = Arc::new(Float64Array::from(vec![1.5, -2.0, 0.0])) as ArrayRef;
-        let field = Field::new("float", DataType::Float64, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Float64, &mut writer, &column, field.data_type()).await.unwrap();
-        let expected = vec![
-            0, 0, 0, 0, 0, 0, 248, 63, // 1.5 (0x3FF8000000000000)
-            0, 0, 0, 0, 0, 0, 0, 192, // -2.0 (0xC000000000000000)
-            0, 0, 0, 0, 0, 0, 0, 0, // 0.0 (0x0000000000000000)
-        ];
-        assert_eq!(writer, expected);
-    }
-
-    #[tokio::test]
-    async fn test_serialize_decimal128() {
-        let column = Arc::new(Decimal128Array::from(vec![0, 1])) as ArrayRef;
-        let field = Field::new("decimal", DataType::Decimal128(38, 0), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Decimal128(0), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
-        let expected = vec![
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 0
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 1
-        ];
-        assert_eq!(writer, expected);
-    }
-
-    #[tokio::test]
-    async fn test_serialize_date() {
-        let column = Arc::new(Date32Array::from(vec![0, 1])) as ArrayRef; // 1970-01-01, 1970-01-02
-        let field = Field::new("date", DataType::Date32, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Date, &mut writer, &column, field.data_type()).await.unwrap();
-        let expected = vec![0, 0, 1, 0]; // 0, 1 (u16 LE)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_3() {
         let column = Arc::new(TimestampMillisecondArray::from(vec![0, 1000])) as ArrayRef; // 1970-01-01 00:00:00, 00:00:01
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(3, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(3, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![0, 0, 0, 0, 0, 0, 0, 0, 232, 3, 0, 0, 0, 0, 0, 0]; // 0, 1000 (u64 LE)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1144,10 +1220,20 @@ mod tests {
             .unwrap(),
         ) as ArrayRef;
         let field = Field::new("ip", DataType::FixedSizeBinary(4), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Ipv4, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Ipv4, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![192, 168, 1, 1, 10, 0, 0, 1]; // 192.168.1.1, 10.0.0.1 (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1166,13 +1252,23 @@ mod tests {
             .unwrap(),
         ) as ArrayRef;
         let field = Field::new("uuid", DataType::FixedSizeBinary(16), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Uuid, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Uuid, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, // High bits
             0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, // Low bits
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1191,52 +1287,72 @@ mod tests {
             .unwrap(),
         ) as ArrayRef;
         let field = Field::new("uuid", DataType::FixedSizeBinary(16), false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::Uuid, &mut writer, &column, field.data_type()).await;
-        assert!(result.is_err());
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::Uuid, column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
     }
 
     #[tokio::test]
     async fn test_serialize_empty_int32() {
         let column = Arc::new(Int32Array::from(Vec::<i32>::new())) as ArrayRef;
         let field = Field::new("int", DataType::Int32, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Int32, &mut writer, &column, field.data_type()).await.unwrap();
-        assert!(writer.is_empty());
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Int32, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify empty output
+        assert!(async_writer.is_empty());
     }
 
     #[tokio::test]
     async fn test_serialize_nullable_int32() {
         let column = Arc::new(Int32Array::from(vec![Some(1), None, Some(3)])) as ArrayRef;
         let field = Field::new("int", DataType::Int32, true);
-        let mut writer = MockWriter::new();
-        serialize_async(
-            &Type::Nullable(Box::new(Type::Int32)),
-            &mut writer,
-            &column,
-            field.data_type(),
-        )
-        .await
-        .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Nullable(Box::new(Type::Int32)), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0]; // 1, 0 (null), 3
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_null_only_int32() {
         let column = Arc::new(Int32Array::from(vec![None, None])) as ArrayRef;
         let field = Field::new("int", DataType::Int32, true);
-        let mut writer = MockWriter::new();
-        serialize_async(
-            &Type::Nullable(Box::new(Type::Int32)),
-            &mut writer,
-            &column,
-            field.data_type(),
-        )
-        .await
-        .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Nullable(Box::new(Type::Int32)), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![0, 0, 0, 0, 0, 0, 0, 0]; // Two nulls (0)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     // Test invalid values
@@ -1251,10 +1367,16 @@ mod tests {
         )];
 
         for (type_, array, field, expected) in cases {
-            let mut writer = MockWriter::new();
-            let result = serialize_async(&type_, &mut writer, &array, field.data_type()).await;
+            let (sync_result, async_result, _sync_writer, _async_writer) =
+                test_both_serialize!(type_, array, field.data_type());
+
+            // Both should produce errors
+            assert!(async_result.is_err());
+            assert!(sync_result.is_err());
+
+            // Verify error message
             assert!(matches!(
-                result,
+                async_result,
                 Err(Error::ArrowSerialize(msg))
                 if msg.contains(expected)
             ));
@@ -1279,10 +1401,16 @@ mod tests {
             ),
         ];
         for (type_, array, field, expected) in cases {
-            let mut writer = MockWriter::new();
-            let result = serialize_async(&type_, &mut writer, &array, field.data_type()).await;
+            let (sync_result, async_result, _sync_writer, _async_writer) =
+                test_both_serialize!(type_, array, field.data_type());
+
+            // Both should produce errors
+            assert!(async_result.is_err());
+            assert!(sync_result.is_err());
+
+            // Verify error message
             assert!(matches!(
-                result,
+                async_result,
                 Err(Error::ArrowSerialize(msg))
                 if msg.contains(expected)
             ));
@@ -1294,25 +1422,34 @@ mod tests {
     async fn test_serialize_invalid_type() {
         let column = Arc::new(StringArray::from(vec!["a"])) as ArrayRef;
         let field = Field::new("str", DataType::Utf8, false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::Int32, &mut writer, &column, field.data_type()).await;
+
+        // Test Int32 with string data
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::Int32, column, field.data_type());
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(msg)) if msg.contains("Expected Int32Array")
         ));
 
-        let mut writer = MockWriter::new();
-        let result =
-            serialize_async(&Type::Decimal32(3), &mut writer, &column, field.data_type()).await;
+        // Test Decimal32 with string data
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::Decimal32(3), column, field.data_type());
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(msg)) if msg.contains("Expected one of")
         ));
 
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::Ipv6, &mut writer, &column, field.data_type()).await;
+        // Test Ipv6 with string data
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::Ipv6, column, field.data_type());
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(msg)) if msg.contains("Expected one of")
         ));
     }
@@ -1323,10 +1460,17 @@ mod tests {
             FixedSizeBinaryArray::try_from_iter(vec![[0x12, 0x34].as_ref()].into_iter()).unwrap(),
         ) as ArrayRef;
         let field = Field::new("uuid", DataType::FixedSizeBinary(2), false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::Uuid, &mut writer, &column, field.data_type()).await;
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::Uuid, column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
+
+        // Verify error message for async (sync should have same error)
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(msg)) if msg.contains("UUID must be 16 bytes")
         ));
     }
@@ -1335,12 +1479,22 @@ mod tests {
     async fn test_serialize_uint128_uint64() {
         let column = Arc::new(UInt64Array::from(vec![123_u64])) as ArrayRef;
         let field = Field::new("uint", DataType::UInt64, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::UInt128, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::UInt128, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             123, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 123 (big-endian)
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1352,12 +1506,22 @@ mod tests {
             .unwrap(),
         ) as ArrayRef;
         let field = Field::new("uint", DataType::FixedSizeBinary(16), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::UInt128, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::UInt128, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             123, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 123 (big-endian)
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1366,12 +1530,22 @@ mod tests {
             u128::from(456_u32).to_le_bytes().as_ref(),
         )])) as ArrayRef;
         let field = Field::new("uint", DataType::Binary, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::UInt128, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::UInt128, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             200, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 456 (big-endian)
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1380,10 +1554,17 @@ mod tests {
             FixedSizeBinaryArray::try_from_iter(vec![[0u8; 8].as_ref()].into_iter()).unwrap(),
         ) as ArrayRef;
         let field = Field::new("uint", DataType::FixedSizeBinary(8), false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::UInt128, &mut writer, &column, field.data_type()).await;
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::UInt128, column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
+
+        // Verify error message for async (sync should have same error)
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(msg))
             if msg.contains("FixedSizeBinary must be 16 bytes for UInt128")
         ));
@@ -1393,13 +1574,23 @@ mod tests {
     async fn test_serialize_uint256_uint64() {
         let column = Arc::new(UInt64Array::from(vec![123])) as ArrayRef;
         let field = Field::new("uint", DataType::UInt64, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::UInt256, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::UInt256, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 123, // 123 (big-endian)
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1410,13 +1601,23 @@ mod tests {
         ];
         let column = Arc::new(BinaryArray::from_vec(vec![val])) as ArrayRef;
         let field = Field::new("uint", DataType::Binary, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::UInt256, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::UInt256, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 123, // 123 (big-endian)
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1436,13 +1637,23 @@ mod tests {
             .unwrap(),
         ) as ArrayRef;
         let field = Field::new("uint", DataType::FixedSizeBinary(32), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::UInt256, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::UInt256, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 1, 200, // 456 (big-endian)
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1451,10 +1662,17 @@ mod tests {
             FixedSizeBinaryArray::try_from_iter(vec![[0u8; 16].as_ref()].into_iter()).unwrap(),
         ) as ArrayRef;
         let field = Field::new("uint", DataType::FixedSizeBinary(16), false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::UInt256, &mut writer, &column, field.data_type()).await;
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::UInt256, column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
+
+        // Verify error message for async (sync should have same error)
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(msg))
             if msg.contains("FixedSizeBinary must be 32 bytes for UInt256")
         ));
@@ -1464,12 +1682,22 @@ mod tests {
     async fn test_serialize_i128_int64() {
         let column = Arc::new(Int64Array::from(vec![123])) as ArrayRef;
         let field = Field::new("int", DataType::Int64, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Int128, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Int128, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             123, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 123
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1478,23 +1706,40 @@ mod tests {
             Arc::new(BinaryArray::from_iter(vec![Some(i128::from(-456).to_le_bytes().as_ref())]))
                 as ArrayRef;
         let field = Field::new("int", DataType::Binary, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Int128, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Int128, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             56, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
             255, // -456
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_i128_binary_invalid_length() {
         let column = Arc::new(BinaryArray::from_iter(vec![Some(&[0_u8; 17])])) as ArrayRef;
         let field = Field::new("int", DataType::Binary, false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::Int128, &mut writer, &column, field.data_type()).await;
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::Int128, column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
+
+        // Verify error message for async (sync should have same error)
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(e))
             if e.to_string().contains("Binary must be 16 bytes")
         ));
@@ -1508,13 +1753,23 @@ mod tests {
         ];
         let column = Arc::new(BinaryArray::from_vec(vec![&val])) as ArrayRef;
         let field = Field::new("bin", DataType::Binary, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Int256, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Int256, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 133, // -123
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1525,13 +1780,23 @@ mod tests {
         ];
         let column = Arc::new(FixedSizeBinaryArray::from(vec![val])) as ArrayRef;
         let field = Field::new("bin", DataType::FixedSizeBinary(32), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Int256, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Int256, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 133, // -123
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1542,10 +1807,17 @@ mod tests {
         ];
         let column = Arc::new(FixedSizeBinaryArray::from(vec![val])) as ArrayRef;
         let field = Field::new("bin", DataType::FixedSizeBinary(32), false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::Int256, &mut writer, &column, field.data_type()).await;
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::Int256, column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
+
+        // Verify error message for async (sync should have same error)
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(e))
             if e.to_string().contains("FixedSizeBinary must be 32 bytes for Int256")
         ));
@@ -1555,13 +1827,23 @@ mod tests {
     async fn test_serialize_i256_int64_negative() {
         let column = Arc::new(Int64Array::from(vec![-123])) as ArrayRef;
         let field = Field::new("int", DataType::Int64, false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Int256, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Int256, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 133, // -123
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1572,15 +1854,23 @@ mod tests {
                 .unwrap(),
         ) as ArrayRef;
         let field = Field::new("decimal", DataType::Decimal256(76, 0), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Decimal256(0), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Decimal256(0), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             1, 226, 64, // 123456 (big-endian)
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1589,183 +1879,303 @@ mod tests {
             Arc::new(Decimal128Array::from(vec![123_456]).with_precision_and_scale(38, 0).unwrap())
                 as ArrayRef;
         let field = Field::new("decimal", DataType::Decimal128(38, 0), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Decimal256(0), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Decimal256(0), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             1, 226, 64, // 123456
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_0() {
         let column = Arc::new(TimestampSecondArray::from(vec![1000])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Second, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(0, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(0, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![232, 3, 0, 0, 0, 0, 0, 0]; // 1000
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_3_microsecond() {
         let column = Arc::new(TimestampMicrosecondArray::from(vec![1_000_000])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Microsecond, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(3, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(3, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![232, 3, 0, 0, 0, 0, 0, 0]; // 1,000,000 / 1,000 = 1,000 ms (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_3_nanosecond() {
         let column = Arc::new(TimestampNanosecondArray::from(vec![1_000_000_000])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(3, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(3, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![232, 3, 0, 0, 0, 0, 0, 0]; // 1,000,000,000 / 1,000,000 = 1,000 ms (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_3_second() {
         let column = Arc::new(TimestampSecondArray::from(vec![1])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Second, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(3, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(3, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![232, 3, 0, 0, 0, 0, 0, 0]; // 1 * 1,000 = 1,000 ms (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_6_millisecond() {
         let column = Arc::new(TimestampMillisecondArray::from(vec![1000])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(6, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(6, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![64, 66, 15, 0, 0, 0, 0, 0]; // 1,000 * 1,000 = 1,000,000 µs (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_6_nanosecond() {
         let column = Arc::new(TimestampNanosecondArray::from(vec![1_000_000_000])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(6, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(6, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![64, 66, 15, 0, 0, 0, 0, 0]; // 1,000,000,000 / 1,000 = 1,000,000 µs (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_6_second() {
         let column = Arc::new(TimestampSecondArray::from(vec![1])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Second, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(6, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(6, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![64, 66, 15, 0, 0, 0, 0, 0]; // 1 * 1,000,000 = 1,000,000 µs (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_6_microsecond() {
         let column = Arc::new(TimestampMicrosecondArray::from(vec![1_000_000])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Microsecond, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(6, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(6, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![64, 66, 15, 0, 0, 0, 0, 0]; // 1,000,000 (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_9_millisecond() {
         let column = Arc::new(TimestampMillisecondArray::from(vec![1000])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(9, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(9, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![0, 202, 154, 59, 0, 0, 0, 0]; // 1,000,000,000 (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_9_microsecond() {
         let column = Arc::new(TimestampMicrosecondArray::from(vec![1_000_000])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Microsecond, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(9, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(9, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![0, 202, 154, 59, 0, 0, 0, 0]; // 1,000,000 * 1,000 = 1,000,000,000 ns (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_9_second() {
         let column = Arc::new(TimestampSecondArray::from(vec![1])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Second, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(9, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(9, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![0, 202, 154, 59, 0, 0, 0, 0]; // 1 * 1,000,000,000 = 1,000,000,000 ns (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_unknown_millisecond() {
         let column = Arc::new(TimestampMillisecondArray::from(vec![1000])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(0, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(0, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![1, 0, 0, 0, 0, 0, 0, 0]; // 1,000 / 1,000 = 1 s (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_unknown_microsecond() {
         let column = Arc::new(TimestampMicrosecondArray::from(vec![1_000_000])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Microsecond, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(0, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(0, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![1, 0, 0, 0, 0, 0, 0, 0]; // 1,000,000 / 1,000,000 = 1 s (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
     async fn test_serialize_datetime64_unknown_nanosecond() {
         let column = Arc::new(TimestampNanosecondArray::from(vec![1_000_000_000])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::DateTime64(0, Tz::UTC), &mut writer, &column, field.data_type())
-            .await
-            .unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::DateTime64(0, Tz::UTC), column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![1, 0, 0, 0, 0, 0, 0, 0]; // 1,000,000,000 / 1,000,000,000 = 1 s (big-endian)
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1773,12 +2183,17 @@ mod tests {
         let column =
             Arc::new(TimestampSecondArray::from(vec![i64::from(u32::MAX) + 1])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Second, None), false);
-        let mut writer = MockWriter::new();
-        let result =
-            serialize_async(&Type::DateTime(Tz::UTC), &mut writer, &column, field.data_type())
-                .await;
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::DateTime(Tz::UTC), column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
+
+        // Verify error message for async (sync should have same error)
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(msg))
             if msg.contains("DateTime out of range for TimestampSecond")
         ));
@@ -1789,10 +2204,17 @@ mod tests {
             FixedSizeBinaryArray::try_from_iter(vec![[0u8; 3].as_ref()].into_iter()).unwrap(),
         ) as ArrayRef;
         let field = Field::new("ip", DataType::FixedSizeBinary(3), false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::Ipv4, &mut writer, &column, field.data_type()).await;
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::Ipv4, column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
+
+        // Verify error message for async (sync should have same error)
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(msg))
             if msg.contains("IPv4 must be 4 bytes")
         ));
@@ -1809,13 +2231,23 @@ mod tests {
             .unwrap(),
         ) as ArrayRef;
         let field = Field::new("ip", DataType::FixedSizeBinary(16), false);
-        let mut writer = MockWriter::new();
-        serialize_async(&Type::Ipv6, &mut writer, &column, field.data_type()).await.unwrap();
+
+        let (sync_result, async_result, sync_writer, async_writer) =
+            test_both_serialize!(Type::Ipv6, column, field.data_type());
+
+        // Both should succeed
+        async_result.unwrap();
+        sync_result.unwrap();
+
+        // Should produce identical output
+        assert_eq!(sync_writer, async_writer);
+
+        // Verify expected values
         let expected = vec![
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, // ::1
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
-        assert_eq!(writer, expected);
+        assert_eq!(async_writer, expected);
     }
 
     #[tokio::test]
@@ -1824,10 +2256,17 @@ mod tests {
             FixedSizeBinaryArray::try_from_iter(vec![[0u8; 8].as_ref()].into_iter()).unwrap(),
         ) as ArrayRef;
         let field = Field::new("ip", DataType::FixedSizeBinary(8), false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::Ipv6, &mut writer, &column, field.data_type()).await;
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::Ipv6, column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
+
+        // Verify error message for async (sync should have same error)
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(msg))
             if msg.contains("IPv6 must be 16 bytes")
         ));
@@ -1837,16 +2276,17 @@ mod tests {
     async fn test_serialize_datetime64_invalid_precision() {
         let column = Arc::new(TimestampSecondArray::from(vec![1000])) as ArrayRef;
         let field = Field::new("ts", DataType::Timestamp(TimeUnit::Second, None), false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(
-            &Type::DateTime64(10, Tz::UTC),
-            &mut writer,
-            &column,
-            field.data_type(),
-        )
-        .await;
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::DateTime64(10, Tz::UTC), column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
+
+        // Verify error message for async (sync should have same error)
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(msg))
             if msg.contains("Unsupported precision for DateTime64: 10")
         ));
@@ -1856,91 +2296,19 @@ mod tests {
     async fn test_serialize_unsupported_type() {
         let column = Arc::new(StringArray::from(vec!["a"])) as ArrayRef;
         let field = Field::new("str", DataType::Utf8, false);
-        let mut writer = MockWriter::new();
-        let result = serialize_async(&Type::String, &mut writer, &column, field.data_type()).await;
+
+        let (sync_result, async_result, _sync_writer, _async_writer) =
+            test_both_serialize!(Type::String, column, field.data_type());
+
+        // Both should produce errors
+        assert!(async_result.is_err());
+        assert!(sync_result.is_err());
+
+        // Verify error message for async (sync should have same error)
         assert!(matches!(
-            result,
+            async_result,
             Err(Error::ArrowSerialize(msg))
             if msg.contains("Unsupported data type: String")
         ));
     }
-
-    /// Macro that generates comprehensive sync test coverage without duplicating 800+ lines.
-    /// Each test mirrors the async version but calls the sync serialize() function instead.
-    /// This approach maintains identical test coverage while eliminating massive code duplication.
-    macro_rules! impl_sync_tests {
-        () => {
-            mod sync {
-                use super::*;
-
-                /// Asserts sync serialization produces expected output
-                fn assert_serialize<T: Array + 'static>(
-                    type_hint: &Type,
-                    column: Arc<T>,
-                    data_type: &DataType,
-                    expected: Vec<u8>,
-                ) {
-                    let column_ref = column as ArrayRef;
-                    let mut writer = MockWriter::new();
-                    serialize(type_hint, &mut writer, &column_ref, data_type).unwrap();
-                    assert_eq!(writer, expected);
-                }
-
-                #[test]
-                fn test_sync_serialize_int8() {
-                    let column = Arc::new(Int8Array::from(vec![1, -2, 0]));
-                    assert_serialize(&Type::Int8, column, &DataType::Int8, vec![1, 254, 0]);
-                }
-
-                #[test]
-                fn test_sync_serialize_uint8() {
-                    let column = Arc::new(UInt8Array::from(vec![0, u8::MAX, 42]));
-                    assert_serialize(&Type::UInt8, column, &DataType::UInt8, vec![0, 255, 42]);
-                }
-
-                #[test]
-                fn test_sync_serialize_int32() {
-                    let column = Arc::new(Int32Array::from(vec![1, -2, 0]));
-                    assert_serialize(&Type::Int32, column, &DataType::Int32, vec![1, 0, 0, 0, 254, 255, 255, 255, 0, 0, 0, 0]);
-                }
-
-                #[test]
-                fn test_sync_serialize_float32() {
-                    let column = Arc::new(Float32Array::from(vec![1.5, -2.0, 0.0]));
-                    assert_serialize(&Type::Float32, column, &DataType::Float32, vec![0, 0, 192, 63, 0, 0, 0, 192, 0, 0, 0, 0]);
-                }
-
-                #[test]
-                fn test_sync_serialize_date() {
-                    let column = Arc::new(Date32Array::from(vec![0, 1]));
-                    assert_serialize(&Type::Date, column, &DataType::Date32, vec![0, 0, 1, 0]);
-                }
-
-                /// Test that sync and async serialization produce identical output
-                #[tokio::test]
-                async fn test_sync_async_equivalence() {
-                    let test_cases = vec![
-                        (Type::Int8, Arc::new(Int8Array::from(vec![1, -2, 0])) as ArrayRef, DataType::Int8),
-                        (Type::UInt32, Arc::new(UInt32Array::from(vec![0, u32::MAX])) as ArrayRef, DataType::UInt32),
-                        (Type::Float64, Arc::new(Float64Array::from(vec![1.5, -2.0])) as ArrayRef, DataType::Float64),
-                    ];
-
-                    for (type_hint, column, data_type) in test_cases {
-                        let mut sync_writer = MockWriter::new();
-                        let mut async_writer = MockWriter::new();
-
-                        serialize(&type_hint, &mut sync_writer, &column, &data_type).unwrap();
-                        serialize_async(&type_hint, &mut async_writer, &column, &data_type).await.unwrap();
-
-                        assert_eq!(sync_writer, async_writer, "Sync/async mismatch for {:?}", type_hint);
-                    }
-                }
-
-                // This single module replaces 800+ lines of duplicated sync tests
-                // while maintaining comprehensive test coverage of the sync serialize() function
-            }
-        };
-    }
-
-    impl_sync_tests!();
 }

@@ -443,7 +443,6 @@ impl JsonSerializer {
         let mut paths: Vec<String> = json_data.path_columns.keys().cloned().collect();
         paths.sort(); // Ensure consistent ordering
 
-
         let state = JsonState {
             version:      None, // Will be set properly in write_prefix
             paths:        paths.clone(),
@@ -809,7 +808,10 @@ mod tests {
         let mut version_bytes = [0u8; 8];
         cursor.read_exact(&mut version_bytes)?;
         let version = u64::from_le_bytes(version_bytes);
-        assert_eq!(version, JSON_OBJECT_SERIALIZATION_VERSION, "Should use v3 object serialization");
+        assert_eq!(
+            version, JSON_OBJECT_SERIALIZATION_VERSION,
+            "Should use v3 object serialization"
+        );
 
         let _ = cursor.seek(SeekFrom::Start(8))?;
         let mut path_count_byte = [0u8; 1];
@@ -861,8 +863,14 @@ mod tests {
         type_.serialize_column(values, &mut output, &mut state).await?;
 
         let version = u64::from_le_bytes(output[0..8].try_into().unwrap());
-        assert_eq!(version, JSON_OBJECT_SERIALIZATION_VERSION, "Should be using v3 object serialization");
-        assert!(output[8] >= 3, "v3 should decompose JSON into multiple paths (user.name, user.age, active)");
+        assert_eq!(
+            version, JSON_OBJECT_SERIALIZATION_VERSION,
+            "Should be using v3 object serialization"
+        );
+        assert!(
+            output[8] >= 3,
+            "v3 should decompose JSON into multiple paths (user.name, user.age, active)"
+        );
         Ok(())
     }
 
@@ -873,7 +881,7 @@ mod tests {
             Value::String(b"{\"name\": \"Bob\", \"age\": 25}".to_vec()),
         ];
         let deserialized = test_json_roundtrip(values.clone()).await?;
-        
+
         // Additional format verification
         for value in deserialized.iter() {
             if let Value::String(bytes) = value {
@@ -919,9 +927,11 @@ mod tests {
         ];
 
         // Test JSON serialization with timeout
-        let timeout_result = tokio::time::timeout(std::time::Duration::from_secs(10), 
-            test_json_roundtrip(values.clone())
-        ).await;
+        let timeout_result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            test_json_roundtrip(values.clone()),
+        )
+        .await;
 
         match timeout_result {
             Ok(Ok(result)) => {
@@ -931,7 +941,9 @@ mod tests {
                     if let Value::String(bytes) = value {
                         let json_str = String::from_utf8(bytes.clone())?;
                         let json_value: serde_json::Value = serde_json::from_str(&json_str)
-                            .map_err(|e| Error::SerializeError(format!("Failed to parse JSON: {e}")))?;
+                            .map_err(|e| {
+                                Error::SerializeError(format!("Failed to parse JSON: {e}"))
+                            })?;
                         assert!(json_value.is_object(), "Deserialized JSON should be an object");
                     }
                 }

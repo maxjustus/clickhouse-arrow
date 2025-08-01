@@ -216,7 +216,10 @@ mod tests {
     fn test_variant_complex_types() {
         let variant_type = Type::Variant(vec![Type::Array(Box::new(Type::String)), Type::Date]);
         let values = vec![
-            variant!(0, Value::Array(vec![Value::String(b"a".to_vec()), Value::String(b"b".to_vec())])),
+            variant!(
+                0,
+                Value::Array(vec![Value::String(b"a".to_vec()), Value::String(b"b".to_vec())])
+            ),
             variant!(1, Value::Date(Date(19723))),
             variant!(0, Value::Array(vec![Value::String(b"c".to_vec())])),
         ];
@@ -229,7 +232,8 @@ mod tests {
 
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64, Type::Float64]);
         // All UInt64 (discriminator 2 after sorting)
-        let values: Vec<_> = (100..=500).step_by(100).map(|v| variant!(2, Value::UInt64(v))).collect();
+        let values: Vec<_> =
+            (100..=500).step_by(100).map(|v| variant!(2, Value::UInt64(v))).collect();
 
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
@@ -276,7 +280,10 @@ mod tests {
         let values = vec![
             variant!(1, Value::String(b"test_str".to_vec())),
             variant!(0, Value::Array(vec![Value::UInt64(100), Value::Null, Value::UInt64(200)])),
-            variant!(2, Value::Tuple(vec![Value::String(b"tuple_str".to_vec()), Value::UInt64(42)])),
+            variant!(
+                2,
+                Value::Tuple(vec![Value::String(b"tuple_str".to_vec()), Value::UInt64(42)])
+            ),
         ];
         round_trip_test(&variant_type, &values);
     }
@@ -315,7 +322,8 @@ mod tests {
             variant!(0, Value::String(b"b".to_vec())),
             variant!(0xFF, Value::Null),
         ];
-        let (discriminators, grouped) = VariantSerializer::extract_discriminators_and_values(&values).unwrap();
+        let (discriminators, grouped) =
+            VariantSerializer::extract_discriminators_and_values(&values).unwrap();
         assert_eq!(discriminators, vec![0, 1, 0, 0xFF]);
         assert_eq!(grouped.len(), 3);
         assert_eq!(grouped[&0].len(), 2);
@@ -328,17 +336,23 @@ mod tests {
         use tokio::io::AsyncReadExt;
 
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
-        let values = vec![variant!(1, Value::UInt64(999)), variant!(0, Value::String(b"async".to_vec()))];
+        let values =
+            vec![variant!(1, Value::UInt64(999)), variant!(0, Value::String(b"async".to_vec()))];
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
         VariantSerializer::write_prefix(&variant_type, &mut buffer, &mut state).await.unwrap();
-        VariantSerializer::write(&variant_type, values.clone(), &mut buffer, &mut state).await.unwrap();
+        VariantSerializer::write(&variant_type, values.clone(), &mut buffer, &mut state)
+            .await
+            .unwrap();
 
         // Deserialize
         let mut reader = Cursor::new(buffer);
         let mut deser_state = DeserializerState::default();
         let _ = reader.read_u64_le().await.unwrap();
-        let deserialized = VariantDeserializer::read_async(&variant_type, &mut reader, 2, &mut deser_state).await.unwrap();
+        let deserialized =
+            VariantDeserializer::read_async(&variant_type, &mut reader, 2, &mut deser_state)
+                .await
+                .unwrap();
         assert_eq!(deserialized, values);
     }
 }

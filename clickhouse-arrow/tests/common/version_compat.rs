@@ -43,14 +43,14 @@ impl Version {
     /// Check if this version supports the JSON type (requires 25.1+)
     pub fn supports_json(&self) -> bool { self >= &Version::new(25, 1, 0) }
 
-    /// Check if this version supports JSON v3 object serialization (requires 25.5+)
-    pub fn supports_json_v3(&self) -> bool { self >= &Version::new(25, 5, 0) }
+    /// Check if this version supports JSON v3 object serialization (requires 25.6+)
+    pub fn supports_json_v3(&self) -> bool { self >= &Version::new(25, 6, 0) }
 
     /// Check if this version supports Variant type (requires 25.1+)
     pub fn supports_variant(&self) -> bool { self >= &Version::new(25, 1, 0) }
 
-    /// Check if this version has stable Dynamic/JSON support (requires 25.5+)
-    pub fn has_stable_dynamic_json(&self) -> bool { self >= &Version::new(25, 5, 0) }
+    /// Check if this version has stable Dynamic/JSON support (requires 25.6+)
+    pub fn has_stable_dynamic_json(&self) -> bool { self >= &Version::new(25, 6, 0) }
 }
 
 impl FromStr for Version {
@@ -86,14 +86,23 @@ impl VersionChecker {
 
     pub fn version(&self) -> Option<&Version> { self.version.as_ref() }
 
-    /// Skip test if version doesn't support the feature
-    pub fn require_dynamic_support(&self, test_name: &str) -> bool {
+    /// Generic method to check feature support and skip test if not available
+    fn require_feature<F>(
+        &self,
+        test_name: &str,
+        feature_name: &str,
+        min_version: &str,
+        check: F,
+    ) -> bool
+    where
+        F: Fn(&Version) -> bool,
+    {
         match &self.version {
-            Some(v) if v.supports_dynamic() => true,
+            Some(v) if check(v) => true,
             Some(v) => {
                 warn!(
-                    "Skipping {} - requires Dynamic support (ClickHouse 24.8+), found {}",
-                    test_name, v
+                    "Skipping {} - requires {} (ClickHouse {}+), found {}",
+                    test_name, feature_name, min_version, v
                 );
                 false
             }
@@ -102,86 +111,47 @@ impl VersionChecker {
                 false
             }
         }
+    }
+
+    /// Skip test if version doesn't support the feature
+    pub fn require_dynamic_support(&self, test_name: &str) -> bool {
+        self.require_feature(test_name, "Dynamic support", "24.8", Version::supports_dynamic)
     }
 
     pub fn require_json_support(&self, test_name: &str) -> bool {
-        match &self.version {
-            Some(v) if v.supports_json() => true,
-            Some(v) => {
-                warn!(
-                    "Skipping {} - requires JSON support (ClickHouse 25.1+), found {}",
-                    test_name, v
-                );
-                false
-            }
-            None => {
-                warn!("Skipping {} - could not determine ClickHouse version", test_name);
-                false
-            }
-        }
+        self.require_feature(test_name, "JSON support", "25.1", Version::supports_json)
     }
 
     pub fn require_json_v3_support(&self, test_name: &str) -> bool {
-        match &self.version {
-            Some(v) if v.supports_json_v3() => true,
-            Some(v) => {
-                warn!(
-                    "Skipping {} - requires JSON v3 support (ClickHouse 25.5+), found {}",
-                    test_name, v
-                );
-                false
-            }
-            None => {
-                warn!("Skipping {} - could not determine ClickHouse version", test_name);
-                false
-            }
-        }
+        self.require_feature(test_name, "JSON v3 support", "25.6", Version::supports_json_v3)
     }
 
     pub fn require_variant_support(&self, test_name: &str) -> bool {
-        match &self.version {
-            Some(v) if v.supports_variant() => true,
-            Some(v) => {
-                warn!(
-                    "Skipping {} - requires Variant support (ClickHouse 25.1+), found {}",
-                    test_name, v
-                );
-                false
-            }
-            None => {
-                warn!("Skipping {} - could not determine ClickHouse version", test_name);
-                false
-            }
-        }
+        self.require_feature(test_name, "Variant support", "25.1", Version::supports_variant)
     }
 
     pub fn require_stable_dynamic_json(&self, test_name: &str) -> bool {
-        match &self.version {
-            Some(v) if v.has_stable_dynamic_json() => true,
-            Some(v) => {
-                warn!(
-                    "Skipping {} - requires stable Dynamic/JSON support (ClickHouse 25.5+), found \
-                     {}",
-                    test_name, v
-                );
-                false
-            }
-            None => {
-                warn!("Skipping {} - could not determine ClickHouse version", test_name);
-                false
-            }
-        }
+        self.require_feature(
+            test_name,
+            "stable Dynamic/JSON support",
+            "25.6",
+            Version::has_stable_dynamic_json,
+        )
     }
 
     /// Log version compatibility information
     pub fn log_compatibility_info(&self) {
         if let Some(v) = &self.version {
-            debug!("ClickHouse {} feature support:", v);
-            debug!("  Dynamic type: {}", v.supports_dynamic());
-            debug!("  JSON type: {}", v.supports_json());
-            debug!("  JSON v3 serialization: {}", v.supports_json_v3());
-            debug!("  Variant type: {}", v.supports_variant());
-            debug!("  Stable Dynamic/JSON: {}", v.has_stable_dynamic_json());
+            debug!(
+                "ClickHouse {} features: Dynamic({}), JSON({}), JSON-v3({}), Variant({}), \
+                 Stable-Dynamic/JSON({})",
+                v,
+                v.supports_dynamic(),
+                v.supports_json(),
+                v.supports_json_v3(),
+                v.supports_variant(),
+                v.has_stable_dynamic_json()
+            );
         }
     }
 }
@@ -194,7 +164,7 @@ mod tests {
     fn test_version_parsing() {
         assert_eq!(Version::parse("24.3.5.46"), Some(Version::new(24, 3, 5)));
         assert_eq!(Version::parse("25.1.2.3"), Some(Version::new(25, 1, 2)));
-        assert_eq!(Version::parse("25.5.0"), Some(Version::new(25, 5, 0)));
+        assert_eq!(Version::parse("25.6.0"), Some(Version::new(25, 6, 0)));
         assert_eq!(Version::parse("25.1.2.3-testing"), Some(Version::new(25, 1, 2)));
         assert_eq!(Version::parse("25.1.2.3 (official build)"), Some(Version::new(25, 1, 2)));
 
@@ -208,7 +178,7 @@ mod tests {
     fn test_feature_support() {
         let v24_3 = Version::new(24, 3, 0);
         let v25_1 = Version::new(25, 1, 0);
-        let v25_5 = Version::new(25, 5, 0);
+        let v25_6 = Version::new(25, 6, 0);
 
         // 24.3 - no new features
         assert!(!v24_3.supports_dynamic());
@@ -220,27 +190,27 @@ mod tests {
         // 25.1 - experimental support
         assert!(v25_1.supports_dynamic());
         assert!(v25_1.supports_json());
-        assert!(!v25_1.supports_json_v3()); // v3 requires 25.5+
+        assert!(!v25_1.supports_json_v3()); // v3 requires 25.6+
         assert!(v25_1.supports_variant());
         assert!(!v25_1.has_stable_dynamic_json());
 
-        // 25.5 - stable support
-        assert!(v25_5.supports_dynamic());
-        assert!(v25_5.supports_json());
-        assert!(v25_5.supports_json_v3());
-        assert!(v25_5.supports_variant());
-        assert!(v25_5.has_stable_dynamic_json());
+        // 25.6 - stable support
+        assert!(v25_6.supports_dynamic());
+        assert!(v25_6.supports_json());
+        assert!(v25_6.supports_json_v3());
+        assert!(v25_6.supports_variant());
+        assert!(v25_6.has_stable_dynamic_json());
     }
 
     #[test]
     fn test_version_comparison() {
         let v24_3 = Version::new(24, 3, 0);
         let v25_1 = Version::new(25, 1, 0);
-        let v25_5 = Version::new(25, 5, 0);
+        let v25_6 = Version::new(25, 6, 0);
 
         assert!(v24_3 < v25_1);
-        assert!(v25_1 < v25_5);
-        assert!(v25_5 > v25_1);
+        assert!(v25_1 < v25_6);
+        assert!(v25_6 > v25_1);
         assert!(v25_1 > v24_3);
     }
 }

@@ -260,8 +260,14 @@ mod tests {
         let mut reader = Cursor::new(test_data);
         let mut state = DeserializerState::default();
         variant_type.deserialize_prefix(&mut reader).unwrap();
-        let values = VariantDeserializer::read_sync(variant_type, &mut reader, discriminators.len(), &mut state).unwrap();
-        
+        let values = VariantDeserializer::read_sync(
+            variant_type,
+            &mut reader,
+            discriminators.len(),
+            &mut state,
+        )
+        .unwrap();
+
         assert_eq!(values.len(), expected_values.len());
         for (i, (expected_disc, expected_val)) in expected_values.iter().enumerate() {
             assert_variant!(&values[i], *expected_disc, expected_val.clone());
@@ -271,7 +277,11 @@ mod tests {
     // Helper function to create multitype test data programmatically
     fn create_multitype_test_data() -> (Type, Vec<u8>) {
         let variant_type = Type::Variant(vec![
-            Type::UInt64, Type::String, Type::Date, Type::Array(Box::new(Type::UInt8)), Type::DateTime(chrono_tz::UTC),
+            Type::UInt64,
+            Type::String,
+            Type::Date,
+            Type::Array(Box::new(Type::UInt8)),
+            Type::DateTime(chrono_tz::UTC),
         ]);
 
         let mut data = vec![0u8; 8]; // Version prefix
@@ -356,29 +366,44 @@ mod tests {
             &variant_type,
             &[0u8, 0xFF, 1u8],
             &[5, b'h', b'e', b'l', b'l', b'o', 42, 0, 0, 0, 0, 0, 0, 0],
-            &[
-                (0, Value::String(b"hello".to_vec())),
-                (0xFF, Value::Null),
-                (1, Value::UInt64(42)),
-            ],
+            &[(0, Value::String(b"hello".to_vec())), (0xFF, Value::Null), (1, Value::UInt64(42))],
         );
     }
 
     #[test]
     fn test_variant_complex_array_deserialization() {
-        let variant_type = Type::Variant(vec![Type::Array(Box::new(Type::String)), Type::UInt64, Type::Date]);
+        let variant_type =
+            Type::Variant(vec![Type::Array(Box::new(Type::String)), Type::UInt64, Type::Date]);
         let date_bytes = 19723u16.to_le_bytes();
         let data = create_test_data(&[0u8, 1u8, 2u8], &[
-            2, 0, 0, 0, 0, 0, 0, 0, // offset 2
-            1, b'a', // 'a'
-            1, b'b', // 'b'
-            date_bytes[0], date_bytes[1], // Date
-            42, 0, 0, 0, 0, 0, 0, 0, // 42
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0, // offset 2
+            1,
+            b'a', // 'a'
+            1,
+            b'b', // 'b'
+            date_bytes[0],
+            date_bytes[1], // Date
+            42,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0, // 42
         ]);
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
         variant_type.deserialize_prefix(&mut reader).unwrap();
-        let values = VariantDeserializer::read_sync(&variant_type, &mut reader, 3, &mut state).unwrap();
+        let values =
+            VariantDeserializer::read_sync(&variant_type, &mut reader, 3, &mut state).unwrap();
         assert_eq!(values.len(), 3);
 
         // Check array value
@@ -404,9 +429,10 @@ mod tests {
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
         variant_type.deserialize_prefix(&mut reader).unwrap();
-        let values = VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
+        let values =
+            VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
         assert_eq!(values.len(), 5);
-        
+
         // Verify discriminator assignments match expected sort order
         assert_variant!(&values[0], 4, Value::UInt64(999)); // UInt64 -> discriminator 4
         assert_variant!(&values[1], 3, Value::String(b"hello".to_vec())); // String -> discriminator 3
@@ -419,8 +445,9 @@ mod tests {
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
         variant_type.deserialize_prefix(&mut reader).unwrap();
-        let values = VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
-        
+        let values =
+            VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
+
         // Check array (discriminator 0)
         match &values[3] {
             Value::Variant(0, inner) => match &**inner {
@@ -439,8 +466,9 @@ mod tests {
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
         variant_type.deserialize_prefix(&mut reader).unwrap();
-        let values = VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
-        
+        let values =
+            VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
+
         // Check DateTime (discriminator 2)
         match &values[4] {
             Value::Variant(2, inner) => match &**inner {
@@ -455,11 +483,14 @@ mod tests {
     #[tokio::test]
     async fn test_variant_async_basic_deserialization() {
         let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
-        let data = create_test_data(&[1u8, 0u8], &[4, b't', b'e', b's', b't', 100, 0, 0, 0, 0, 0, 0, 0]);
+        let data =
+            create_test_data(&[1u8, 0u8], &[4, b't', b'e', b's', b't', 100, 0, 0, 0, 0, 0, 0, 0]);
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
         variant_type.deserialize_prefix_async(&mut reader, &mut state).await.unwrap();
-        let values = VariantDeserializer::read_async(&variant_type, &mut reader, 2, &mut state).await.unwrap();
+        let values = VariantDeserializer::read_async(&variant_type, &mut reader, 2, &mut state)
+            .await
+            .unwrap();
         assert_eq!(values.len(), 2);
         assert_variant!(&values[0], 1, Value::UInt64(100));
         assert_variant!(&values[1], 0, Value::String(b"test".to_vec()));
@@ -469,13 +500,15 @@ mod tests {
     async fn test_variant_async_different_types() {
         let another_type = Type::Variant(vec![Type::String, Type::UInt32]);
         let data2 = create_test_data(&[0u8, 1u8], &[
-            4, b't', b'e', b's', b't', // 'test'  
+            4, b't', b'e', b's', b't', // 'test'
             50, 0, 0, 0, // 50 as UInt32
         ]);
         let mut reader2 = Cursor::new(data2);
         let mut state2 = DeserializerState::default();
         another_type.deserialize_prefix_async(&mut reader2, &mut state2).await.unwrap();
-        let values2 = VariantDeserializer::read_async(&another_type, &mut reader2, 2, &mut state2).await.unwrap();
+        let values2 = VariantDeserializer::read_async(&another_type, &mut reader2, 2, &mut state2)
+            .await
+            .unwrap();
         assert_eq!(values2.len(), 2);
         assert_variant!(&values2[0], 0, Value::String(b"test".to_vec())); // discriminator 0 = String
         assert_variant!(&values2[1], 1, Value::UInt32(50)); // discriminator 1 = UInt32

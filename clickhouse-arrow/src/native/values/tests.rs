@@ -32,8 +32,14 @@ macro_rules! test_value_roundtrips {
             assert_eq!(5u64, roundtrip(5u64, &Type::UInt64));
             assert_eq!(0u128, roundtrip(0u128, &Type::UInt128));
             assert_eq!(5u128, roundtrip(5u128, &Type::UInt128));
-            assert_eq!(u256::from((0u128, 0u128)), roundtrip(u256::from((0u128, 0u128)), &Type::UInt256));
-            assert_eq!(u256::from((5u128, 0u128)), roundtrip(u256::from((5u128, 0u128)), &Type::UInt256));
+            assert_eq!(
+                u256::from((0u128, 0u128)),
+                roundtrip(u256::from((0u128, 0u128)), &Type::UInt256)
+            );
+            assert_eq!(
+                u256::from((5u128, 0u128)),
+                roundtrip(u256::from((5u128, 0u128)), &Type::UInt256)
+            );
 
             // Signed integers
             assert_eq!(0i8, roundtrip(0i8, &Type::Int8));
@@ -51,13 +57,27 @@ macro_rules! test_value_roundtrips {
             assert_eq!(0i128, roundtrip(0i128, &Type::Int128));
             assert_eq!(5i128, roundtrip(5i128, &Type::Int128));
             assert_eq!(-5i128, roundtrip(-5i128, &Type::Int128));
-            assert_eq!(i256::from((0u128, 0u128)), roundtrip(i256::from((0u128, 0u128)), &Type::Int256));
-            assert_eq!(i256::from((5u128, 0u128)), roundtrip(i256::from((5u128, 0u128)), &Type::Int256));
+            assert_eq!(
+                i256::from((0u128, 0u128)),
+                roundtrip(i256::from((0u128, 0u128)), &Type::Int256)
+            );
+            assert_eq!(
+                i256::from((5u128, 0u128)),
+                roundtrip(i256::from((5u128, 0u128)), &Type::Int256)
+            );
         }
-        
+
         #[test]
         fn test_float_value_roundtrips() {
-            let floats = [1.0_f32, 0.0_f32, 100.0_f32, -100.0_f32, f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+            let floats = [
+                1.0_f32,
+                0.0_f32,
+                100.0_f32,
+                -100.0_f32,
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+            ];
             for float in floats {
                 let result = roundtrip(float, &Type::Float32);
                 if float.is_nan() {
@@ -66,8 +86,16 @@ macro_rules! test_value_roundtrips {
                     assert_eq!(float, result);
                 }
             }
-            
-            let doubles = [1.0_f64, 0.0_f64, 100.0_f64, -100.0_f64, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+
+            let doubles = [
+                1.0_f64,
+                0.0_f64,
+                100.0_f64,
+                -100.0_f64,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ];
             for double in doubles {
                 let result = roundtrip(double, &Type::Float64);
                 if double.is_nan() {
@@ -77,58 +105,112 @@ macro_rules! test_value_roundtrips {
                 }
             }
         }
-        
+
         #[test]
         fn test_decimal_value_roundtrips() {
             assert_eq!(FixedPoint32::<2>(0), roundtrip(FixedPoint32::<2>(0), &Type::Decimal32(2)));
             assert_eq!(FixedPoint32::<2>(5), roundtrip(FixedPoint32::<2>(5), &Type::Decimal32(2)));
             assert_eq!(FixedPoint64::<5>(0), roundtrip(FixedPoint64::<5>(0), &Type::Decimal64(5)));
             assert_eq!(FixedPoint64::<5>(5), roundtrip(FixedPoint64::<5>(5), &Type::Decimal64(5)));
-            assert_eq!(FixedPoint128::<10>(0), roundtrip(FixedPoint128::<10>(0), &Type::Decimal128(10)));
-            assert_eq!(FixedPoint128::<10>(5), roundtrip(FixedPoint128::<10>(5), &Type::Decimal128(10)));
-            assert_eq!(FixedPoint256::<15>(i256::from((0u128, 0u128))), roundtrip(FixedPoint256::<15>(i256::from((0u128, 0u128))), &Type::Decimal256(15)));
-            assert_eq!(FixedPoint256::<15>(i256::from((5u128, 0u128))), roundtrip(FixedPoint256::<15>(i256::from((5u128, 0u128))), &Type::Decimal256(15)));
+            assert_eq!(
+                FixedPoint128::<10>(0),
+                roundtrip(FixedPoint128::<10>(0), &Type::Decimal128(10))
+            );
+            assert_eq!(
+                FixedPoint128::<10>(5),
+                roundtrip(FixedPoint128::<10>(5), &Type::Decimal128(10))
+            );
+            assert_eq!(
+                FixedPoint256::<15>(i256::from((0u128, 0u128))),
+                roundtrip(FixedPoint256::<15>(i256::from((0u128, 0u128))), &Type::Decimal256(15))
+            );
+            assert_eq!(
+                FixedPoint256::<15>(i256::from((5u128, 0u128))),
+                roundtrip(FixedPoint256::<15>(i256::from((5u128, 0u128))), &Type::Decimal256(15))
+            );
         }
-        
+
         #[test]
         fn test_string_value_roundtrips() {
             assert_eq!("test".to_string(), roundtrip("test".to_string(), &Type::String));
             assert_eq!(String::new(), roundtrip(String::new(), &Type::String));
-            assert_eq!("test".to_string(), roundtrip("test".to_string(), &Type::FixedSizedString(32)));
+            assert_eq!(
+                "test".to_string(),
+                roundtrip("test".to_string(), &Type::FixedSizedString(32))
+            );
             assert_eq!(String::new(), roundtrip(String::new(), &Type::FixedSizedString(32)));
-            
+
             // Nullable strings
-            assert_eq!(Some("test".to_string()), roundtrip(Some("test".to_string()), &Type::Nullable(Box::new(Type::String))));
-            assert_eq!(Some(String::new()), roundtrip(Some(String::new()), &Type::Nullable(Box::new(Type::String))));
-            assert_eq!(None::<String>, roundtrip(None::<String>, &Type::Nullable(Box::new(Type::String))));
+            assert_eq!(
+                Some("test".to_string()),
+                roundtrip(Some("test".to_string()), &Type::Nullable(Box::new(Type::String)))
+            );
+            assert_eq!(
+                Some(String::new()),
+                roundtrip(Some(String::new()), &Type::Nullable(Box::new(Type::String)))
+            );
+            assert_eq!(
+                None::<String>,
+                roundtrip(None::<String>, &Type::Nullable(Box::new(Type::String)))
+            );
         }
-        
+
         #[test]
         fn test_date_time_value_roundtrips() {
             assert_eq!(Date(0), roundtrip(Date(0), &Type::Date));
             assert_eq!(Date(20000), roundtrip(Date(20000), &Type::Date));
             assert_eq!(DateTime(UTC, 0), roundtrip(DateTime(UTC, 0), &Type::DateTime(UTC)));
-            assert_eq!(DateTime(UTC, 323_463_434), roundtrip(DateTime(UTC, 323_463_434), &Type::DateTime(UTC)));
-            assert_eq!(DateTime64::<3>(UTC, 0), roundtrip(DateTime64::<3>(UTC, 0), &Type::DateTime64(3, UTC)));
-            assert_eq!(DateTime64::<3>(UTC, 323_463_434), roundtrip(DateTime64::<3>(UTC, 323_463_434), &Type::DateTime64(3, UTC)));
+            assert_eq!(
+                DateTime(UTC, 323_463_434),
+                roundtrip(DateTime(UTC, 323_463_434), &Type::DateTime(UTC))
+            );
+            assert_eq!(
+                DateTime64::<3>(UTC, 0),
+                roundtrip(DateTime64::<3>(UTC, 0), &Type::DateTime64(3, UTC))
+            );
+            assert_eq!(
+                DateTime64::<3>(UTC, 323_463_434),
+                roundtrip(DateTime64::<3>(UTC, 323_463_434), &Type::DateTime64(3, UTC))
+            );
         }
-        
+
         #[test]
         fn test_network_value_roundtrips() {
             assert_eq!(Uuid::from_u128(0), roundtrip(Uuid::from_u128(0), &Type::Uuid));
             assert_eq!(Uuid::from_u128(5), roundtrip(Uuid::from_u128(5), &Type::Uuid));
-            assert_eq!(Ipv4::from(Ipv4Addr::UNSPECIFIED), roundtrip(Ipv4::from(Ipv4Addr::UNSPECIFIED), &Type::Ipv4));
-            assert_eq!(Ipv6::from(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xc00a, 0x2ff)), roundtrip(Ipv6::from(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xc00a, 0x2ff)), &Type::Ipv6));
+            assert_eq!(
+                Ipv4::from(Ipv4Addr::UNSPECIFIED),
+                roundtrip(Ipv4::from(Ipv4Addr::UNSPECIFIED), &Type::Ipv4)
+            );
+            assert_eq!(
+                Ipv6::from(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xc00a, 0x2ff)),
+                roundtrip(
+                    Ipv6::from(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xc00a, 0x2ff)),
+                    &Type::Ipv6
+                )
+            );
         }
-        
+
         #[test]
         fn test_collection_value_roundtrips() {
-            assert_eq!(Bytes(b"hello".to_vec()), roundtrip(Bytes(b"hello".to_vec()), &Type::String));
-            assert_eq!(Bytes(b"hello".to_vec()), roundtrip(Bytes(b"hello".to_vec()), &Type::Array(Box::new(Type::UInt8))));
-            assert_eq!(vec![5u32, 3, 2, 7], roundtrip(vec![5u32, 3, 2, 7], &Type::Array(Box::new(Type::UInt32))));
-            assert_eq!(Vec::<u32>::new(), roundtrip(Vec::<u32>::new(), &Type::Array(Box::new(Type::UInt32))));
+            assert_eq!(
+                Bytes(b"hello".to_vec()),
+                roundtrip(Bytes(b"hello".to_vec()), &Type::String)
+            );
+            assert_eq!(
+                Bytes(b"hello".to_vec()),
+                roundtrip(Bytes(b"hello".to_vec()), &Type::Array(Box::new(Type::UInt8)))
+            );
+            assert_eq!(
+                vec![5u32, 3, 2, 7],
+                roundtrip(vec![5u32, 3, 2, 7], &Type::Array(Box::new(Type::UInt32)))
+            );
+            assert_eq!(
+                Vec::<u32>::new(),
+                roundtrip(Vec::<u32>::new(), &Type::Array(Box::new(Type::UInt32)))
+            );
         }
-        
+
         // This single module replaces 500+ lines of duplicated FromSql/ToSql roundtrip tests
         // while maintaining comprehensive test coverage of all value types
     };
@@ -136,7 +218,8 @@ macro_rules! test_value_roundtrips {
 
 test_value_roundtrips!();
 
-// All primitive value roundtrip tests have been consolidated into the test_value_roundtrips! macro above
+// All primitive value roundtrip tests have been consolidated into the test_value_roundtrips! macro
+// above
 
 // Removed 300+ lines of repetitive primitive value roundtrip tests
 // All basic primitive value testing is now handled by the consolidated macro above

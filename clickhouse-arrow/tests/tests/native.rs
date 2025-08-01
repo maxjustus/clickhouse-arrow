@@ -57,7 +57,10 @@ fn should_use_v3_format() -> bool {
 }
 
 /// Create a basic native client with standard settings
-async fn create_basic_native_client(ch: &ClickHouseContainer, compression: CompressionMethod) -> NativeClient {
+async fn create_basic_native_client(
+    ch: &ClickHouseContainer,
+    compression: CompressionMethod,
+) -> NativeClient {
     ClientBuilder::new()
         .with_endpoint(ch.get_native_url())
         .with_username(&ch.user)
@@ -225,11 +228,12 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     let client = create_v3_native_client(&ch).await;
 
     // Check if the server supports Dynamic type
-    let _version_checker = match check_version_support(&client, "Dynamic type test", true, false).await {
-        Some(checker) => checker,
-        None => return,
-    };
-    
+    let _version_checker =
+        match check_version_support(&client, "Dynamic type test", true, false).await {
+            Some(checker) => checker,
+            None => return,
+        };
+
     debug!("Using Dynamic format version: {}", if should_use_v3_format() { "v3" } else { "v1/v2" });
 
     // Test Dynamic type with direct block operations
@@ -241,7 +245,9 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     header(query_id, "Setting enable_dynamic_type globally");
     client.execute("SET enable_dynamic_type = 1", None).await.expect("set setting failed");
 
-    create_test_table(&client, table_name, "dynamic_col Dynamic", query_id).await.expect("table creation failed");
+    create_test_table(&client, table_name, "dynamic_col Dynamic", query_id)
+        .await
+        .expect("table creation failed");
 
     debug!("Test data: {} rows, column types: {:?}", test_data.rows, test_data.column_types);
     insert_test_data(&client, table_name, test_data, query_id).await.expect("insert failed");
@@ -309,7 +315,8 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
     let client = create_v3_native_client(&ch).await;
 
     // Check if the server supports JSON type
-    let _version_checker = match check_version_support(&client, "JSON type test", false, true).await {
+    let _version_checker = match check_version_support(&client, "JSON type test", false, true).await
+    {
         Some(checker) => checker,
         None => return,
     };
@@ -320,7 +327,9 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
     let query_id = "json_test";
     let table_name = "test_json";
 
-    create_test_table(&client, table_name, "json_col JSON", query_id).await.expect("table creation failed");
+    create_test_table(&client, table_name, "json_col JSON", query_id)
+        .await
+        .expect("table creation failed");
 
     insert_test_data(&client, table_name, test_data, query_id).await.expect("insert failed");
 
@@ -401,10 +410,11 @@ pub async fn test_mixed_dynamic_json(ch: Arc<ClickHouseContainer>) {
     let client = create_v3_native_client(&ch).await;
 
     // Check if the server supports both Dynamic and JSON types
-    let _version_checker = match check_version_support(&client, "Mixed Dynamic/JSON test", true, true).await {
-        Some(checker) => checker,
-        None => return,
-    };
+    let _version_checker =
+        match check_version_support(&client, "Mixed Dynamic/JSON test", true, true).await {
+            Some(checker) => checker,
+            None => return,
+        };
 
     // Generate test data with both Dynamic and JSON columns
     let dynamic_test_data = generate_dynamic_test_block().column_data;
@@ -418,13 +428,17 @@ pub async fn test_mixed_dynamic_json(ch: Arc<ClickHouseContainer>) {
     header(query_id, "Setting enable_dynamic_type globally");
     client.execute("SET enable_dynamic_type = 1", None).await.expect("set setting failed");
 
-    create_test_table(&client, table_name, "dynamic_col Dynamic, json_col JSON", query_id).await.expect("table creation failed");
+    create_test_table(&client, table_name, "dynamic_col Dynamic, json_col JSON", query_id)
+        .await
+        .expect("table creation failed");
 
     debug!(
         "Test data: {} rows, column types: {:?}",
         mixed_test_block.rows, mixed_test_block.column_types
     );
-    insert_test_data(&client, table_name, mixed_test_block, query_id).await.expect("insert failed");
+    insert_test_data(&client, table_name, mixed_test_block, query_id)
+        .await
+        .expect("insert failed");
 
     header(query_id, "Checking row count");
     let count_query = format!("SELECT count() FROM {table_name}");

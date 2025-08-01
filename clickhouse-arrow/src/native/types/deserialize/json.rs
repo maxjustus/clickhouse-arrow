@@ -383,25 +383,53 @@ mod tests {
         assert_eq!(Value::Int64(-999_999_999).to_json().unwrap(), serde_json::json!(-999_999_999));
         assert_eq!(Value::UInt8(255).to_json().unwrap(), serde_json::json!(255));
         assert_eq!(Value::UInt16(65_535).to_json().unwrap(), serde_json::json!(65_535));
-        assert_eq!(Value::UInt32(4_294_967_295).to_json().unwrap(), serde_json::json!(4_294_967_295_u32));
-        assert_eq!(Value::UInt64(18_446_744_073_709_551_615_u64).to_json().unwrap(), serde_json::json!(18_446_744_073_709_551_615_u64));
+        assert_eq!(
+            Value::UInt32(4_294_967_295).to_json().unwrap(),
+            serde_json::json!(4_294_967_295_u32)
+        );
+        assert_eq!(
+            Value::UInt64(18_446_744_073_709_551_615_u64).to_json().unwrap(),
+            serde_json::json!(18_446_744_073_709_551_615_u64)
+        );
     }
 
     #[test]
     fn test_large_integer_json_conversions() {
-        assert_eq!(Value::Int128(170_141_183_460_469_231_731_687_303_715_884_105_727_i128).to_json().unwrap(), serde_json::json!("170141183460469231731687303715884105727"));
-        assert_eq!(Value::UInt128(340_282_366_920_938_463_463_374_607_431_768_211_455_u128).to_json().unwrap(), serde_json::json!("340282366920938463463374607431768211455"));
+        assert_eq!(
+            Value::Int128(170_141_183_460_469_231_731_687_303_715_884_105_727_i128)
+                .to_json()
+                .unwrap(),
+            serde_json::json!("170141183460469231731687303715884105727")
+        );
+        assert_eq!(
+            Value::UInt128(340_282_366_920_938_463_463_374_607_431_768_211_455_u128)
+                .to_json()
+                .unwrap(),
+            serde_json::json!("340282366920938463463374607431768211455")
+        );
 
-        let i256_val = i256([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]);
-        let u256_val = u256([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]);
+        let i256_val = i256([
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 27, 28, 29, 30, 31, 32,
+        ]);
+        let u256_val = u256([
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 27, 28, 29, 30, 31, 32,
+        ]);
         assert!(Value::Int256(i256_val).to_json().unwrap().is_string());
         assert!(Value::UInt256(u256_val).to_json().unwrap().is_string());
     }
 
     #[test]
     fn test_float_json_conversions() {
-        assert_eq!(Value::Float32(std::f32::consts::PI).to_json().unwrap(), serde_json::json!(std::f32::consts::PI));
-        assert_eq!(Value::Float64(-std::f64::consts::E).to_json().unwrap(), serde_json::json!(-std::f64::consts::E));
+        assert_eq!(
+            Value::Float32(std::f32::consts::PI).to_json().unwrap(),
+            serde_json::json!(std::f32::consts::PI)
+        );
+        assert_eq!(
+            Value::Float64(-std::f64::consts::E).to_json().unwrap(),
+            serde_json::json!(-std::f64::consts::E)
+        );
     }
 
     #[test]
@@ -413,19 +441,28 @@ mod tests {
         assert_eq!(Value::Decimal32(2, -1234).to_json().unwrap(), serde_json::json!("-12.34"));
 
         // Decimal64
-        assert_eq!(Value::Decimal64(6, 123_456_789).to_json().unwrap(), serde_json::json!("123.456789"));
+        assert_eq!(
+            Value::Decimal64(6, 123_456_789).to_json().unwrap(),
+            serde_json::json!("123.456789")
+        );
         assert_eq!(Value::Decimal64(10, 5).to_json().unwrap(), serde_json::json!("0.0000000005"));
 
         // Decimal128 & Decimal256
         assert_eq!(Value::Decimal128(3, 123_456).to_json().unwrap(), serde_json::json!("123.456"));
-        let d256 = i256([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100]);
+        let d256 = i256([
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 100,
+        ]);
         assert_eq!(Value::Decimal256(2, d256).to_json().unwrap(), serde_json::json!("1.00"));
     }
 
     #[test]
     fn test_string_null_json_conversions() {
         assert_eq!(Value::Null.to_json().unwrap(), serde_json::json!(null));
-        assert_eq!(Value::String(b"hello world".to_vec()).to_json().unwrap(), serde_json::json!("hello world"));
+        assert_eq!(
+            Value::String(b"hello world".to_vec()).to_json().unwrap(),
+            serde_json::json!("hello world")
+        );
         assert_eq!(Value::String(b"".to_vec()).to_json().unwrap(), serde_json::json!(""));
     }
 
@@ -439,18 +476,27 @@ mod tests {
 
         // DateTime - ClickHouse format: "YYYY-MM-DD HH:MM:SS"
         let dt = DateTime(UTC, 1_705_320_600);
-        assert_eq!(Value::DateTime(dt).to_json().unwrap(), serde_json::json!("2024-01-15 12:10:00"));
+        assert_eq!(
+            Value::DateTime(dt).to_json().unwrap(),
+            serde_json::json!("2024-01-15 12:10:00")
+        );
 
         // DateTime64 - ClickHouse format with precision
         let dt64 = DynDateTime64(UTC, 1_705_320_600_123, 3);
-        assert_eq!(Value::DateTime64(dt64).to_json().unwrap(), serde_json::json!("2024-01-15 12:10:00.123"));
+        assert_eq!(
+            Value::DateTime64(dt64).to_json().unwrap(),
+            serde_json::json!("2024-01-15 12:10:00.123")
+        );
     }
 
     #[test]
     fn test_uuid_network_json_conversions() {
         // UUID
         let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        assert_eq!(Value::Uuid(uuid).to_json().unwrap(), serde_json::json!("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(
+            Value::Uuid(uuid).to_json().unwrap(),
+            serde_json::json!("550e8400-e29b-41d4-a716-446655440000")
+        );
 
         // IPv4 & IPv6
         let ipv4 = Ipv4(Ipv4Addr::new(192, 168, 1, 1));
@@ -461,8 +507,14 @@ mod tests {
 
     #[test]
     fn test_enum_json_conversions() {
-        assert_eq!(Value::Enum8("active".to_string(), 1).to_json().unwrap(), serde_json::json!("active"));
-        assert_eq!(Value::Enum16("pending".to_string(), 2).to_json().unwrap(), serde_json::json!("pending"));
+        assert_eq!(
+            Value::Enum8("active".to_string(), 1).to_json().unwrap(),
+            serde_json::json!("active")
+        );
+        assert_eq!(
+            Value::Enum16("pending".to_string(), 2).to_json().unwrap(),
+            serde_json::json!("pending")
+        );
     }
 
     #[test]
@@ -472,30 +524,53 @@ mod tests {
         assert_eq!(Value::Array(array).to_json().unwrap(), serde_json::json!([1, 2, 3]));
 
         // Tuple
-        let tuple = vec![Value::Int32(1), Value::String(b"hello".to_vec()), Value::Float64(std::f64::consts::PI)];
-        assert_eq!(Value::Tuple(tuple).to_json().unwrap(), serde_json::json!([1, "hello", std::f64::consts::PI]));
+        let tuple = vec![
+            Value::Int32(1),
+            Value::String(b"hello".to_vec()),
+            Value::Float64(std::f64::consts::PI),
+        ];
+        assert_eq!(
+            Value::Tuple(tuple).to_json().unwrap(),
+            serde_json::json!([1, "hello", std::f64::consts::PI])
+        );
 
         // Map with string keys - becomes object
         let keys = vec![Value::String(b"name".to_vec()), Value::String(b"age".to_vec())];
         let values = vec![Value::String(b"Alice".to_vec()), Value::Int32(30)];
-        assert_eq!(Value::Map(keys, values).to_json().unwrap(), serde_json::json!({"name": "Alice", "age": 30}));
+        assert_eq!(
+            Value::Map(keys, values).to_json().unwrap(),
+            serde_json::json!({"name": "Alice", "age": 30})
+        );
 
         // Map with non-string keys - ClickHouse converts keys to strings
         let keys = vec![Value::Int32(1), Value::Int32(2)];
         let values = vec![Value::String(b"one".to_vec()), Value::String(b"two".to_vec())];
-        assert_eq!(Value::Map(keys, values).to_json().unwrap(), serde_json::json!({"1": "one", "2": "two"}));
+        assert_eq!(
+            Value::Map(keys, values).to_json().unwrap(),
+            serde_json::json!({"1": "one", "2": "two"})
+        );
 
         // Map with various key types
         let keys = vec![Value::UInt64(42), Value::Float64(3.5), Value::Null];
-        let values = vec![Value::String(b"forty-two".to_vec()), Value::String(b"float".to_vec()), Value::String(b"null-key".to_vec())];
-        assert_eq!(Value::Map(keys, values).to_json().unwrap(), serde_json::json!({"42": "forty-two", "3.5": "float", "null": "null-key"}));
+        let values = vec![
+            Value::String(b"forty-two".to_vec()),
+            Value::String(b"float".to_vec()),
+            Value::String(b"null-key".to_vec()),
+        ];
+        assert_eq!(
+            Value::Map(keys, values).to_json().unwrap(),
+            serde_json::json!({"42": "forty-two", "3.5": "float", "null": "null-key"})
+        );
     }
 
     #[test]
     fn test_variant_object_json_conversions() {
         // Variant
         let inner = Value::String(b"hello".to_vec());
-        assert_eq!(Value::Variant(0, Box::new(inner)).to_json().unwrap(), serde_json::json!("hello"));
+        assert_eq!(
+            Value::Variant(0, Box::new(inner)).to_json().unwrap(),
+            serde_json::json!("hello")
+        );
         let inner = Value::Int32(42);
         assert_eq!(Value::Variant(1, Box::new(inner)).to_json().unwrap(), serde_json::json!(42));
 
@@ -512,20 +587,41 @@ mod tests {
         assert_eq!(Value::Point(point).to_json().unwrap(), serde_json::json!([1.5, 2.5]));
 
         // Ring
-        let ring = Ring(vec![Point([0.0, 0.0]), Point([1.0, 0.0]), Point([1.0, 1.0]), Point([0.0, 0.0])]);
-        assert_eq!(Value::Ring(ring).to_json().unwrap(), serde_json::json!([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]]));
+        let ring =
+            Ring(vec![Point([0.0, 0.0]), Point([1.0, 0.0]), Point([1.0, 1.0]), Point([0.0, 0.0])]);
+        assert_eq!(
+            Value::Ring(ring).to_json().unwrap(),
+            serde_json::json!([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]])
+        );
 
         // Polygon
         let polygon = Polygon(vec![
-            Ring(vec![Point([0.0, 0.0]), Point([4.0, 0.0]), Point([4.0, 4.0]), Point([0.0, 4.0]), Point([0.0, 0.0])]),
-            Ring(vec![Point([1.0, 1.0]), Point([1.0, 2.0]), Point([2.0, 2.0]), Point([2.0, 1.0]), Point([1.0, 1.0])]),
+            Ring(vec![
+                Point([0.0, 0.0]),
+                Point([4.0, 0.0]),
+                Point([4.0, 4.0]),
+                Point([0.0, 4.0]),
+                Point([0.0, 0.0]),
+            ]),
+            Ring(vec![
+                Point([1.0, 1.0]),
+                Point([1.0, 2.0]),
+                Point([2.0, 2.0]),
+                Point([2.0, 1.0]),
+                Point([1.0, 1.0]),
+            ]),
         ]);
         let json_poly = Value::Polygon(polygon).to_json().unwrap();
         assert!(json_poly.is_array());
         assert_eq!(json_poly.as_array().unwrap().len(), 2); // outer ring + hole
 
         // MultiPolygon
-        let multi = MultiPolygon(vec![Polygon(vec![Ring(vec![Point([0.0, 0.0]), Point([1.0, 0.0]), Point([1.0, 1.0]), Point([0.0, 0.0])])])]);
+        let multi = MultiPolygon(vec![Polygon(vec![Ring(vec![
+            Point([0.0, 0.0]),
+            Point([1.0, 0.0]),
+            Point([1.0, 1.0]),
+            Point([0.0, 0.0]),
+        ])])]);
         let json_multi = Value::MultiPolygon(multi).to_json().unwrap();
         assert!(json_multi.is_array());
         assert_eq!(json_multi.as_array().unwrap().len(), 1);
@@ -534,7 +630,10 @@ mod tests {
     #[test]
     fn test_nested_json_conversions() {
         // Nested array
-        let nested = Value::Array(vec![Value::Array(vec![Value::Int32(1), Value::Int32(2)]), Value::Array(vec![Value::Int32(3), Value::Int32(4)])]);
+        let nested = Value::Array(vec![
+            Value::Array(vec![Value::Int32(1), Value::Int32(2)]),
+            Value::Array(vec![Value::Int32(3), Value::Int32(4)]),
+        ]);
         assert_eq!(nested.to_json().unwrap(), serde_json::json!([[1, 2], [3, 4]]));
 
         // Array of tuples
