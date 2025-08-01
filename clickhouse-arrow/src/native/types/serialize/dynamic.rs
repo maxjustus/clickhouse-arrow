@@ -23,7 +23,9 @@ macro_rules! write_discriminator {
                 debug_assert!($disc <= 65535);
                 $writer.write_u16_le(u16::try_from($disc).unwrap()).await?
             }
-            65536..=4_294_967_295 => $writer.write_u32_le(u32::try_from($disc).unwrap()).await?,
+            65536..=4_294_967_295_usize => {
+                $writer.write_u32_le(u32::try_from($disc).unwrap()).await?
+            }
             _ => $writer.write_u64_le($disc).await?,
         }
     };
@@ -37,7 +39,7 @@ macro_rules! write_discriminator {
                 debug_assert!($disc <= 65535);
                 $writer.put_u16_le(u16::try_from($disc).unwrap())
             }
-            65536..=4_294_967_295 => $writer.put_u32_le(u32::try_from($disc).unwrap()),
+            65536..=4_294_967_295_usize => $writer.put_u32_le(u32::try_from($disc).unwrap()),
             _ => $writer.put_u64_le($disc),
         }
     };
@@ -383,56 +385,178 @@ mod tests {
         }
     }
 
-    // Assert version compatibility behavior
-    fn assert_version_compatibility(major: u64, minor: u64, patch: u64, should_succeed: bool) {
-        let values = vec![Value::Int32(42), Value::String(b"test".to_vec())];
-        let mut state = create_test_state(&values);
-        state.server_version = Some((major, minor, patch));
+    // Assert version compatibility behavior for both sync and async
+    macro_rules! version_compatibility_test {
+        ($name:ident, $major:expr, $minor:expr, $patch:expr, $should_succeed:expr) => {
+            #[tokio::test]
+            async fn $name() {
+                let values = vec![Value::Int32(42), Value::String(b"test".to_vec())];
+                let mut state = create_test_state(&values);
+                state.server_version = Some(($major, $minor, $patch));
 
-        let mut buffer = Vec::new();
-        let result = DynamicSerializer::write_prefix_sync(
-            &Type::Dynamic { max_types: None },
-            &mut buffer,
-            &mut state,
-        );
+                // Test async
+                let mut async_buffer = Vec::new();
+                let async_result = DynamicSerializer::write_prefix(
+                    &Type::Dynamic { max_types: None },
+                    &mut async_buffer,
+                    &mut state,
+                )
+                .await;
 
-        if should_succeed {
-            assert!(result.is_ok(), "Version {major}.{minor}.{patch} should succeed");
-        } else {
-            assert!(result.is_err(), "Version {major}.{minor}.{patch} should fail");
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("requires ClickHouse server version >= 25.6")
-            );
-        }
+                // Test sync
+                let mut sync_buffer = Vec::new();
+                let sync_result = DynamicSerializer::write_prefix_sync(
+                    &Type::Dynamic { max_types: None },
+                    &mut sync_buffer,
+                    &mut state,
+                );
+
+                if $should_succeed {
+                    assert!(
+                        async_result.is_ok(),
+                        "Async version {}.{}.{} should succeed",
+                        $major,
+                        $minor,
+                        $patch
+                    );
+                    assert!(
+                        sync_result.is_ok(),
+                        "Sync version {}.{}.{} should succeed",
+                        $major,
+                        $minor,
+                        $patch
+                    );
+                    assert_eq!(async_buffer, sync_buffer, "Async and sync outputs should match");
+                } else {
+                    assert!(
+                        async_result.is_err(),
+                        "Async version {}.{}.{} should fail",
+                        $major,
+                        $minor,
+                        $patch
+                    );
+                    assert!(
+                        sync_result.is_err(),
+                        "Sync version {}.{}.{} should fail",
+                        $major,
+                        $minor,
+                        $patch
+                    );
+                    let async_err = async_result.unwrap_err().to_string();
+                    let sync_err = sync_result.unwrap_err().to_string();
+                    assert!(async_err.contains("requires ClickHouse server version >= 25.6"));
+                    assert!(sync_err.contains("requires ClickHouse server version >= 25.6"));
+                }
+            }
+        };
     }
 
-    // Assert discriminator size matches expectations for given total_types
-    fn assert_discriminator_size(total_types: usize, expected_bytes: usize, description: &str) {
-        let mut buffer = Vec::new();
-        write_discriminator!(sync &mut buffer, 0, total_types);
-        assert_eq!(
-            buffer.len(),
-            expected_bytes,
-            "Failed for total_types={total_types} ({description})"
-        );
+    // Helper function to write discriminator in an async context with proper error handling
+    async fn write_discriminator_async(
+        buffer: &mut Vec<u8>,
+        disc: u64,
+        total_types: usize,
+    ) -> Result<()> {
+        write_discriminator!(async buffer, disc, total_types);
+        Ok(())
+    }
 
-        // Test both min and max discriminator values for this size
-        buffer.clear();
-        let max_disc = std::cmp::min(total_types - 1, match expected_bytes {
-            1 => 255,
-            2 => 65535,
-            4 => 4_294_967_295,
-            _ => total_types - 1,
-        });
-        write_discriminator!(sync &mut buffer, max_disc as u64, total_types);
-        assert_eq!(
-            buffer.len(),
-            expected_bytes,
-            "Max discriminator failed for total_types={total_types}"
-        );
+    // Assert discriminator size matches expectations for given total_types (sync and async)
+    macro_rules! discriminator_test {
+        ($name:ident, $total_types:expr, $expected_bytes:expr, $description:expr) => {
+            #[tokio::test]
+            async fn $name() {
+                // Test sync discriminator
+                let mut sync_buffer = Vec::new();
+                write_discriminator!(sync &mut sync_buffer, 0, $total_types);
+                assert_eq!(
+                    sync_buffer.len(),
+                    $expected_bytes,
+                    "Sync failed for total_types={} ({})", $total_types, $description
+                );
+
+                // Test async discriminator
+                let mut async_buffer = Vec::new();
+                write_discriminator_async(&mut async_buffer, 0, $total_types).await.unwrap();
+                assert_eq!(
+                    async_buffer.len(),
+                    $expected_bytes,
+                    "Async failed for total_types={} ({})", $total_types, $description
+                );
+
+                assert_eq!(sync_buffer, async_buffer, "Sync and async discriminators should match");
+
+                // Test both min and max discriminator values for this size
+                let max_disc = std::cmp::min($total_types - 1, match $expected_bytes {
+                    1 => 255,
+                    2 => 65535,
+                    4 => 4_294_967_295_usize,
+                    _ => $total_types - 1,
+                }) as u64;
+
+                sync_buffer.clear();
+                async_buffer.clear();
+
+                write_discriminator!(sync &mut sync_buffer, max_disc, $total_types);
+                write_discriminator_async(&mut async_buffer, max_disc, $total_types).await.unwrap();
+
+                assert_eq!(
+                    sync_buffer.len(),
+                    $expected_bytes,
+                    "Sync max discriminator failed for total_types={}", $total_types
+                );
+                assert_eq!(
+                    async_buffer.len(),
+                    $expected_bytes,
+                    "Async max discriminator failed for total_types={}", $total_types
+                );
+                assert_eq!(sync_buffer, async_buffer, "Sync and async max discriminators should match");
+            }
+        };
+    }
+
+    // Create a unified test for prefix writing that tests both sync and async
+    macro_rules! prefix_integration_test {
+        ($name:ident, $values:expr, $expected_type_count:expr) => {
+            #[tokio::test]
+            async fn $name() {
+                let values = $values;
+
+                // Test async path
+                let type_specific_state = DynamicSerializer::analyze_values(&values);
+                let mut async_buffer = Vec::new();
+                let mut async_state = SerializerState {
+                    type_specific: type_specific_state.clone(),
+                    ..Default::default()
+                };
+                DynamicSerializer::write_prefix(
+                    &Type::Dynamic { max_types: None },
+                    &mut async_buffer,
+                    &mut async_state,
+                )
+                .await
+                .unwrap();
+
+                // Test sync path
+                let mut sync_buffer = Vec::new();
+                let mut sync_state =
+                    SerializerState { type_specific: type_specific_state, ..Default::default() };
+                DynamicSerializer::write_prefix_sync(
+                    &Type::Dynamic { max_types: None },
+                    &mut sync_buffer,
+                    &mut sync_state,
+                )
+                .unwrap();
+
+                // Verify both produce the same output
+                assert_eq!(async_buffer, sync_buffer, "Async and sync outputs should match");
+
+                // Verify version and type count
+                let mut reader = &sync_buffer[..];
+                assert_eq!(reader.get_u64_le(), DYNAMIC_VERSION);
+                assert_eq!(reader.try_get_var_uint().unwrap(), $expected_type_count);
+            }
+        };
     }
 
     // Type name serialization tests
@@ -521,91 +645,75 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_dynamic_prefix_writing_integration() {
-        let values = vec![
+    // Use the new unified prefix integration test
+    prefix_integration_test!(
+        test_dynamic_prefix_writing_integration,
+        vec![
             Value::Int32(42),
             Value::String(b"hello".to_vec()),
             Value::Float64(std::f64::consts::PI),
-        ];
+        ],
+        3
+    );
 
-        // Analyze values and write prefix
-        let type_specific_state = DynamicSerializer::analyze_values(&values);
-        let mut buffer = Vec::new();
-        let mut state =
-            SerializerState { type_specific: type_specific_state, ..Default::default() };
-        DynamicSerializer::write_prefix(
-            &Type::Dynamic { max_types: None },
-            &mut buffer,
-            &mut state,
-        )
-        .await
-        .unwrap();
+    // Server version compatibility tests using new macro
+    version_compatibility_test!(test_version_check_too_old_major, 24, 12, 0, false);
+    version_compatibility_test!(test_version_check_too_old_minor_25_1, 25, 1, 0, false);
+    version_compatibility_test!(test_version_check_too_old_minor_25_5, 25, 5, 0, false);
+    version_compatibility_test!(test_version_check_minimum_supported, 25, 6, 0, true);
+    version_compatibility_test!(test_version_check_newer_supported_25_7, 25, 7, 0, true);
+    version_compatibility_test!(test_version_check_newer_supported_26_0, 26, 0, 0, true);
 
-        // Verify version and type count
-        let mut reader = &buffer[..];
-        assert_eq!(reader.get_u64_le(), DYNAMIC_VERSION);
-        assert_eq!(reader.try_get_var_uint().unwrap(), 3);
-    }
-
-    // Server version compatibility tests
-    #[test]
-    fn test_version_check_too_old_major() { assert_version_compatibility(24, 12, 0, false); }
-
-    #[test]
-    fn test_version_check_too_old_minor() {
-        assert_version_compatibility(25, 1, 0, false);
-        assert_version_compatibility(25, 5, 0, false);
-    }
-
-    #[test]
-    fn test_version_check_minimum_supported() { assert_version_compatibility(25, 6, 0, true); }
-
-    #[test]
-    fn test_version_check_newer_supported() {
-        assert_version_compatibility(25, 7, 0, true);
-        assert_version_compatibility(26, 0, 0, true);
-    }
-
-    #[test]
-    fn test_version_check_no_version_info() {
+    #[tokio::test]
+    async fn test_version_check_no_version_info() {
         let values = vec![Value::Int32(42), Value::String(b"test".to_vec())];
         let mut state = create_test_state(&values);
         state.server_version = None; // No version info should pass
 
-        let mut buffer = Vec::new();
-        let result = DynamicSerializer::write_prefix_sync(
+        // Test async
+        let mut async_buffer = Vec::new();
+        let async_result = DynamicSerializer::write_prefix(
             &Type::Dynamic { max_types: None },
-            &mut buffer,
+            &mut async_buffer,
+            &mut state,
+        )
+        .await;
+        assert!(async_result.is_ok(), "Async: No version info should succeed");
+
+        // Test sync
+        let mut sync_buffer = Vec::new();
+        let sync_result = DynamicSerializer::write_prefix_sync(
+            &Type::Dynamic { max_types: None },
+            &mut sync_buffer,
             &mut state,
         );
-        assert!(result.is_ok(), "No version info should succeed");
+        assert!(sync_result.is_ok(), "Sync: No version info should succeed");
+
+        assert_eq!(async_buffer, sync_buffer, "Async and sync outputs should match");
     }
 
-    // Discriminator size optimization tests
-    #[test]
-    fn test_discriminator_u8_range() {
-        assert_discriminator_size(100, 1, "fits in u8");
-        assert_discriminator_size(255, 1, "max u8");
-    }
+    // Discriminator size tests using new macro
+    discriminator_test!(test_discriminator_u8_small, 100, 1, "fits in u8");
+    discriminator_test!(test_discriminator_u8_max, 255, 1, "max u8");
+    discriminator_test!(test_discriminator_u16_min, 256, 2, "needs u16");
+    discriminator_test!(test_discriminator_u16_max, 65535, 2, "max u16");
+    discriminator_test!(test_discriminator_u32_min, 65536, 4, "needs u32");
+    discriminator_test!(test_discriminator_u32_max, 4_294_967_295_usize, 4, "max u32");
 
-    #[test]
-    fn test_discriminator_u16_range() {
-        assert_discriminator_size(256, 2, "needs u16");
-        assert_discriminator_size(65535, 2, "max u16");
-    }
-
-    #[test]
-    fn test_discriminator_u32_range() {
-        assert_discriminator_size(65536, 4, "needs u32");
-        assert_discriminator_size(4_294_967_295, 4, "max u32");
-    }
-
-    #[test]
-    fn test_discriminator_u64_range() {
+    #[tokio::test]
+    async fn test_discriminator_u64_range() {
         let total_types = 4_294_967_296_usize;
-        let mut buffer = Vec::new();
-        write_discriminator!(sync &mut buffer, 0, total_types);
-        assert_eq!(buffer.len(), 8, "Should use u64 for very large total_types");
+
+        // Test sync
+        let mut sync_buffer = Vec::new();
+        write_discriminator!(sync &mut sync_buffer, 0, total_types);
+        assert_eq!(sync_buffer.len(), 8, "Sync: Should use u64 for very large total_types");
+
+        // Test async
+        let mut async_buffer = Vec::new();
+        write_discriminator_async(&mut async_buffer, 0, total_types).await.unwrap();
+        assert_eq!(async_buffer.len(), 8, "Async: Should use u64 for very large total_types");
+
+        assert_eq!(sync_buffer, async_buffer, "Sync and async u64 discriminators should match");
     }
 }
