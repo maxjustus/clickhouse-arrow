@@ -560,8 +560,14 @@ impl FromStr for Type {
                             skip_paths.push(pattern.to_string());
                         } else if let Some(skip_path) = arg.strip_prefix("SKIP ") {
                             // Handle literal skip paths: SKIP field_name
-                            let field =
-                                skip_path.trim().trim_start_matches('`').trim_end_matches('`');
+                            let field = skip_path
+                                .trim()
+                                .trim_start_matches('`')
+                                .trim_end_matches('`')
+                                .trim_start_matches('\'')
+                                .trim_end_matches('\'')
+                                .trim_start_matches('"')
+                                .trim_end_matches('"');
                             skip_paths.push(field.to_string());
                         } else if arg.contains(' ')
                             && !arg.starts_with("max_")
@@ -669,8 +675,14 @@ impl FromStr for Type {
                             skip_paths.push(pattern.to_string());
                         } else if let Some(skip_path) = arg.strip_prefix("SKIP ") {
                             // Handle literal skip paths: SKIP field_name
-                            let field =
-                                skip_path.trim().trim_start_matches('`').trim_end_matches('`');
+                            let field = skip_path
+                                .trim()
+                                .trim_start_matches('`')
+                                .trim_end_matches('`')
+                                .trim_start_matches('\'')
+                                .trim_end_matches('\'')
+                                .trim_start_matches('"')
+                                .trim_end_matches('"');
                             skip_paths.push(field.to_string());
                         } else if arg.contains(' ')
                             && !arg.starts_with("max_")
@@ -1241,6 +1253,60 @@ mod tests {
                 skip_paths:        vec![".*\\.debug".to_string(), "temp.field".to_string()],
             }
         );
+    }
+
+    /// Tests parsing of JSON with quoted skip paths
+    #[test]
+    fn test_json_quoted_skip_paths() {
+        // Test single-quoted skip paths
+        let json_type = Type::from_str("JSON(SKIP 'field.to.skip')").unwrap();
+        if let Type::JSON { skip_paths, .. } = json_type {
+            assert_eq!(skip_paths.len(), 1);
+            assert_eq!(skip_paths[0], "field.to.skip");
+        } else {
+            panic!("Expected JSON type");
+        }
+
+        // Test double-quoted skip paths
+        let json_type = Type::from_str("JSON(SKIP \"another.field\")").unwrap();
+        if let Type::JSON { skip_paths, .. } = json_type {
+            assert_eq!(skip_paths.len(), 1);
+            assert_eq!(skip_paths[0], "another.field");
+        } else {
+            panic!("Expected JSON type");
+        }
+
+        // Test backtick-quoted skip paths (existing behavior)
+        let json_type = Type::from_str("JSON(SKIP `backtick.field`)").unwrap();
+        if let Type::JSON { skip_paths, .. } = json_type {
+            assert_eq!(skip_paths.len(), 1);
+            assert_eq!(skip_paths[0], "backtick.field");
+        } else {
+            panic!("Expected JSON type");
+        }
+
+        // Test mixed quotes with multiple skip paths
+        let json_type = Type::from_str("JSON(SKIP 'single', SKIP \"double\", SKIP `backtick`)").unwrap();
+        if let Type::JSON { skip_paths, .. } = json_type {
+            assert_eq!(skip_paths.len(), 3);
+            assert_eq!(skip_paths[0], "single");
+            assert_eq!(skip_paths[1], "double");
+            assert_eq!(skip_paths[2], "backtick");
+        } else {
+            panic!("Expected JSON type");
+        }
+
+        // Test combined with other parameters
+        let json_type = Type::from_str("JSON(max_dynamic_paths=100, SKIP 'field.name', Name String)").unwrap();
+        if let Type::JSON { max_dynamic_paths, skip_paths, typed_paths, .. } = json_type {
+            assert_eq!(max_dynamic_paths, Some(100));
+            assert_eq!(skip_paths.len(), 1);
+            assert_eq!(skip_paths[0], "field.name");
+            assert_eq!(typed_paths.len(), 1);
+            assert_eq!(typed_paths[0], ("Name".to_string(), Box::new(Type::String)));
+        } else {
+            panic!("Expected JSON type");
+        }
     }
 
     /// Tests parsing of JSON typed paths and skip paths.
