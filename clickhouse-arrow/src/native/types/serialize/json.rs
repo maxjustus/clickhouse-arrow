@@ -443,18 +443,6 @@ impl JsonSerializer {
         let mut paths: Vec<String> = json_data.path_columns.keys().cloned().collect();
         paths.sort(); // Ensure consistent ordering
 
-        #[cfg(test)]
-        {
-            println!("JSON analyze_values found {} paths: {:?}", paths.len(), paths);
-            for (path, values) in &json_data.path_columns {
-                let types: std::collections::HashSet<_> = values
-                    .iter()
-                    .filter(|v| !matches!(v, Value::Null))
-                    .map(Self::get_value_type_name)
-                    .collect();
-                println!("  Path '{}': types {:?}, {} values", path, types, values.len());
-            }
-        }
 
         let state = JsonState {
             version:      None, // Will be set properly in write_prefix
@@ -917,7 +905,6 @@ mod tests {
         cursor.read_exact(&mut version_bytes)?;
         let version = u64::from_le_bytes(version_bytes);
 
-        println!("Serialization version: {version}");
         assert_eq!(
             version, JSON_OBJECT_SERIALIZATION_VERSION,
             "Should use v3 object serialization, not string serialization"
@@ -929,7 +916,6 @@ mod tests {
         cursor.read_exact(&mut path_count_byte)?;
         let path_count = path_count_byte[0]; // Simple case - should be small number
 
-        println!("Number of dynamic paths: {path_count}");
         assert!(path_count > 0, "Should have dynamic paths for object serialization");
 
         // Verify we can deserialize it back correctly
@@ -950,7 +936,6 @@ mod tests {
                     let json_value: serde_json::Value = serde_json::from_str(&json_str)
                         .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?;
 
-                    println!("Deserialized row {i}: {json_value}");
 
                     // Verify it's a proper JSON object (not just a string)
                     assert!(json_value.is_object(), "Deserialized value should be a JSON object");
@@ -997,13 +982,10 @@ mod tests {
 
         // Read the version to confirm it's v3
         let version = u64::from_le_bytes(v3_output[0..8].try_into().unwrap());
-        println!("Serialization format version: {version}");
-        println!("V3 serialized size: {} bytes", v3_output.len());
 
         // Inspect the structure by looking at what follows the version
         if version == JSON_OBJECT_SERIALIZATION_VERSION {
             let path_count = v3_output[8]; // Simple varint for small numbers
-            println!("Number of dynamic paths in v3: {path_count}");
 
             // v3 should have multiple paths (user.name, user.age, active)
             assert!(path_count >= 3, "v3 should decompose JSON into multiple paths");
@@ -1024,7 +1006,6 @@ mod tests {
             type_.deserialize_column(&mut input, values.len(), &mut deser_state).await?;
 
         assert_eq!(deserialized.len(), values.len());
-        println!("Successfully deserialized {} rows with v3 format", deserialized.len());
 
         Ok(())
     }
@@ -1055,10 +1036,6 @@ mod tests {
         let v3_version = u64::from_le_bytes(v3_output[0..8].try_into().unwrap());
         let v3_path_count = v3_output[8];
 
-        println!("=== Object Serialization (v3) ===");
-        println!("Version: {v3_version}");
-        println!("Path count: {v3_path_count}");
-        println!("Total size: {} bytes", v3_output.len());
 
         // Verify it's actually v3 object format
         assert_eq!(v3_version, JSON_OBJECT_SERIALIZATION_VERSION);
@@ -1072,18 +1049,15 @@ mod tests {
         let deserialized =
             type_.deserialize_column(&mut input, values.len(), &mut deser_state).await?;
 
-        println!("Deserialized {} rows successfully", deserialized.len());
         for (i, value) in deserialized.iter().enumerate() {
             if let Value::String(bytes) = value {
                 let json_str = String::from_utf8(bytes.clone())?;
                 let json_value: serde_json::Value = serde_json::from_str(&json_str)
                     .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?;
-                println!("Row {i}: {json_value}");
                 assert!(json_value.is_object(), "Should be a proper JSON object");
             }
         }
 
-        println!("✅ Object serialization verification complete");
         Ok(())
     }
 
