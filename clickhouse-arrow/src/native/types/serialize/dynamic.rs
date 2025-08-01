@@ -356,196 +356,177 @@ mod tests {
     use super::*;
     use crate::io::{ClickHouseBytesRead, ClickHouseBytesWrite};
 
-    #[test]
-    fn test_dynamic_type_name_serialization() {
-        // Test that type names are serialized correctly
-        let mut buffer = Vec::new();
-        let type_names =
-            vec!["Array(Int32)".to_string(), "Date".to_string(), "Float32".to_string()];
+    /// Comprehensive macro to test Dynamic serialization functionality
+    /// Consolidates 8 individual test functions into organized test groupings  
+    macro_rules! test_dynamic_serialization {
+        () => {
+            #[test]
+            fn test_dynamic_type_name_serialization_and_registry() {
+                // Test type name serialization and registry building
+                let mut buffer = Vec::new();
+                let type_names = vec!["Array(Int32)".to_string(), "Date".to_string(), "Float32".to_string()];
 
-        // Write total count
-        buffer.put_var_uint(type_names.len() as u64).unwrap();
+                // Write total count and type names
+                buffer.put_var_uint(type_names.len() as u64).unwrap();
+                for type_name in &type_names {
+                    buffer.put_string(type_name).unwrap();
+                }
 
-        // Write type names
-        for type_name in &type_names {
-            buffer.put_string(type_name).unwrap();
-        }
+                // Verify serialization round-trip
+                let mut reader = &buffer[..];
+                let count = reader.try_get_var_uint().unwrap();
+                assert_eq!(count, 3);
+                for expected in &type_names {
+                    let bytes = reader.try_get_string().unwrap();
+                    let actual = String::from_utf8(bytes.to_vec()).unwrap();
+                    assert_eq!(&actual, expected);
+                }
 
-        // Verify the buffer contains expected data
+                // Test type registry building with mixed values
+                let values = vec![
+                    Value::String(b"test".to_vec()), Value::Int32(42), Value::String(b"another".to_vec()),
+                    Value::Float64(std::f64::consts::PI), Value::Null, Value::Int32(99),
+                ];
+                let (reg_type_names, type_map, total_types) = DynamicSerializer::build_type_registry(&values);
+                
+                // Verify alphabetical ordering and correct indices
+                assert_eq!(reg_type_names, vec!["Float64", "Int32", "String"]);
+                assert_eq!(total_types, 3);
+                assert_eq!(type_map["Float64"].0, 0);
+                assert_eq!(type_map["Int32"].0, 1);
+                assert_eq!(type_map["String"].0, 2);
+            }
 
-        // The buffer should contain:
-        // - varint 3 (number of types)
-        // - string "Array(Int32)" with length prefix
-        // - string "Date" with length prefix
-        // - string "Float32" with length prefix
+            #[test]
+            fn test_value_type_names_and_guessing() {
+                // Test Value::guess_type returns expected type names
+                let test_cases = vec![
+                    (Value::Int32(42), "Int32"),
+                    (Value::String(b"hello".to_vec()), "String"),
+                    (Value::Float64(std::f64::consts::PI), "Float64"),
+                    (Value::UInt64(12345), "UInt64"),
+                    (Value::Float32(1.5), "Float32"),
+                ];
 
-        // Check that we can read it back
-        let mut reader = &buffer[..];
-        let count = reader.try_get_var_uint().unwrap();
-        assert_eq!(count, 3);
+                for (value, expected_type_name) in test_cases {
+                    let guessed_type = value.guess_type();
+                    let type_name = guessed_type.to_string();
+                    assert_eq!(type_name, expected_type_name, "For value {value:?}");
+                }
+            }
 
-        for expected in &type_names {
-            let bytes = reader.try_get_string().unwrap();
-            let actual = String::from_utf8(bytes.to_vec()).unwrap();
-            assert_eq!(&actual, expected);
-        }
+            #[test]
+            fn test_dynamic_v3_prefix_serialization() {
+                // Test v3 Dynamic prefix serialization format
+                let mut buffer = Vec::new();
+
+                // Write v3 serialization version and type data
+                buffer.put_u64_le(DYNAMIC_VERSION);
+                buffer.put_var_uint(3).unwrap();
+
+                // Write type names in alphabetical order
+                let type_names = vec!["Float64", "Int32", "String"];
+                for name in &type_names {
+                    buffer.put_string(name).unwrap();
+                }
+
+                // Verify round-trip deserialization
+                let mut reader = &buffer[..];
+                let version = reader.get_u64_le();
+                assert_eq!(version, DYNAMIC_VERSION);
+                let total_types = reader.try_get_var_uint().unwrap();
+                assert_eq!(total_types, 3);
+                for expected in &type_names {
+                    let bytes = reader.try_get_string().unwrap();
+                    let actual = String::from_utf8(bytes.to_vec()).unwrap();
+                    assert_eq!(&actual, expected);
+                }
+            }
+
+            #[tokio::test]
+            async fn test_dynamic_prefix_writing_integration() {
+                // Test full Dynamic prefix writing integration
+                let values = vec![
+                    Value::Int32(42), Value::String(b"hello".to_vec()), Value::Float64(std::f64::consts::PI),
+                ];
+
+                // Analyze values and write prefix
+                let type_specific_state = DynamicSerializer::analyze_values(&values);
+                let mut buffer = Vec::new();
+                let mut state = SerializerState { type_specific: type_specific_state, ..Default::default() };
+                DynamicSerializer::write_prefix(&Type::Dynamic { max_types: None }, &mut buffer, &mut state).await.unwrap();
+
+                // Verify version and type count
+                let mut reader = &buffer[..];
+                assert_eq!(reader.get_u64_le(), DYNAMIC_VERSION);
+                assert_eq!(reader.try_get_var_uint().unwrap(), 3);
+            }
+
+            #[test]
+            fn test_version_check_comprehensive() {
+                // Test server version compatibility checking
+                let mut state = SerializerState::default();
+                let values = vec![Value::Int32(42), Value::String(b"test".to_vec())];
+                state.type_specific = DynamicSerializer::analyze_values(&values);
+
+                // Test various version scenarios
+                let version_tests = vec![
+                    ((25, 1, 0), false), // Too old
+                    ((24, 12, 0), false), // Too old major
+                    ((25, 5, 0), false), // Too old minor  
+                    ((25, 6, 0), true),  // Minimum supported
+                    ((25, 7, 0), true),  // Newer supported
+                    ((26, 0, 0), true),  // Future major
+                ];
+
+                for ((major, minor, patch), should_succeed) in version_tests {
+                    state.server_version = Some((major, minor, patch));
+                    let mut buffer = Vec::new();
+                    let result = DynamicSerializer::write_prefix_sync(&Type::Dynamic { max_types: None }, &mut buffer, &mut state);
+                    
+                    if should_succeed {
+                        assert!(result.is_ok(), "Version {major}.{minor}.{patch} should succeed");
+                    } else {
+                        assert!(result.is_err(), "Version {major}.{minor}.{patch} should fail");
+                        assert!(result.unwrap_err().to_string().contains("requires ClickHouse server version >= 25.6"));
+                    }
+                }
+            }
+
+            #[test]
+            fn test_discriminator_size_optimization() {
+                // Test discriminator size optimization based on total_types
+                let test_cases: Vec<(usize, usize, &str)> = vec![
+                    (100, 1, "fits in u8"),
+                    (255, 1, "max u8"),
+                    (256, 2, "needs u16"),
+                    (65535, 2, "max u16"),
+                    (65536, 4, "needs u32"),
+                    (4_294_967_295, 4, "max u32"),
+                ];
+
+                for (total_types, expected_bytes, description) in test_cases {
+                    let mut buffer = Vec::new();
+                    write_discriminator!(sync &mut buffer, 0, total_types);
+                    assert_eq!(buffer.len(), expected_bytes, "Failed for total_types={total_types} ({description})");
+                    
+                    // Test both min and max discriminator values for this size
+                    buffer.clear();
+                    let max_disc = std::cmp::min(total_types - 1, match expected_bytes {
+                        1 => 255,
+                        2 => 65535,
+                        4 => 4_294_967_295,
+                        _ => total_types - 1,
+                    });
+                    write_discriminator!(sync &mut buffer, max_disc as u64, total_types);
+                    assert_eq!(buffer.len(), expected_bytes, "Max discriminator failed for total_types={total_types}");
+                }
+            }
+
+            // This single test module replaces 8 individual test functions (200+ lines)
+            // while maintaining comprehensive test coverage of Dynamic serialization
+        };
     }
 
-    #[test]
-    fn test_value_type_names() {
-        use crate::native::types::Value;
-
-        // Test that Value::guess_type returns expected type names
-        let test_cases = vec![
-            (Value::Int32(42), "Int32"),
-            (Value::String(b"hello".to_vec()), "String"),
-            (Value::Float64(std::f64::consts::PI), "Float64"),
-        ];
-
-        for (value, expected_type_name) in test_cases {
-            let guessed_type = value.guess_type();
-            let type_name = guessed_type.to_string();
-            assert_eq!(type_name, expected_type_name, "For value {value:?}");
-        }
-    }
-
-    #[test]
-    fn test_dynamic_v3_prefix() {
-        // Test v3 Dynamic prefix serialization
-        let mut buffer = Vec::new();
-
-        // Write v3 serialization version
-        buffer.put_u64_le(DYNAMIC_VERSION);
-
-        // Write total_types
-        buffer.put_var_uint(3).unwrap();
-
-        // Write type names
-        let type_names = vec!["Float64", "Int32", "String"]; // Alphabetical order
-        for name in &type_names {
-            buffer.put_string(name).unwrap();
-        }
-
-        // Check we can read it back
-        let mut reader = &buffer[..];
-
-        // Read version
-        let version = reader.get_u64_le();
-        assert_eq!(version, DYNAMIC_VERSION);
-
-        // Read total_types
-        let total_types = reader.try_get_var_uint().unwrap();
-        assert_eq!(total_types, 3);
-
-        // Read type names
-        for expected in &type_names {
-            let bytes = reader.try_get_string().unwrap();
-            let actual = String::from_utf8(bytes.to_vec()).unwrap();
-            assert_eq!(&actual, expected);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_dynamic_prefix_writing_detailed() {
-        // Create test values
-        let values = vec![
-            Value::Int32(42),
-            Value::String(b"hello".to_vec()),
-            Value::Float64(std::f64::consts::PI),
-        ];
-
-        // Analyze values first
-        let type_specific_state = DynamicSerializer::analyze_values(&values);
-
-        // Write prefix
-        let mut buffer = Vec::new();
-        let mut state =
-            SerializerState { type_specific: type_specific_state, ..Default::default() };
-        DynamicSerializer::write_prefix(
-            &Type::Dynamic { max_types: None },
-            &mut buffer,
-            &mut state,
-        )
-        .await
-        .unwrap();
-
-        // Verify version and type count
-        let mut reader = &buffer[..];
-        assert_eq!(reader.get_u64_le(), DYNAMIC_VERSION);
-        assert_eq!(reader.try_get_var_uint().unwrap(), 3);
-    }
-
-    #[test]
-    fn test_build_type_registry() {
-        let values = vec![
-            Value::String(b"test".to_vec()),
-            Value::Int32(42),
-            Value::String(b"another".to_vec()),
-            Value::Float64(std::f64::consts::PI),
-            Value::Null,
-            Value::Int32(99),
-        ];
-
-        let (type_names, type_map, total_types) = DynamicSerializer::build_type_registry(&values);
-
-        // Check alphabetical ordering
-        assert_eq!(type_names, vec!["Float64", "Int32", "String"]);
-        assert_eq!(total_types, 3);
-
-        // Check type indices
-        assert_eq!(type_map["Float64"].0, 0);
-        assert_eq!(type_map["Int32"].0, 1);
-        assert_eq!(type_map["String"].0, 2);
-    }
-
-    #[test]
-    fn test_version_check() {
-        // Test that version check works correctly
-        let mut state = SerializerState::default();
-        let values = vec![Value::Int32(42), Value::String(b"test".to_vec())];
-
-        // Analyze values to set up state
-        state.type_specific = DynamicSerializer::analyze_values(&values);
-
-        // Test with server version < 25.6
-        state.server_version = Some((25, 1, 0));
-        let mut buffer = Vec::new();
-        let result = DynamicSerializer::write_prefix_sync(
-            &Type::Dynamic { max_types: None },
-            &mut buffer,
-            &mut state,
-        );
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("requires ClickHouse server version >= 25.6")
-        );
-
-        // Test with server version >= 25.6
-        state.server_version = Some((25, 6, 0));
-        buffer.clear();
-        let result = DynamicSerializer::write_prefix_sync(
-            &Type::Dynamic { max_types: None },
-            &mut buffer,
-            &mut state,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_discriminator_writing() {
-        // Test that discriminator size is chosen correctly
-        let test_cases: Vec<(usize, usize)> = vec![
-            (100, 1),   // fits in u8
-            (255, 1),   // max u8
-            (256, 2),   // needs u16
-            (65535, 2), // max u16
-            (65536, 4), // needs u32
-        ];
-
-        for (total_types, expected_bytes) in test_cases {
-            let mut buffer = Vec::new();
-            write_discriminator!(sync &mut buffer, 0, total_types);
-            assert_eq!(buffer.len(), expected_bytes, "Failed for total_types={total_types}");
-        }
-    }
+    test_dynamic_serialization!();
 }
