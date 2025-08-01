@@ -1873,38 +1873,47 @@ mod tests {
             mod sync {
                 use super::*;
 
-                /// Comprehensive sync test that validates all primitive types match async behavior
+                /// Asserts sync serialization produces expected output
+                fn assert_serialize<T: Array + 'static>(
+                    type_hint: &Type,
+                    column: Arc<T>,
+                    data_type: &DataType,
+                    expected: Vec<u8>,
+                ) {
+                    let column_ref = column as ArrayRef;
+                    let mut writer = MockWriter::new();
+                    serialize(type_hint, &mut writer, &column_ref, data_type).unwrap();
+                    assert_eq!(writer, expected);
+                }
+
                 #[test]
-                fn test_sync_serialize_comprehensive() {
-                    // Test Int8
-                    let column = Arc::new(Int8Array::from(vec![1, -2, 0])) as ArrayRef;
-                    let mut writer = MockWriter::new();
-                    serialize(&Type::Int8, &mut writer, &column, &DataType::Int8).unwrap();
-                    assert_eq!(writer, vec![1, 254, 0]);
+                fn test_sync_serialize_int8() {
+                    let column = Arc::new(Int8Array::from(vec![1, -2, 0]));
+                    assert_serialize(&Type::Int8, column, &DataType::Int8, vec![1, 254, 0]);
+                }
 
-                    // Test UInt8
-                    let column = Arc::new(UInt8Array::from(vec![0, u8::MAX, 42])) as ArrayRef;
-                    let mut writer = MockWriter::new();
-                    serialize(&Type::UInt8, &mut writer, &column, &DataType::UInt8).unwrap();
-                    assert_eq!(writer, vec![0, 255, 42]);
+                #[test]
+                fn test_sync_serialize_uint8() {
+                    let column = Arc::new(UInt8Array::from(vec![0, u8::MAX, 42]));
+                    assert_serialize(&Type::UInt8, column, &DataType::UInt8, vec![0, 255, 42]);
+                }
 
-                    // Test Int32
-                    let column = Arc::new(Int32Array::from(vec![1, -2, 0])) as ArrayRef;
-                    let mut writer = MockWriter::new();
-                    serialize(&Type::Int32, &mut writer, &column, &DataType::Int32).unwrap();
-                    assert_eq!(writer, vec![1, 0, 0, 0, 254, 255, 255, 255, 0, 0, 0, 0]);
+                #[test]
+                fn test_sync_serialize_int32() {
+                    let column = Arc::new(Int32Array::from(vec![1, -2, 0]));
+                    assert_serialize(&Type::Int32, column, &DataType::Int32, vec![1, 0, 0, 0, 254, 255, 255, 255, 0, 0, 0, 0]);
+                }
 
-                    // Test Float32
-                    let column = Arc::new(Float32Array::from(vec![1.5, -2.0, 0.0])) as ArrayRef;
-                    let mut writer = MockWriter::new();
-                    serialize(&Type::Float32, &mut writer, &column, &DataType::Float32).unwrap();
-                    assert_eq!(writer, vec![0, 0, 192, 63, 0, 0, 0, 192, 0, 0, 0, 0]);
+                #[test]
+                fn test_sync_serialize_float32() {
+                    let column = Arc::new(Float32Array::from(vec![1.5, -2.0, 0.0]));
+                    assert_serialize(&Type::Float32, column, &DataType::Float32, vec![0, 0, 192, 63, 0, 0, 0, 192, 0, 0, 0, 0]);
+                }
 
-                    // Test Date
-                    let column = Arc::new(Date32Array::from(vec![0, 1])) as ArrayRef;
-                    let mut writer = MockWriter::new();
-                    serialize(&Type::Date, &mut writer, &column, &DataType::Date32).unwrap();
-                    assert_eq!(writer, vec![0, 0, 1, 0]);
+                #[test]
+                fn test_sync_serialize_date() {
+                    let column = Arc::new(Date32Array::from(vec![0, 1]));
+                    assert_serialize(&Type::Date, column, &DataType::Date32, vec![0, 0, 1, 0]);
                 }
 
                 /// Test that sync and async serialization produce identical output
