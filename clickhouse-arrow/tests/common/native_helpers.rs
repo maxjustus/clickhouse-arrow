@@ -311,18 +311,18 @@ pub fn get_variant_schema() -> Vec<ColumnDefinition> {
             "complex_variant".to_string(),
             Type::Variant(vec![
                 Type::Array(Box::new(Type::String)),
-                Type::Uuid,
                 Type::Tuple(vec![Type::String, Type::UInt64]),
+                Type::Uuid,
             ]),
             None,
         ),
         (
             "multi_type_variant".to_string(),
             Type::Variant(vec![
+                Type::Array(Box::new(Type::UInt8)),
+                Type::Float64,
                 Type::String,
                 Type::UInt64,
-                Type::Float64,
-                Type::Array(Box::new(Type::UInt8)),
             ]),
             None,
         ),

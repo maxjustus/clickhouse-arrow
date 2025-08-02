@@ -182,7 +182,7 @@ impl DynamicSerializer {
 
     /// Write complete Dynamic data (async version)
     async fn write_internal_async<W: ClickHouseWrite>(
-        _type: &Type,
+        _: &Type,
         values: &[Value],
         writer: &mut W,
         state: &mut SerializerState,
@@ -224,7 +224,7 @@ impl DynamicSerializer {
 
     /// Write complete Dynamic data (sync version)
     fn write_internal_sync<W: ClickHouseBytesWrite>(
-        _type: &Type,
+        _: &Type,
         values: &[Value],
         writer: &mut W,
         state: &mut SerializerState,
@@ -324,6 +324,7 @@ impl DynamicSerializer {
         TypeSpecificState::Dynamic(state)
     }
 
+    #[allow(clippy::used_underscore_binding)]
     pub(crate) async fn write<W: ClickHouseWrite>(
         _type: &Type,
         values: &[Value],
@@ -375,6 +376,7 @@ impl DynamicSerializer {
         Ok(())
     }
 
+    #[allow(clippy::used_underscore_binding)]
     pub(crate) fn write_sync<W: ClickHouseBytesWrite>(
         _type: &Type,
         values: &[Value],

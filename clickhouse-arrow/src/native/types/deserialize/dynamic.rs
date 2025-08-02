@@ -72,7 +72,7 @@ impl DynamicDeserializer {
 
     /// Read Dynamic data (async version)
     async fn read_internal_async<R: ClickHouseRead>(
-        _type: &Type,
+        _: &Type,
         reader: &mut R,
         rows: usize,
         state: &mut DeserializerState,
@@ -124,7 +124,7 @@ impl DynamicDeserializer {
 
     /// Read Dynamic data (sync version)
     fn read_internal_sync<R: ClickHouseBytesRead>(
-        _type: &Type,
+        _: &Type,
         reader: &mut R,
         rows: usize,
         state: &mut DeserializerState,
@@ -219,6 +219,7 @@ impl DynamicDeserializer {
         Ok(())
     }
 
+    #[allow(clippy::used_underscore_binding)]
     pub(crate) async fn read_async<R: ClickHouseRead>(
         _type: &Type,
         reader: &mut R,
@@ -273,6 +274,7 @@ impl DynamicDeserializer {
         Ok(())
     }
 
+    #[allow(clippy::used_underscore_binding)]
     pub(crate) fn read_sync<R: ClickHouseBytesRead>(
         _type: &Type,
         reader: &mut R,
