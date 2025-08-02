@@ -69,7 +69,7 @@ pub(super) fn serialize<W: ClickHouseBytesWrite>(
 /// data.
 macro_rules! write_variable_values {
     ($name:ident, varlen $write_fn:ident, $def:expr, [$(($at:ty => $coerce:expr)),* $(,)?]) => {
-        /// Serializes an Arrow array to ClickHouse's native format for variable-length data.
+        /// Serializes an Arrow array to `ClickHouse`'s native format for variable-length data.
         ///
         /// Writes each value using the specified write function (e.g., `write_string` for `String`,
         /// and `Binary`). Null values are written as empty data. Supports multiple Arrow
@@ -108,7 +108,7 @@ macro_rules! write_variable_values {
 
 macro_rules! put_variable_values {
     ($name:ident, varlen $write_fn:ident, $def:expr, [$(($at:ty => $coerce:expr)),* $(,)?]) => {
-        /// Serializes an Arrow array to ClickHouse's native format for variable-length data.
+        /// Serializes an Arrow array to `ClickHouse`'s native format for variable-length data.
         ///
         /// Writes each value using the specified write function (e.g., `write_string` for `String`,
         /// and `Binary`). Null values are written as empty data. Supports multiple Arrow
@@ -153,7 +153,7 @@ macro_rules! put_variable_values {
 macro_rules! write_fixed_values {
     // Fixed-size with dynamic length (e.g., FixedSizedString)
     ($name:ident, [$(($at:ty => $coerce:expr)),* $(,)?]) => {
-        /// Serializes an Arrow array to ClickHouse's native format for fixed-length data.
+        /// Serializes an Arrow array to `ClickHouse`'s native format for fixed-length data.
         ///
         /// Writes each value padded to the specified length with zeros if shorter, or truncated if
         /// longer. Null values are written as zeroed buffers of the expected length. Supports multiple
@@ -203,7 +203,7 @@ macro_rules! write_fixed_values {
 macro_rules! put_fixed_values {
     // Fixed-size with dynamic length (e.g., FixedSizedString)
     ($name:ident, [$(($at:ty => $coerce:expr)),* $(,)?]) => {
-        /// Serializes an Arrow array to ClickHouse's native format for fixed-length data.
+        /// Serializes an Arrow array to `ClickHouse`'s native format for fixed-length data.
         ///
         /// Writes each value padded to the specified length with zeros if shorter, or truncated if
         /// longer. Null values are written as zeroed buffers of the expected length. Supports multiple

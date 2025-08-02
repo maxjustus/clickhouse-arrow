@@ -13,13 +13,19 @@ pub struct VersionRow {
 }
 
 /// Helper function to create a test table with DROP IF EXISTS + CREATE TABLE
+///
+/// # Errors
+/// Returns an error if table creation fails.
+///
+/// # Panics
+/// Panics if the DROP TABLE or CREATE TABLE commands fail.
 pub async fn create_test_table(
     client: &NativeClient,
     table_name: &str,
     column_spec: &str,
     query_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    header(query_id, &format!("Creating table {table_name}"));
+    header(query_id, format!("Creating table {table_name}"));
 
     // Drop table if exists
     client
@@ -37,6 +43,12 @@ pub async fn create_test_table(
 }
 
 /// Helper function to insert test data into a table
+///
+/// # Errors
+/// Returns an error if data insertion fails.
+///
+/// # Panics
+/// Panics if the INSERT command fails.
 pub async fn insert_test_data(
     client: &NativeClient,
     table_name: &str,
@@ -54,12 +66,18 @@ pub async fn insert_test_data(
 }
 
 /// Helper function to drop a test table with logging
+///
+/// # Errors
+/// Returns an error if table dropping fails.
+///
+/// # Panics
+/// Panics if the DROP TABLE command fails.
 pub async fn drop_test_table(
     client: &NativeClient,
     table_name: &str,
     query_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    header(query_id, &format!("Dropping table {table_name}"));
+    header(query_id, format!("Dropping table {table_name}"));
     client
         .execute(&format!("DROP TABLE {table_name}"), None)
         .await
@@ -67,7 +85,10 @@ pub async fn drop_test_table(
     Ok(())
 }
 
-/// Helper function to check version and return VersionChecker, or return early if unsupported
+/// Helper function to check version and return `VersionChecker`, or return early if unsupported
+///
+/// # Panics
+/// Panics if the version query fails to execute against the `ClickHouse` server.
 pub async fn check_version_support(
     client: &NativeClient,
     test_name: &str,

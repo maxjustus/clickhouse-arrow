@@ -675,7 +675,7 @@ impl<'a> NativeRoundtripTestHarness<'a> {
         let result = self.query_and_verify_data(&client, &table_name, block).await;
 
         // Always try to clean up
-        let _ = self.drop_test_table(&client, &table_name).await;
+        drop(self.drop_test_table(&client, &table_name).await);
 
         result
     }

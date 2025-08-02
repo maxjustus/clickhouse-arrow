@@ -42,7 +42,7 @@ struct SimpleRow {
 
 // Helper functions to reduce repetitive patterns
 
-/// Check if server supports v3 format (ClickHouse 25.6+)
+/// Check if server supports v3 format (`ClickHouse` 25.6+)
 fn should_use_v3_format() -> bool {
     let version_str = std::env::var("CLICKHOUSE_VERSION").ok();
     match version_str.as_deref() {
@@ -215,6 +215,10 @@ pub async fn test_variant_round_trip(ch: Arc<ClickHouseContainer>) {
         .expect("Variant round trip failed");
 }
 
+/// Tests dynamic type round-trip serialization.
+///
+/// # Panics
+/// Panics if the dynamic round trip test fails.
 pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
     let harness = NativeRoundtripTestHarness::new(&ch).with_v3_format();
     let block = generate_dynamic_test_block();
@@ -225,6 +229,10 @@ pub async fn test_dynamic_round_trip(ch: Arc<ClickHouseContainer>) {
         .expect("Dynamic round trip failed");
 }
 
+/// Tests JSON type round-trip serialization.
+///
+/// # Panics
+/// Panics if the JSON round trip test fails.
 pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
     let harness = NativeRoundtripTestHarness::new(&ch).with_v3_format();
     let block = generate_json_test_block();
@@ -235,6 +243,10 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
         .expect("JSON round trip failed");
 }
 
+/// Tests mixed dynamic and JSON type round-trip serialization.
+///
+/// # Panics
+/// Panics if the mixed dynamic JSON round trip test fails.
 pub async fn test_mixed_dynamic_json(ch: Arc<ClickHouseContainer>) {
     let harness = NativeRoundtripTestHarness::new(&ch).with_v3_format();
     let block = generate_mixed_dynamic_json_test_block();
