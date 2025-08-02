@@ -93,6 +93,12 @@ pub async fn get_or_create_container(conf: Option<&str>) -> &'static Arc<ClickHo
 
 /// # Panics
 /// You bet it panics. Better be careful.
+pub async fn get_shared_container() -> Arc<ClickHouseContainer> {
+    get_or_create_container(None).await.clone()
+}
+
+/// # Panics
+/// You bet it panics. Better be careful.
 pub async fn create_container(conf: Option<&str>) -> Arc<ClickHouseContainer> {
     let ch = ClickHouseContainer::try_new(conf)
         .await

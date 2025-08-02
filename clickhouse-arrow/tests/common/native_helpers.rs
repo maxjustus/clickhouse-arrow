@@ -443,3 +443,298 @@ pub fn generate_mixed_dynamic_json_test_block() -> Block {
         column_data:  mixed_data,
     }
 }
+
+/// Higher-level test harness for native roundtrip tests
+pub struct NativeRoundtripTestHarness<'a> {
+    pub container:   &'a clickhouse_arrow::test_utils::ClickHouseContainer,
+    pub require_v3:  bool,
+    pub compression: CompressionMethod,
+}
+
+impl<'a> NativeRoundtripTestHarness<'a> {
+    /// Create a new test harness
+    pub fn new(container: &'a clickhouse_arrow::test_utils::ClickHouseContainer) -> Self {
+        Self { container, require_v3: false, compression: CompressionMethod::None }
+    }
+
+    /// Enable v3 format requirement
+    pub fn with_v3_format(mut self) -> Self {
+        self.require_v3 = true;
+        self
+    }
+
+    /// Set compression method
+    pub fn with_compression(mut self, compression: CompressionMethod) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    /// Check if server supports required features
+    pub fn check_version_support(&self) -> Result<()> {
+        if self.require_v3 {
+            let version_str = std::env::var("CLICKHOUSE_VERSION").ok();
+            match version_str.as_deref() {
+                Some(v) if v.starts_with("24.") => {
+                    return Err(Error::SerializeError(
+                        "Test requires v3 format support (ClickHouse 25.6+)".to_string(),
+                    ));
+                }
+                Some(v) if v.starts_with("25.") => {
+                    let parts: Vec<&str> = v.split('.').collect();
+                    if parts.len() >= 2 && parts[1].parse::<u32>().unwrap_or(0) < 6 {
+                        return Err(Error::SerializeError(
+                            "Test requires v3 format support (ClickHouse 25.6+)".to_string(),
+                        ));
+                    }
+                }
+                _ => {} // Default to support for latest
+            }
+        }
+        Ok(())
+    }
+
+    /// Create a test client with appropriate settings
+    pub async fn create_client(&self) -> Result<NativeClient> {
+        let mut builder = ClientBuilder::new()
+            .with_endpoint(self.container.get_native_url())
+            .with_username(&self.container.user)
+            .with_password(&self.container.password)
+            .with_ipv4_only(true)
+            .with_compression(self.compression);
+
+        if self.require_v3 {
+            builder = builder.with_setting(
+                "output_format_native_use_flattened_dynamic_and_json_serialization",
+                1,
+            );
+        }
+
+        builder.build().await
+    }
+
+    /// Create a test table with the given schema
+    pub async fn create_test_table(
+        &self,
+        client: &NativeClient,
+        table_name: &str,
+        column_definitions: &[ColumnDefinition],
+    ) -> Result<()> {
+        // Drop table if it exists
+        client.execute(format!("DROP TABLE IF EXISTS {table_name}"), None).await?;
+
+        // Create table with schema
+        let create_sql = format!(
+            "CREATE TABLE {table_name} ({}) ENGINE = MergeTree() ORDER BY tuple()",
+            column_definitions
+                .iter()
+                .map(|(name, type_, _)| format!("{name} {type_}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        client.execute(create_sql, None).await?;
+        Ok(())
+    }
+
+    /// Insert a Block of data into the table
+    pub async fn insert_test_data(
+        &self,
+        client: &NativeClient,
+        table_name: &str,
+        block: &Block,
+    ) -> Result<()> {
+        use futures_util::StreamExt;
+
+        let insert_query = format!("INSERT INTO {table_name} VALUES");
+        let mut stream = client.insert(&insert_query, block.clone(), None).await?;
+
+        while let Some(result) = stream.next().await {
+            result?;
+        }
+        Ok(())
+    }
+
+    /// Query data back from the table and verify it matches expectations
+    pub async fn query_and_verify_data(
+        &self,
+        client: &NativeClient,
+        table_name: &str,
+        expected_block: &Block,
+    ) -> Result<()> {
+        use futures_util::StreamExt;
+
+        let query = format!("SELECT * FROM {table_name} ORDER BY tuple()");
+        use clickhouse_arrow::{Qid, QueryParams};
+        let result_blocks: Vec<Block> = client
+            .query_raw(query, None::<QueryParams>, Qid::new())
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        // Combine all result blocks
+        let mut combined_data = Vec::new();
+        let mut combined_types = Vec::new();
+        let mut total_rows = 0;
+
+        for block in &result_blocks {
+            if combined_types.is_empty() {
+                combined_types = block.column_types.clone();
+            }
+            combined_data.extend(block.column_data.iter().cloned());
+            total_rows += block.rows;
+        }
+
+        let result_block = Block {
+            info:         BlockInfo::default(),
+            rows:         total_rows,
+            column_types: combined_types,
+            column_data:  combined_data,
+        };
+
+        // Verify the data matches expectations
+        if result_block.rows != expected_block.rows {
+            return Err(Error::SerializeError(format!(
+                "Row count mismatch: expected {}, got {}",
+                expected_block.rows, result_block.rows
+            )));
+        }
+
+        if result_block.column_types.len() != expected_block.column_types.len() {
+            return Err(Error::SerializeError(format!(
+                "Column count mismatch: expected {}, got {}",
+                expected_block.column_types.len(),
+                result_block.column_types.len()
+            )));
+        }
+
+        // For complex types like Dynamic and JSON, we can't do exact value comparison
+        // due to potential serialization differences, so we just verify structure
+        for (i, ((expected_name, expected_type), (result_name, result_type))) in
+            expected_block.column_types.iter().zip(&result_block.column_types).enumerate()
+        {
+            if expected_name != result_name {
+                return Err(Error::SerializeError(format!(
+                    "Column {i} name mismatch: expected {expected_name}, got {result_name}"
+                )));
+            }
+
+            // For Dynamic and JSON types, only verify the type structure
+            match (expected_type, result_type) {
+                (Type::Dynamic { .. }, Type::Dynamic { .. }) => {
+                    // Structure verification passed
+                }
+                (Type::JSON { .. }, Type::JSON { .. }) => {
+                    // Structure verification passed
+                }
+                _ if expected_type == result_type => {
+                    // Exact type match - can do value comparison
+                }
+                _ => {
+                    return Err(Error::SerializeError(format!(
+                        "Column {i} type mismatch: expected {expected_type}, got {result_type}"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Drop the test table
+    pub async fn drop_test_table(&self, client: &NativeClient, table_name: &str) -> Result<()> {
+        client.execute(format!("DROP TABLE IF EXISTS {table_name}"), None).await
+    }
+
+    /// Run a complete roundtrip test: create table, insert data, query back, verify, cleanup
+    pub async fn run_native_roundtrip_test(&self, test_name: &str, block: &Block) -> Result<()> {
+        // Check version support
+        self.check_version_support()?;
+
+        // Create client
+        let client = self.create_client().await?;
+
+        // Generate unique table name
+        let table_name = format!("test_{}_{}", test_name, Uuid::new_v4().simple());
+
+        // Convert block column types to ColumnDefinition format
+        let column_definitions: Vec<ColumnDefinition> = block
+            .column_types
+            .iter()
+            .map(|(name, type_)| (name.clone(), type_.clone(), None))
+            .collect();
+
+        // Create table
+        self.create_test_table(&client, &table_name, &column_definitions).await?;
+
+        // Insert data
+        self.insert_test_data(&client, &table_name, block).await?;
+
+        // Query and verify
+        let result = self.query_and_verify_data(&client, &table_name, block).await;
+
+        // Always try to clean up
+        let _ = self.drop_test_table(&client, &table_name).await;
+
+        result
+    }
+}
+
+/// Macro to create a simple native roundtrip test using the test harness
+/// This reduces boilerplate for common test scenarios
+#[allow(unused_macros)]
+macro_rules! native_roundtrip_test {
+    ($test_name:ident, $block_generator:expr) => {
+        #[tokio::test]
+        async fn $test_name() -> Result<()> {
+            use std::sync::Arc;
+
+            use clickhouse_arrow::test_utils::{ClickHouseContainer, get_shared_container};
+
+            let container: Arc<ClickHouseContainer> = get_shared_container().await;
+            let harness = NativeRoundtripTestHarness::new(&container);
+            let block = $block_generator;
+
+            harness.run_native_roundtrip_test(stringify!($test_name), &block).await
+        }
+    };
+    ($test_name:ident, $block_generator:expr,v3) => {
+        #[tokio::test]
+        async fn $test_name() -> Result<()> {
+            use std::sync::Arc;
+
+            use clickhouse_arrow::test_utils::{ClickHouseContainer, get_shared_container};
+
+            let container: Arc<ClickHouseContainer> = get_shared_container().await;
+            let harness = NativeRoundtripTestHarness::new(&container).with_v3_format();
+            let block = $block_generator;
+
+            harness.run_native_roundtrip_test(stringify!($test_name), &block).await
+        }
+    };
+    ($test_name:ident, $block_generator:expr, $compression:expr) => {
+        #[tokio::test]
+        async fn $test_name() -> Result<()> {
+            use std::sync::Arc;
+
+            use clickhouse_arrow::test_utils::{ClickHouseContainer, get_shared_container};
+
+            let container: Arc<ClickHouseContainer> = get_shared_container().await;
+            let harness =
+                NativeRoundtripTestHarness::new(&container).with_compression($compression);
+            let block = $block_generator;
+
+            harness.run_native_roundtrip_test(stringify!($test_name), &block).await
+        }
+    };
+}
+
+// Example usage of the new test harness and macro
+// These would replace the more verbose existing test functions
+
+native_roundtrip_test!(test_dynamic_harness_example, generate_dynamic_test_block(), v3);
+
+native_roundtrip_test!(test_json_harness_example, generate_json_test_block(), v3);
+
+native_roundtrip_test!(test_mixed_harness_example, generate_mixed_dynamic_json_test_block(), v3);

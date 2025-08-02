@@ -156,31 +156,84 @@ mod tests {
     use crate::native::types::deserialize::variant::VariantDeserializer;
     use crate::native::values::Date;
 
-    /// Helper to serialize and deserialize variant values
-    fn round_trip_test(variant_type: &Type, values: &[Value]) {
-        use bytes::Buf;
+    /// Macro to test variant serialization roundtrip for both sync and async paths
+    macro_rules! variant_roundtrip_test {
+        ($name:ident, $variant_type:expr, $values:expr) => {
+            #[tokio::test]
+            async fn $name() {
+                let variant_type = $variant_type;
+                let values = $values;
 
-        let mut buffer = Vec::new();
-        let mut state = SerializerState::default();
+                // Test sync path
+                let mut sync_buffer = Vec::new();
+                let mut sync_state = SerializerState::default();
+                VariantSerializer::write_sync_prefix(
+                    &variant_type,
+                    &mut sync_buffer,
+                    &mut sync_state,
+                )
+                .unwrap();
+                VariantSerializer::write_sync(
+                    &variant_type,
+                    &values,
+                    &mut sync_buffer,
+                    &mut sync_state,
+                )
+                .unwrap();
 
-        // Serialize
-        VariantSerializer::write_sync_prefix(variant_type, &mut buffer, &mut state).unwrap();
-        VariantSerializer::write_sync(variant_type, values, &mut buffer, &mut state).unwrap();
+                let mut sync_reader = Cursor::new(&sync_buffer);
+                let mut sync_deser_state = DeserializerState::default();
+                let _ = {
+                    use bytes::Buf;
+                    sync_reader.get_u64_le()
+                }; // Skip version
+                let sync_deserialized = VariantDeserializer::read_sync(
+                    &variant_type,
+                    &mut sync_reader,
+                    values.len(),
+                    &mut sync_deser_state,
+                )
+                .unwrap();
 
-        // Deserialize
-        let mut reader = Cursor::new(buffer);
-        let mut deser_state = DeserializerState::default();
-        let _ = reader.get_u64_le(); // Skip version
+                // Test async path
+                let mut async_buffer = Vec::new();
+                let mut async_state = SerializerState::default();
+                VariantSerializer::write_prefix(&variant_type, &mut async_buffer, &mut async_state)
+                    .await
+                    .unwrap();
+                VariantSerializer::write(
+                    &variant_type,
+                    values.clone(),
+                    &mut async_buffer,
+                    &mut async_state,
+                )
+                .await
+                .unwrap();
 
-        let deserialized = VariantDeserializer::read_sync(
-            variant_type,
-            &mut reader,
-            values.len(),
-            &mut deser_state,
-        )
-        .unwrap();
+                let mut async_reader = Cursor::new(&async_buffer);
+                let mut async_deser_state = DeserializerState::default();
+                let _ = {
+                    use tokio::io::AsyncReadExt;
+                    async_reader.read_u64_le().await.unwrap()
+                }; // Skip version
+                let async_deserialized = VariantDeserializer::read_async(
+                    &variant_type,
+                    &mut async_reader,
+                    values.len(),
+                    &mut async_deser_state,
+                )
+                .await
+                .unwrap();
 
-        assert_eq!(deserialized, values);
+                // Assert both paths produce the same results
+                assert_eq!(sync_deserialized, values);
+                assert_eq!(async_deserialized, values);
+                assert_eq!(
+                    sync_deserialized, async_deserialized,
+                    "Sync and async results should match"
+                );
+            }
+        };
     }
 
     /// Macro to create variant values
@@ -190,41 +243,39 @@ mod tests {
         };
     }
 
-    #[test]
-    fn test_variant_simple() {
-        let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
-        let values = vec![
+    // Use the macro to create sync/async test pairs
+    variant_roundtrip_test!(
+        test_variant_simple,
+        Type::Variant(vec![Type::String, Type::UInt64]),
+        vec![
             variant!(0, Value::String(b"hello".to_vec())),
             variant!(1, Value::UInt64(42)),
             variant!(0, Value::String(b"world".to_vec())),
-        ];
-        round_trip_test(&variant_type, &values);
-    }
+        ]
+    );
 
-    #[test]
-    fn test_variant_with_nulls() {
-        let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
-        let values = vec![
+    variant_roundtrip_test!(
+        test_variant_with_nulls,
+        Type::Variant(vec![Type::String, Type::UInt64]),
+        vec![
             variant!(0, Value::String(b"test".to_vec())),
             variant!(0xFF, Value::Null),
             variant!(1, Value::UInt64(123)),
-        ];
-        round_trip_test(&variant_type, &values);
-    }
+        ]
+    );
 
-    #[test]
-    fn test_variant_complex_types() {
-        let variant_type = Type::Variant(vec![Type::Array(Box::new(Type::String)), Type::Date]);
-        let values = vec![
+    variant_roundtrip_test!(
+        test_variant_complex_types,
+        Type::Variant(vec![Type::Array(Box::new(Type::String)), Type::Date]),
+        vec![
             variant!(
                 0,
                 Value::Array(vec![Value::String(b"a".to_vec()), Value::String(b"b".to_vec())])
             ),
             variant!(1, Value::Date(Date(19723))),
             variant!(0, Value::Array(vec![Value::String(b"c".to_vec())])),
-        ];
-        round_trip_test(&variant_type, &values);
-    }
+        ]
+    );
 
     #[test]
     fn test_variant_homogeneous() {
@@ -248,16 +299,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_variant_sparse() {
-        let variant_type = Type::Variant(vec![
+    variant_roundtrip_test!(
+        test_variant_sparse,
+        Type::Variant(vec![
             Type::String,
             Type::UInt64,
             Type::Float64,
             Type::Array(Box::new(Type::Int32)),
             Type::Date,
-        ]);
-        let values = vec![
+        ]),
+        vec![
             variant!(3, Value::String(b"test".to_vec())),
             variant!(4, Value::UInt64(42)),
             variant!(2, Value::Float64(std::f64::consts::PI)),
@@ -266,33 +317,31 @@ mod tests {
             variant!(3, Value::String(b"another".to_vec())),
             variant!(0xFF, Value::Null),
             variant!(4, Value::UInt64(999)),
-        ];
-        round_trip_test(&variant_type, &values);
-    }
+        ]
+    );
 
-    #[test]
-    fn test_variant_with_nested_types() {
-        let variant_type = Type::Variant(vec![
+    variant_roundtrip_test!(
+        test_variant_with_nested_types,
+        Type::Variant(vec![
             Type::String,
             Type::Array(Box::new(Type::Nullable(Box::new(Type::UInt64)))),
             Type::Tuple(vec![Type::String, Type::UInt64]),
-        ]);
-        let values = vec![
+        ]),
+        vec![
             variant!(1, Value::String(b"test_str".to_vec())),
             variant!(0, Value::Array(vec![Value::UInt64(100), Value::Null, Value::UInt64(200)])),
             variant!(
                 2,
                 Value::Tuple(vec![Value::String(b"tuple_str".to_vec()), Value::UInt64(42)])
             ),
-        ];
-        round_trip_test(&variant_type, &values);
-    }
+        ]
+    );
 
-    #[test]
-    fn test_variant_empty() {
-        let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
-        round_trip_test(&variant_type, &[]);
-    }
+    variant_roundtrip_test!(
+        test_variant_empty,
+        Type::Variant(vec![Type::String, Type::UInt64]),
+        vec![]
+    );
 
     #[test]
     fn test_variant_all_nulls() {
@@ -331,28 +380,9 @@ mod tests {
         assert_eq!(grouped[&0xFF].len(), 1);
     }
 
-    #[tokio::test]
-    async fn test_variant_async() {
-        use tokio::io::AsyncReadExt;
-
-        let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
-        let values =
-            vec![variant!(1, Value::UInt64(999)), variant!(0, Value::String(b"async".to_vec()))];
-        let mut buffer = Vec::new();
-        let mut state = SerializerState::default();
-        VariantSerializer::write_prefix(&variant_type, &mut buffer, &mut state).await.unwrap();
-        VariantSerializer::write(&variant_type, values.clone(), &mut buffer, &mut state)
-            .await
-            .unwrap();
-
-        // Deserialize
-        let mut reader = Cursor::new(buffer);
-        let mut deser_state = DeserializerState::default();
-        let _ = reader.read_u64_le().await.unwrap();
-        let deserialized =
-            VariantDeserializer::read_async(&variant_type, &mut reader, 2, &mut deser_state)
-                .await
-                .unwrap();
-        assert_eq!(deserialized, values);
-    }
+    variant_roundtrip_test!(
+        test_variant_async,
+        Type::Variant(vec![Type::String, Type::UInt64]),
+        vec![variant!(1, Value::UInt64(999)), variant!(0, Value::String(b"async".to_vec()))]
+    );
 }

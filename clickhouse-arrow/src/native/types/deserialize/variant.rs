@@ -249,29 +249,66 @@ mod tests {
         result
     }
 
-    // Asserts basic variant deserialization produces expected values
-    fn assert_variant_deserialization(
-        variant_type: &Type,
-        discriminators: &[u8],
-        data: &[u8],
-        expected_values: &[(u8, Value)],
-    ) {
-        let test_data = create_test_data(discriminators, data);
-        let mut reader = Cursor::new(test_data);
-        let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader).unwrap();
-        let values = VariantDeserializer::read_sync(
-            variant_type,
-            &mut reader,
-            discriminators.len(),
-            &mut state,
-        )
-        .unwrap();
+    /// Macro to test variant deserialization for both sync and async paths
+    macro_rules! variant_deserialization_test {
+        (
+            $name:ident,
+            $variant_type:expr,
+            $discriminators:expr,
+            $data:expr,
+            $expected_values:expr
+        ) => {
+            #[tokio::test]
+            async fn $name() {
+                let variant_type = $variant_type;
+                let discriminators = $discriminators;
+                let data = $data;
+                let expected_values = $expected_values;
 
-        assert_eq!(values.len(), expected_values.len());
-        for (i, (expected_disc, expected_val)) in expected_values.iter().enumerate() {
-            assert_variant!(&values[i], *expected_disc, expected_val.clone());
-        }
+                let test_data = create_test_data(discriminators, data);
+
+                // Test sync path
+                let mut sync_reader = Cursor::new(test_data.clone());
+                let mut sync_state = DeserializerState::default();
+                variant_type.deserialize_prefix(&mut sync_reader).unwrap();
+                let sync_values = VariantDeserializer::read_sync(
+                    &variant_type,
+                    &mut sync_reader,
+                    discriminators.len(),
+                    &mut sync_state,
+                )
+                .unwrap();
+
+                // Test async path
+                let mut async_reader = Cursor::new(test_data);
+                let mut async_state = DeserializerState::default();
+                VariantDeserializer::read_prefix(
+                    &variant_type,
+                    &mut async_reader,
+                    &mut async_state,
+                )
+                .await
+                .unwrap();
+                let async_values = VariantDeserializer::read_async(
+                    &variant_type,
+                    &mut async_reader,
+                    discriminators.len(),
+                    &mut async_state,
+                )
+                .await
+                .unwrap();
+
+                // Assert both paths produce the same results
+                assert_eq!(sync_values.len(), expected_values.len());
+                assert_eq!(async_values.len(), expected_values.len());
+                assert_eq!(sync_values, async_values, "Sync and async results should match");
+
+                for (i, (expected_disc, expected_val)) in expected_values.iter().enumerate() {
+                    assert_variant!(&sync_values[i], *expected_disc, expected_val.clone());
+                    assert_variant!(&async_values[i], *expected_disc, expected_val.clone());
+                }
+            }
+        };
     }
 
     // Helper function to create multitype test data programmatically
@@ -343,32 +380,26 @@ mod tests {
         assert!(matches!(nested_map.get_type(1).unwrap(), Type::Variant(_)));
     }
 
-    // Simple variant deserialization tests
-    #[test]
-    fn test_variant_simple_deserialization() {
-        let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
-        assert_variant_deserialization(
-            &variant_type,
-            &[0u8, 1u8, 0u8],
-            &[3, b'y', b'e', b's', 3, b'y', b'e', b's', 2, 0, 0, 0, 0, 0, 0, 0],
-            &[
-                (0, Value::String(b"yes".to_vec())),
-                (1, Value::UInt64(2)),
-                (0, Value::String(b"yes".to_vec())),
-            ],
-        );
-    }
+    // Use the macro to create sync/async test pairs
+    variant_deserialization_test!(
+        test_variant_simple_deserialization,
+        Type::Variant(vec![Type::String, Type::UInt64]),
+        &[0u8, 1u8, 0u8],
+        &[3, b'y', b'e', b's', 3, b'y', b'e', b's', 2, 0, 0, 0, 0, 0, 0, 0],
+        &[
+            (0, Value::String(b"yes".to_vec())),
+            (1, Value::UInt64(2)),
+            (0, Value::String(b"yes".to_vec())),
+        ]
+    );
 
-    #[test]
-    fn test_variant_null_deserialization() {
-        let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
-        assert_variant_deserialization(
-            &variant_type,
-            &[0u8, 0xFF, 1u8],
-            &[5, b'h', b'e', b'l', b'l', b'o', 42, 0, 0, 0, 0, 0, 0, 0],
-            &[(0, Value::String(b"hello".to_vec())), (0xFF, Value::Null), (1, Value::UInt64(42))],
-        );
-    }
+    variant_deserialization_test!(
+        test_variant_null_deserialization,
+        Type::Variant(vec![Type::String, Type::UInt64]),
+        &[0u8, 0xFF, 1u8],
+        &[5, b'h', b'e', b'l', b'l', b'o', 42, 0, 0, 0, 0, 0, 0, 0],
+        &[(0, Value::String(b"hello".to_vec())), (0xFF, Value::Null), (1, Value::UInt64(42))]
+    );
 
     #[test]
     fn test_variant_complex_array_deserialization() {
@@ -479,38 +510,23 @@ mod tests {
         }
     }
 
-    // Async deserialization tests
-    #[tokio::test]
-    async fn test_variant_async_basic_deserialization() {
-        let variant_type = Type::Variant(vec![Type::String, Type::UInt64]);
-        let data =
-            create_test_data(&[1u8, 0u8], &[4, b't', b'e', b's', b't', 100, 0, 0, 0, 0, 0, 0, 0]);
-        let mut reader = Cursor::new(data);
-        let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix_async(&mut reader, &mut state).await.unwrap();
-        let values = VariantDeserializer::read_async(&variant_type, &mut reader, 2, &mut state)
-            .await
-            .unwrap();
-        assert_eq!(values.len(), 2);
-        assert_variant!(&values[0], 1, Value::UInt64(100));
-        assert_variant!(&values[1], 0, Value::String(b"test".to_vec()));
-    }
+    // Use the macro for async tests too
+    variant_deserialization_test!(
+        test_variant_async_basic_deserialization,
+        Type::Variant(vec![Type::String, Type::UInt64]),
+        &[1u8, 0u8],
+        &[4, b't', b'e', b's', b't', 100, 0, 0, 0, 0, 0, 0, 0],
+        &[(1, Value::UInt64(100)), (0, Value::String(b"test".to_vec()))]
+    );
 
-    #[tokio::test]
-    async fn test_variant_async_different_types() {
-        let another_type = Type::Variant(vec![Type::String, Type::UInt32]);
-        let data2 = create_test_data(&[0u8, 1u8], &[
+    variant_deserialization_test!(
+        test_variant_async_different_types,
+        Type::Variant(vec![Type::String, Type::UInt32]),
+        &[0u8, 1u8],
+        &[
             4, b't', b'e', b's', b't', // 'test'
             50, 0, 0, 0, // 50 as UInt32
-        ]);
-        let mut reader2 = Cursor::new(data2);
-        let mut state2 = DeserializerState::default();
-        another_type.deserialize_prefix_async(&mut reader2, &mut state2).await.unwrap();
-        let values2 = VariantDeserializer::read_async(&another_type, &mut reader2, 2, &mut state2)
-            .await
-            .unwrap();
-        assert_eq!(values2.len(), 2);
-        assert_variant!(&values2[0], 0, Value::String(b"test".to_vec())); // discriminator 0 = String
-        assert_variant!(&values2[1], 1, Value::UInt32(50)); // discriminator 1 = UInt32
-    }
+        ],
+        &[(0, Value::String(b"test".to_vec())), (1, Value::UInt32(50))]
+    );
 }

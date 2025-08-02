@@ -1,0 +1,23 @@
+# break these _comprehensive test functions in the folloing file into individual test cases - extract reusable helper functions if needed
+# clickhouse-arrow/src/native/values/tests.rs:
+# test_value_guess_type_comprehensive() {
+# test_escape_string_comprehensive() {
+
+break these _comprehensive test functions in the folloing file into individual test cases - extract reusable helper functions if needed
+clickhouse-arrow/src/native/types/deserialize/variant.rs:
+fn test_discriminator_map_comprehensive() {
+fn test_variant_multitype_sorting_comprehensive() {
+async fn test_variant_async_deserialization_comprehensive() {
+
+break these _comprehensive test functions in the folloing file into individual test cases - extract reusable helper functions if needed
+clickhouse-arrow/src/native/types/serialize/dynamic.rs:
+fn test_version_check_comprehensive() {
+
+
+
+# ⏺ You're absolutely right! In Rust testing, the idiomatic naming conventions are:
+# 
+#   - assert_* for functions that make assertions and panic on failure
+#   - check_* for functions that return bool or Result
+#   - create_* or make_*** for factory functions
+#   - Avoid *_helper suffix as it's not descriptive
