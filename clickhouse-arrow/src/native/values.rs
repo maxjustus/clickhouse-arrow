@@ -78,9 +78,8 @@ pub enum Value {
 
     Map(Vec<Value>, Vec<Value>),
 
-    Variant(u8, Box<Value>), // discriminator and value
-    // TODO: Dynamic(String, Box<Value>), // type_name and value - Dynamic type not yet
-    // implemented
+    Variant(u8, Box<Value>),     // discriminator and value
+    Dynamic(String, Box<Value>), // type_name and value
     Ipv4(Ipv4),
     Ipv6(Ipv6),
 
@@ -132,8 +131,9 @@ impl PartialEq for Value {
             (Self::Ring(l0), Self::Ring(r0)) => l0 == r0,
             (Self::Polygon(l0), Self::Polygon(r0)) => l0 == r0,
             (Self::MultiPolygon(l0), Self::MultiPolygon(r0)) => l0 == r0,
-            // TODO: (Self::Dynamic(l_type, l_val), Self::Dynamic(r_type, r_val)) => l_type ==
-            // r_type && l_val == r_val, - Dynamic type not yet implemented
+            (Self::Dynamic(l_type, l_val), Self::Dynamic(r_type, r_val)) => {
+                l_type == r_type && l_val == r_val
+            }
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
     }
@@ -195,11 +195,10 @@ impl Hash for Value {
                 ::core::hash::Hash::hash(disc, state);
                 ::core::hash::Hash::hash(val, state);
             }
-            // TODO: Dynamic type not yet implemented
-            // Value::Dynamic(type_name, val) => {
-            //     ::core::hash::Hash::hash(type_name, state);
-            //     ::core::hash::Hash::hash(val, state);
-            // }
+            Value::Dynamic(type_name, val) => {
+                ::core::hash::Hash::hash(type_name, state);
+                ::core::hash::Hash::hash(val, state);
+            }
             Value::Ipv4(x) => ::core::hash::Hash::hash(x, state),
             Value::Ipv6(x) => ::core::hash::Hash::hash(x, state),
 
@@ -402,8 +401,10 @@ impl Value {
                 JsonValue::Object(map)
             }
 
-            // Variant - unwrap and serialize contained value
-            Value::Variant(_, boxed_value) => boxed_value.to_json()?,
+            // Variant and Dynamic - unwrap and serialize contained value
+            Value::Variant(_, boxed_value) | Value::Dynamic(_, boxed_value) => {
+                boxed_value.to_json()?
+            }
 
             // Object type - already JSON, parse it
             Value::Object(json_bytes) => serde_json::from_slice(json_bytes).map_err(|e| {
@@ -577,12 +578,11 @@ impl Value {
                 // For Variant, we can only guess a single-type variant based on the value
                 Type::Variant(vec![val.guess_type()])
             }
-            // TODO: Dynamic type not yet implemented
-            // Value::Dynamic(_, _val) => {
-            //     // For Dynamic, we guess a Dynamic type with max_types=255 (default)
-            //     // The actual type registry would be determined during serialization
-            //     Type::Dynamic(255)
-            // }
+            Value::Dynamic(_, _val) => {
+                // For Dynamic, we guess a Dynamic type with max_types=None (no limit)
+                // The actual type registry would be determined during serialization
+                Type::Dynamic { max_types: None }
+            }
             Value::Ipv4(_) => Type::Ipv4,
             Value::Ipv6(_) => Type::Ipv6,
 
@@ -755,10 +755,9 @@ impl fmt::Display for Value {
             Value::Variant(discriminator, value) => {
                 write!(f, "variant({discriminator},{value})")
             }
-            // TODO: Dynamic type not yet implemented
-            // Value::Dynamic(type_name, value) => {
-            //     write!(f, "dynamic('{type_name}',{value})")
-            // }
+            Value::Dynamic(type_name, value) => {
+                write!(f, "dynamic('{type_name}',{value})")
+            }
             Value::Ipv4(ipv4) => write!(f, "'{ipv4}'"),
             Value::Ipv6(ipv6) => write!(f, "'{ipv6}'"),
             Value::Point(x) => write!(f, "{x:?}"),

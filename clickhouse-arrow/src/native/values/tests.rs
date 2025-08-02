@@ -885,3 +885,125 @@ fn test_datetime_display_error_handling() {
     assert!(display.contains("parseDateTime64BestEffort"));
     assert!(display.contains(", 3)"));
 }
+
+#[test]
+fn test_dynamic_value_creation() {
+    // Test creating Dynamic values with different inner types
+    let dynamic_int = Value::Dynamic("Int32".to_string(), Box::new(Value::Int32(42)));
+    let _dynamic_string =
+        Value::Dynamic("String".to_string(), Box::new(Value::String(b"hello".to_vec())));
+    let _dynamic_array = Value::Dynamic(
+        "Array(Int32)".to_string(),
+        Box::new(Value::Array(vec![Value::Int32(1), Value::Int32(2)])),
+    );
+
+    // Test that Dynamic values can be created
+    match dynamic_int {
+        Value::Dynamic(type_name, inner) => {
+            assert_eq!(type_name, "Int32");
+            assert_eq!(*inner, Value::Int32(42));
+        }
+        _ => panic!("Expected Dynamic value"),
+    }
+}
+
+#[test]
+fn test_dynamic_value_equality() {
+    // Test equality for same type and value
+    let dynamic1 = Value::Dynamic("Int32".to_string(), Box::new(Value::Int32(42)));
+    let dynamic2 = Value::Dynamic("Int32".to_string(), Box::new(Value::Int32(42)));
+    assert_eq!(dynamic1, dynamic2);
+
+    // Test inequality for different types
+    let dynamic3 = Value::Dynamic("Int64".to_string(), Box::new(Value::Int64(42)));
+    assert_ne!(dynamic1, dynamic3);
+
+    // Test inequality for different values
+    let dynamic4 = Value::Dynamic("Int32".to_string(), Box::new(Value::Int32(24)));
+    assert_ne!(dynamic1, dynamic4);
+
+    // Test inequality with non-Dynamic values
+    let regular_int = Value::Int32(42);
+    assert_ne!(dynamic1, regular_int);
+}
+
+#[test]
+fn test_dynamic_value_hash() {
+    use std::collections::HashSet;
+
+    // Create Dynamic values
+    let dynamic1 = Value::Dynamic("Int32".to_string(), Box::new(Value::Int32(42)));
+    let dynamic2 = Value::Dynamic("Int32".to_string(), Box::new(Value::Int32(42)));
+    let dynamic3 = Value::Dynamic("String".to_string(), Box::new(Value::String(b"test".to_vec())));
+
+    // Test that equal Dynamic values have the same hash
+    let mut set = HashSet::new();
+    let _ = set.insert(dynamic1.clone());
+    assert!(set.contains(&dynamic2));
+
+    // Test that different Dynamic values have different hashes (usually)
+    let _ = set.insert(dynamic3);
+    assert_eq!(set.len(), 2);
+}
+
+#[test]
+fn test_dynamic_value_display() {
+    // Test display formatting for various Dynamic values
+    let dynamic_int = Value::Dynamic("Int32".to_string(), Box::new(Value::Int32(42)));
+    assert_eq!(dynamic_int.to_string(), "dynamic('Int32',42)");
+
+    let dynamic_string =
+        Value::Dynamic("String".to_string(), Box::new(Value::String(b"hello".to_vec())));
+    assert_eq!(dynamic_string.to_string(), "dynamic('String','hello')");
+
+    let dynamic_array = Value::Dynamic(
+        "Array(Int32)".to_string(),
+        Box::new(Value::Array(vec![Value::Int32(1), Value::Int32(2)])),
+    );
+    assert_eq!(dynamic_array.to_string(), "dynamic('Array(Int32)',[1,2])");
+
+    // Test nested Dynamic values
+    let nested_dynamic = Value::Dynamic(
+        "Dynamic".to_string(),
+        Box::new(Value::Dynamic("Int32".to_string(), Box::new(Value::Int32(42)))),
+    );
+    assert_eq!(nested_dynamic.to_string(), "dynamic('Dynamic',dynamic('Int32',42))");
+}
+
+#[test]
+fn test_dynamic_value_guess_type() {
+    let dynamic = Value::Dynamic("SomeType".to_string(), Box::new(Value::Int32(42)));
+    let guessed_type = dynamic.guess_type();
+
+    // Dynamic values should guess to Dynamic type with no max_types limit
+    match guessed_type {
+        Type::Dynamic { max_types } => assert_eq!(max_types, None),
+        _ => panic!("Expected Dynamic type"),
+    }
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn test_dynamic_value_to_json() {
+    // Test JSON conversion for Dynamic values
+    let dynamic_int = Value::Dynamic("Int32".to_string(), Box::new(Value::Int32(42)));
+    let json = dynamic_int.to_json().unwrap();
+    assert_eq!(json, serde_json::json!(42));
+
+    let dynamic_string =
+        Value::Dynamic("String".to_string(), Box::new(Value::String(b"hello".to_vec())));
+    let json = dynamic_string.to_json().unwrap();
+    assert_eq!(json, serde_json::json!("hello"));
+
+    let dynamic_array = Value::Dynamic(
+        "Array(Int32)".to_string(),
+        Box::new(Value::Array(vec![Value::Int32(1), Value::Int32(2)])),
+    );
+    let json = dynamic_array.to_json().unwrap();
+    assert_eq!(json, serde_json::json!([1, 2]));
+
+    // Test null Dynamic value
+    let dynamic_null = Value::Dynamic("Nullable(Int32)".to_string(), Box::new(Value::Null));
+    let json = dynamic_null.to_json().unwrap();
+    assert_eq!(json, serde_json::Value::Null);
+}
