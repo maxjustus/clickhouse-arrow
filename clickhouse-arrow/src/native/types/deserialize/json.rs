@@ -16,6 +16,154 @@ const JSON_OBJECT_VERSION_3: u64 = 3;
 pub(crate) struct JsonDeserializer;
 
 impl JsonDeserializer {
+    /// Common logic for reading JSON data (async version)
+    async fn read_json_internal_async<R: ClickHouseRead>(
+        reader: &mut R,
+        rows: usize,
+        state: &mut DeserializerState,
+    ) -> Result<Vec<Value>> {
+        let (version, path_names, dynamic_data) =
+            if let TypeSpecificState::Json(json_state) = &state.type_specific {
+                let version = json_state.version.ok_or_else(|| {
+                    Error::DeserializeError(
+                        "JSON version not set. read_prefix must be called first".to_string(),
+                    )
+                })?;
+                (version, json_state.paths.clone(), json_state.dynamic_data.clone())
+            } else {
+                return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
+            };
+
+        match version {
+            JSON_OBJECT_VERSION_3 => {
+                let dynamic_data = dynamic_data.ok_or_else(|| {
+                    Error::DeserializeError("JSON object data not set".to_string())
+                })?;
+
+                // Read values for each path
+                let mut path_values = HashMap::new();
+
+                for (path_idx, path_name) in path_names.iter().enumerate() {
+                    let (total_types, types) = &dynamic_data[path_idx];
+
+                    // Read discriminators
+                    let mut discriminators = Vec::with_capacity(rows);
+                    for _ in 0..rows {
+                        discriminators.push(read_discriminator!(async reader, *total_types));
+                    }
+
+                    // Build offsets
+                    let (offsets, row_count_by_type) =
+                        Self::build_offsets(&discriminators, *total_types);
+
+                    // Read column data
+                    let mut columns = HashMap::new();
+                    for (idx, (_, typ)) in types.iter().enumerate() {
+                        let type_idx = idx as u64;
+                        if let Some(&count) = row_count_by_type.get(&type_idx)
+                            && count > 0
+                        {
+                            let values = typ.deserialize_column(reader, count, state).await?;
+                            let old = columns.insert(type_idx, values);
+                            debug_assert!(old.is_none());
+                        }
+                    }
+
+                    // Reconstruct values
+                    let values = Self::reconstruct_path_values(
+                        &discriminators,
+                        &offsets,
+                        &columns,
+                        *total_types,
+                        rows,
+                    );
+                    let old = path_values.insert(path_name.clone(), values);
+                    debug_assert!(old.is_none());
+                }
+
+                Self::build_json_objects(&path_names, &path_values, rows)
+            }
+            _ => Err(Error::DeserializeError(format!(
+                "JSON type requires version 3, got version {version}. Please use ClickHouse \
+                 server >= 25.6"
+            ))),
+        }
+    }
+
+    /// Common logic for reading JSON data (sync version)
+    fn read_json_internal_sync(
+        reader: &mut impl ClickHouseBytesRead,
+        rows: usize,
+        state: &mut DeserializerState,
+    ) -> Result<Vec<Value>> {
+        let (version, path_names, dynamic_data) =
+            if let TypeSpecificState::Json(json_state) = &state.type_specific {
+                let version = json_state.version.ok_or_else(|| {
+                    Error::DeserializeError(
+                        "JSON version not set. read_prefix must be called first".to_string(),
+                    )
+                })?;
+                (version, json_state.paths.clone(), json_state.dynamic_data.clone())
+            } else {
+                return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
+            };
+
+        match version {
+            JSON_OBJECT_VERSION_3 => {
+                let dynamic_data = dynamic_data.ok_or_else(|| {
+                    Error::DeserializeError("JSON object data not set".to_string())
+                })?;
+
+                // Read values for each path
+                let mut path_values = HashMap::new();
+
+                for (path_idx, path_name) in path_names.iter().enumerate() {
+                    let (total_types, types) = &dynamic_data[path_idx];
+
+                    // Read discriminators
+                    let mut discriminators = Vec::with_capacity(rows);
+                    for _ in 0..rows {
+                        discriminators.push(read_discriminator!(sync reader, *total_types));
+                    }
+
+                    // Build offsets
+                    let (offsets, row_count_by_type) =
+                        Self::build_offsets(&discriminators, *total_types);
+
+                    // Read column data
+                    let mut columns = HashMap::new();
+                    for (idx, (_, typ)) in types.iter().enumerate() {
+                        let type_idx = idx as u64;
+                        if let Some(&count) = row_count_by_type.get(&type_idx)
+                            && count > 0
+                        {
+                            let values = typ.deserialize_column_sync(reader, count, state)?;
+                            let old = columns.insert(type_idx, values);
+                            debug_assert!(old.is_none());
+                        }
+                    }
+
+                    // Reconstruct values
+                    let values = Self::reconstruct_path_values(
+                        &discriminators,
+                        &offsets,
+                        &columns,
+                        *total_types,
+                        rows,
+                    );
+                    let old = path_values.insert(path_name.clone(), values);
+                    debug_assert!(old.is_none());
+                }
+
+                Self::build_json_objects(&path_names, &path_values, rows)
+            }
+            _ => Err(Error::DeserializeError(format!(
+                "JSON type requires version 3, got version {version}. Please use ClickHouse \
+                 server >= 25.6"
+            ))),
+        }
+    }
+
     /// Set a value at a nested path in a JSON object map
     fn set_nested_value(
         object: &mut serde_json::Map<String, serde_json::Value>,
@@ -203,72 +351,7 @@ impl Deserializer for JsonDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (version, path_names, dynamic_data) =
-            if let TypeSpecificState::Json(json_state) = &state.type_specific {
-                let version = json_state.version.ok_or_else(|| {
-                    Error::DeserializeError(
-                        "JSON version not set. read_prefix must be called first".to_string(),
-                    )
-                })?;
-                (version, json_state.paths.clone(), json_state.dynamic_data.clone())
-            } else {
-                return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
-            };
-
-        match version {
-            JSON_OBJECT_VERSION_3 => {
-                let dynamic_data = dynamic_data.ok_or_else(|| {
-                    Error::DeserializeError("JSON object data not set".to_string())
-                })?;
-
-                // Read values for each path
-                let mut path_values = HashMap::new();
-
-                for (path_idx, path_name) in path_names.iter().enumerate() {
-                    let (total_types, types) = &dynamic_data[path_idx];
-
-                    // Read discriminators
-                    let mut discriminators = Vec::with_capacity(rows);
-                    for _ in 0..rows {
-                        discriminators.push(read_discriminator!(async reader, *total_types));
-                    }
-
-                    // Build offsets
-                    let (offsets, row_count_by_type) =
-                        Self::build_offsets(&discriminators, *total_types);
-
-                    // Read column data
-                    let mut columns = HashMap::new();
-                    for (idx, (_, typ)) in types.iter().enumerate() {
-                        let type_idx = idx as u64;
-                        if let Some(&count) = row_count_by_type.get(&type_idx)
-                            && count > 0
-                        {
-                            let values = typ.deserialize_column(reader, count, state).await?;
-                            let old = columns.insert(type_idx, values);
-                            debug_assert!(old.is_none());
-                        }
-                    }
-
-                    // Reconstruct values
-                    let values = Self::reconstruct_path_values(
-                        &discriminators,
-                        &offsets,
-                        &columns,
-                        *total_types,
-                        rows,
-                    );
-                    let old = path_values.insert(path_name.clone(), values);
-                    debug_assert!(old.is_none());
-                }
-
-                Self::build_json_objects(&path_names, &path_values, rows)
-            }
-            _ => Err(Error::DeserializeError(format!(
-                "JSON type requires version 3, got version {version}. Please use ClickHouse \
-                 server >= 25.6"
-            ))),
-        }
+        Self::read_json_internal_async(reader, rows, state).await
     }
 
     fn read_sync(
@@ -277,72 +360,7 @@ impl Deserializer for JsonDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (version, path_names, dynamic_data) =
-            if let TypeSpecificState::Json(json_state) = &state.type_specific {
-                let version = json_state.version.ok_or_else(|| {
-                    Error::DeserializeError(
-                        "JSON version not set. read_prefix must be called first".to_string(),
-                    )
-                })?;
-                (version, json_state.paths.clone(), json_state.dynamic_data.clone())
-            } else {
-                return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
-            };
-
-        match version {
-            JSON_OBJECT_VERSION_3 => {
-                let dynamic_data = dynamic_data.ok_or_else(|| {
-                    Error::DeserializeError("JSON object data not set".to_string())
-                })?;
-
-                // Read values for each path
-                let mut path_values = HashMap::new();
-
-                for (path_idx, path_name) in path_names.iter().enumerate() {
-                    let (total_types, types) = &dynamic_data[path_idx];
-
-                    // Read discriminators
-                    let mut discriminators = Vec::with_capacity(rows);
-                    for _ in 0..rows {
-                        discriminators.push(read_discriminator!(sync reader, *total_types));
-                    }
-
-                    // Build offsets
-                    let (offsets, row_count_by_type) =
-                        Self::build_offsets(&discriminators, *total_types);
-
-                    // Read column data
-                    let mut columns = HashMap::new();
-                    for (idx, (_, typ)) in types.iter().enumerate() {
-                        let type_idx = idx as u64;
-                        if let Some(&count) = row_count_by_type.get(&type_idx)
-                            && count > 0
-                        {
-                            let values = typ.deserialize_column_sync(reader, count, state)?;
-                            let old = columns.insert(type_idx, values);
-                            debug_assert!(old.is_none());
-                        }
-                    }
-
-                    // Reconstruct values
-                    let values = Self::reconstruct_path_values(
-                        &discriminators,
-                        &offsets,
-                        &columns,
-                        *total_types,
-                        rows,
-                    );
-                    let old = path_values.insert(path_name.clone(), values);
-                    debug_assert!(old.is_none());
-                }
-
-                Self::build_json_objects(&path_names, &path_values, rows)
-            }
-            _ => Err(Error::DeserializeError(format!(
-                "JSON type requires version 3, got version {version}. Please use ClickHouse \
-                 server >= 25.6"
-            ))),
-        }
+        Self::read_json_internal_sync(reader, rows, state)
     }
 }
 #[cfg(test)]
