@@ -980,7 +980,8 @@ mod tests {
     }
 
     /// Helper macro to test both sync and async serialize functions with identical inputs
-    /// Returns (`sync_result`, `async_result`, `sync_writer`, `async_writer`) for flexible assertions
+    /// Returns (`sync_result`, `async_result`, `sync_writer`, `async_writer`) for flexible
+    /// assertions
     macro_rules! test_both_serialize {
         ($type:expr, $column:expr, $data_type:expr) => {{
             // Test async

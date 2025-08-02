@@ -5,7 +5,7 @@ use tokio::io::AsyncReadExt;
 use crate::Result;
 use crate::formats::{DeserializerState, DynamicState, TypeSpecificState};
 use crate::io::{ClickHouseBytesRead, ClickHouseRead};
-use crate::native::types::deserialize::{read_discriminator, ClickHouseNativeDeserializer};
+use crate::native::types::deserialize::{ClickHouseNativeDeserializer, read_discriminator};
 use crate::native::types::{Type, Value};
 
 const DYNAMIC_VERSION_V3: u64 = 3;

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use tokio::io::AsyncReadExt;
 
-use super::{read_discriminator, ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
+use super::{
+    ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type, read_discriminator,
+};
 use crate::formats::{JsonState as JsonStateData, TypeSpecificState};
 use crate::io::{ClickHouseBytesRead, ClickHouseRead};
 use crate::native::values::Value;

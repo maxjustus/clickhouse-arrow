@@ -733,6 +733,154 @@ macro_rules! native_roundtrip_test {
 // Example usage of the new test harness and macro
 // These would replace the more verbose existing test functions
 
+/// Convert TestRowAll data to Block format for harness compatibility
+pub fn test_row_all_to_block(data: Vec<TestRowAll>) -> Block {
+    let rows = data.len() as u64;
+    let schema = get_testrowall_schema();
+
+    let mut column_data = Vec::new();
+
+    for (col_idx, _) in schema.iter().enumerate() {
+        let mut column_values = Vec::new();
+
+        for row in &data {
+            let value = match col_idx {
+                0 => Value::UInt64(row.id),
+                1 => Value::Int8(row.int8_col),
+                2 => Value::Int16(row.int16_col),
+                3 => Value::Int32(row.int32_col),
+                4 => Value::Int64(row.int64_col),
+                5 => Value::UInt8(row.uint8_col),
+                6 => Value::UInt16(row.uint16_col),
+                7 => Value::UInt32(row.uint32_col),
+                8 => Value::UInt64(row.uint64_col),
+                9 => Value::UInt128(row.uint128_col),
+                10 => Value::UInt256(row.uint256_col.into()),
+                11 => Value::Date(row.date_col),
+                12 => Value::DateTime(row.datetime_col),
+                13 => Value::DateTime64(row.datetime64_col.into()),
+                14 => {
+                    #[cfg(feature = "rust_decimal")]
+                    {
+                        let mantissa = row.decimal32_col.mantissa() as i32;
+                        Value::Decimal32(4, mantissa)
+                    }
+                    #[cfg(not(feature = "rust_decimal"))]
+                    {
+                        Value::Decimal32(4, row.decimal32_col.0)
+                    }
+                },
+                15 => {
+                    #[cfg(feature = "rust_decimal")]
+                    {
+                        let mantissa = row.decimal64_col.mantissa() as i64;
+                        Value::Decimal64(6, mantissa)
+                    }
+                    #[cfg(not(feature = "rust_decimal"))]
+                    {
+                        Value::Decimal64(6, row.decimal64_col.0)
+                    }
+                },
+                16 => {
+                    #[cfg(feature = "rust_decimal")]
+                    {
+                        let mantissa = row.decimal128_col.mantissa() as i128;
+                        Value::Decimal128(8, mantissa)
+                    }
+                    #[cfg(not(feature = "rust_decimal"))]
+                    {
+                        Value::Decimal128(8, row.decimal128_col.0)
+                    }
+                },
+                17 => Value::Decimal256(10, row.decimal256_col.0),
+                18 => match &row.nullable_string_col {
+                    Some(s) => Value::String(s.as_bytes().to_vec()),
+                    None => Value::Null,
+                },
+                19 => match row.nullable_int32_col {
+                    Some(i) => Value::Int32(i),
+                    None => Value::Null,
+                },
+                20 => match row.nullable_uint64_col {
+                    Some(u) => Value::UInt64(u),
+                    None => Value::Null,
+                },
+                21 => {
+                    Value::Array(row.array_uint64_col.iter().map(|&x| Value::UInt64(x)).collect())
+                }
+                22 => Value::Array(
+                    row.array_string_col
+                        .iter()
+                        .map(|s| Value::String(s.as_bytes().to_vec()))
+                        .collect(),
+                ),
+                23 => Value::Array(
+                    row.array_nullable_int32_col
+                        .iter()
+                        .map(|opt| match opt {
+                            Some(i) => Value::Int32(*i),
+                            None => Value::Null,
+                        })
+                        .collect(),
+                ),
+                24 => Value::Array(
+                    row.array_nullable_string_col
+                        .iter()
+                        .map(|opt| match opt {
+                            Some(s) => Value::String(s.as_bytes().to_vec()),
+                            None => Value::Null,
+                        })
+                        .collect(),
+                ),
+                25 => Value::String(row.string_col.as_bytes().to_vec()),
+                26 => Value::String(row.fixed_string_col.as_bytes().to_vec()),
+                27 => Value::Uuid(row.uuid_col),
+                _ => panic!("Unexpected column index: {}", col_idx),
+            };
+            column_values.push(value);
+        }
+        column_data.extend(column_values);
+    }
+
+    Block {
+        info: BlockInfo::default(),
+        rows,
+        column_types: schema.into_iter().map(|(name, typ, _)| (name, typ)).collect(),
+        column_data,
+    }
+}
+
+/// Convert TestRowVariant data to Block format for harness compatibility  
+pub fn test_row_variant_to_block(data: Vec<TestRowVariant>) -> Block {
+    let rows = data.len() as u64;
+    let schema = get_variant_schema();
+
+    let mut column_data = Vec::new();
+
+    for (col_idx, _) in schema.iter().enumerate() {
+        let mut column_values = Vec::new();
+
+        for row in &data {
+            let value = match col_idx {
+                0 => Value::UInt64(row.id),
+                1 => row.simple_variant.clone(),
+                2 => row.complex_variant.clone(),
+                3 => row.multi_type_variant.clone(),
+                _ => panic!("Unexpected column index: {}", col_idx),
+            };
+            column_values.push(value);
+        }
+        column_data.extend(column_values);
+    }
+
+    Block {
+        info: BlockInfo::default(),
+        rows,
+        column_types: schema.into_iter().map(|(name, typ, _)| (name, typ)).collect(),
+        column_data,
+    }
+}
+
 native_roundtrip_test!(test_dynamic_harness_example, generate_dynamic_test_block(), v3);
 
 native_roundtrip_test!(test_json_harness_example, generate_json_test_block(), v3);
