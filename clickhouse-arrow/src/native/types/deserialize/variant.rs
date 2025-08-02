@@ -115,23 +115,8 @@ impl VariantDeserializer {
             .collect()
     }
 
-    pub(crate) async fn read_prefix<R: ClickHouseRead>(
-        type_: &Type,
-        reader: &mut R,
-        state: &mut DeserializerState,
-    ) -> Result<()> {
-        let version = reader.read_u64_le().await?;
-        check_version!(version);
-
-        // Read prefixes for nested types
-        for inner_type in type_.unwrap_variant()? {
-            inner_type.deserialize_prefix_async(reader, state).await?;
-        }
-
-        Ok(())
-    }
-
-    pub(crate) async fn read_async<R: ClickHouseRead>(
+    /// Read Variant data (async version)
+    async fn read_internal_async<R: ClickHouseRead>(
         type_: &Type,
         reader: &mut R,
         rows: usize,
@@ -165,22 +150,8 @@ impl VariantDeserializer {
         Self::reconstruct_values(&discriminators, &offsets, &columns)
     }
 
-    pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
-        type_: &Type,
-        reader: &mut R,
-    ) -> Result<()> {
-        let version = reader.get_u64_le();
-        check_version!(version);
-
-        // Read prefixes for nested types
-        for inner_type in type_.unwrap_variant()? {
-            inner_type.deserialize_prefix(reader)?;
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn read_sync<R: ClickHouseBytesRead>(
+    /// Read Variant data (sync version)
+    fn read_internal_sync<R: ClickHouseBytesRead>(
         type_: &Type,
         reader: &mut R,
         rows: usize,
@@ -219,6 +190,55 @@ impl VariantDeserializer {
 
         // Reconstruct values in original order
         Self::reconstruct_values(&discriminators, &offsets, &columns)
+    }
+
+    pub(crate) async fn read_prefix<R: ClickHouseRead>(
+        type_: &Type,
+        reader: &mut R,
+        state: &mut DeserializerState,
+    ) -> Result<()> {
+        let version = reader.read_u64_le().await?;
+        check_version!(version);
+
+        // Read prefixes for nested types
+        for inner_type in type_.unwrap_variant()? {
+            inner_type.deserialize_prefix_async(reader, state).await?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) async fn read_async<R: ClickHouseRead>(
+        type_: &Type,
+        reader: &mut R,
+        rows: usize,
+        state: &mut DeserializerState,
+    ) -> Result<Vec<Value>> {
+        Self::read_internal_async(type_, reader, rows, state).await
+    }
+
+    pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
+        type_: &Type,
+        reader: &mut R,
+    ) -> Result<()> {
+        let version = reader.get_u64_le();
+        check_version!(version);
+
+        // Read prefixes for nested types
+        for inner_type in type_.unwrap_variant()? {
+            inner_type.deserialize_prefix(reader)?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn read_sync<R: ClickHouseBytesRead>(
+        type_: &Type,
+        reader: &mut R,
+        rows: usize,
+        state: &mut DeserializerState,
+    ) -> Result<Vec<Value>> {
+        Self::read_internal_sync(type_, reader, rows, state)
     }
 }
 

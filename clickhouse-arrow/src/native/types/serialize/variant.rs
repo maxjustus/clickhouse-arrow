@@ -36,8 +36,8 @@ impl VariantSerializer {
         Ok((discriminators, grouped_values))
     }
 
-    /// Write column data for each discriminator in ascending order
-    async fn write_columns<W: ClickHouseWrite>(
+    /// Write column data for each discriminator (async version)
+    async fn write_columns_internal_async<W: ClickHouseWrite>(
         discriminator_map: &crate::native::types::deserialize::variant::DiscriminatorMap,
         grouped_values: &HashMap<u8, Vec<Value>>,
         writer: &mut W,
@@ -57,8 +57,8 @@ impl VariantSerializer {
         Ok(())
     }
 
-    /// Write column data sync version
-    fn write_columns_sync<W: ClickHouseBytesWrite>(
+    /// Write column data for each discriminator (sync version)
+    fn write_columns_internal_sync<W: ClickHouseBytesWrite>(
         discriminator_map: &crate::native::types::deserialize::variant::DiscriminatorMap,
         grouped_values: &HashMap<u8, Vec<Value>>,
         writer: &mut W,
@@ -76,6 +76,26 @@ impl VariantSerializer {
             }
         }
         Ok(())
+    }
+
+    /// Write column data for each discriminator in ascending order
+    async fn write_columns<W: ClickHouseWrite>(
+        discriminator_map: &crate::native::types::deserialize::variant::DiscriminatorMap,
+        grouped_values: &HashMap<u8, Vec<Value>>,
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        Self::write_columns_internal_async(discriminator_map, grouped_values, writer, state).await
+    }
+
+    /// Write column data sync version
+    fn write_columns_sync<W: ClickHouseBytesWrite>(
+        discriminator_map: &crate::native::types::deserialize::variant::DiscriminatorMap,
+        grouped_values: &HashMap<u8, Vec<Value>>,
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        Self::write_columns_internal_sync(discriminator_map, grouped_values, writer, state)
     }
 
     pub(crate) async fn write_prefix<W: ClickHouseWrite>(

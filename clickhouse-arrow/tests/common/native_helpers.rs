@@ -769,7 +769,7 @@ pub fn test_row_all_to_block(data: Vec<TestRowAll>) -> Block {
                     {
                         Value::Decimal32(4, row.decimal32_col.0)
                     }
-                },
+                }
                 15 => {
                     #[cfg(feature = "rust_decimal")]
                     {
@@ -780,7 +780,7 @@ pub fn test_row_all_to_block(data: Vec<TestRowAll>) -> Block {
                     {
                         Value::Decimal64(6, row.decimal64_col.0)
                     }
-                },
+                }
                 16 => {
                     #[cfg(feature = "rust_decimal")]
                     {
@@ -791,7 +791,7 @@ pub fn test_row_all_to_block(data: Vec<TestRowAll>) -> Block {
                     {
                         Value::Decimal128(8, row.decimal128_col.0)
                     }
-                },
+                }
                 17 => Value::Decimal256(10, row.decimal256_col.0),
                 18 => match &row.nullable_string_col {
                     Some(s) => Value::String(s.as_bytes().to_vec()),

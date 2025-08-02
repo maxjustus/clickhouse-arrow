@@ -441,7 +441,6 @@ impl JsonSerializer {
         // Write column data for each type (in alphabetical order)
         Self::write_typed_columns_internal_sync(&type_names, &type_map, writer, state)
     }
-
 }
 
 impl JsonSerializer {
@@ -627,7 +626,8 @@ impl Serializer for JsonSerializer {
         // Write data for each path (using Dynamic column format)
         for path in &paths {
             if let Some(column_values) = path_columns.get(path) {
-                Self::write_dynamic_column_data_internal_async(column_values, writer, state).await?;
+                Self::write_dynamic_column_data_internal_async(column_values, writer, state)
+                    .await?;
             }
         }
 

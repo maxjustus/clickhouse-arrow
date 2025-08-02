@@ -128,8 +128,8 @@ impl DynamicSerializer {
         (discriminators, rows_by_type)
     }
 
-    /// Write column data for each type
-    async fn write_columns<W: ClickHouseWrite>(
+    /// Write column data for each type (async version)
+    async fn write_columns_internal_async<W: ClickHouseWrite>(
         type_names: &[String],
         type_map: &HashMap<String, (usize, Type)>,
         rows_by_type: &HashMap<usize, Vec<usize>>,
@@ -155,8 +155,8 @@ impl DynamicSerializer {
         Ok(())
     }
 
-    /// Write column data for each type (sync)
-    fn write_columns_sync<W: ClickHouseBytesWrite>(
+    /// Write column data for each type (sync version)
+    fn write_columns_internal_sync<W: ClickHouseBytesWrite>(
         type_names: &[String],
         type_map: &HashMap<String, (usize, Type)>,
         rows_by_type: &HashMap<usize, Vec<usize>>,
@@ -178,6 +178,89 @@ impl DynamicSerializer {
             typ.serialize_column_sync(type_values, writer, state)?;
         }
         Ok(())
+    }
+
+    /// Write complete Dynamic data (async version)
+    async fn write_internal_async<W: ClickHouseWrite>(
+        _type: &Type,
+        values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        // Get metadata from state
+        let (type_names, type_map, total_types) =
+            if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
+                let total = usize::try_from(dynamic_state.total_types).unwrap_or(usize::MAX);
+                (dynamic_state.type_names.clone(), dynamic_state.type_map.clone(), total)
+            } else {
+                return Err(crate::Error::SerializeError(
+                    "Dynamic serialization state not found. `analyze_values` must be called \
+                     before `write`."
+                        .to_string(),
+                ));
+            };
+
+        // v3 uses variable-sized discriminators
+        // Build discriminators and count rows per type
+        let (discriminators, rows_by_type) =
+            Self::build_discriminators_and_groups(values, &type_map, total_types);
+
+        // Write discriminators
+        for &disc in &discriminators {
+            write_discriminator!(async writer, disc, total_types);
+        }
+
+        // Write column data for each type
+        Self::write_columns_internal_async(
+            &type_names,
+            &type_map,
+            &rows_by_type,
+            values,
+            writer,
+            state,
+        )
+        .await
+    }
+
+    /// Write complete Dynamic data (sync version)
+    fn write_internal_sync<W: ClickHouseBytesWrite>(
+        _type: &Type,
+        values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        // Get metadata from state
+        let (type_names, type_map, total_types) =
+            if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
+                let total = usize::try_from(dynamic_state.total_types).unwrap_or(usize::MAX);
+                (dynamic_state.type_names.clone(), dynamic_state.type_map.clone(), total)
+            } else {
+                return Err(crate::Error::SerializeError(
+                    "Dynamic serialization state not found. `analyze_values` must be called \
+                     before `write`."
+                        .to_string(),
+                ));
+            };
+
+        // v3 uses variable-sized discriminators
+        // Build discriminators and count rows per type
+        let (discriminators, rows_by_type) =
+            Self::build_discriminators_and_groups(values, &type_map, total_types);
+
+        // Write discriminators
+        for &disc in &discriminators {
+            write_discriminator!(sync writer, disc, total_types);
+        }
+
+        // Write column data for each type
+        Self::write_columns_internal_sync(
+            &type_names,
+            &type_map,
+            &rows_by_type,
+            values,
+            writer,
+            state,
+        )
     }
 
     #[allow(clippy::used_underscore_binding)]
@@ -247,31 +330,7 @@ impl DynamicSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // Get metadata from state
-        let (type_names, type_map, total_types) =
-            if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-                let total = usize::try_from(dynamic_state.total_types).unwrap_or(usize::MAX);
-                (dynamic_state.type_names.clone(), dynamic_state.type_map.clone(), total)
-            } else {
-                return Err(crate::Error::SerializeError(
-                    "Dynamic serialization state not found. `analyze_values` must be called \
-                     before `write`."
-                        .to_string(),
-                ));
-            };
-
-        // v3 uses variable-sized discriminators
-        // Build discriminators and count rows per type
-        let (discriminators, rows_by_type) =
-            Self::build_discriminators_and_groups(values, &type_map, total_types);
-
-        // Write discriminators
-        for &disc in &discriminators {
-            write_discriminator!(async writer, disc, total_types);
-        }
-
-        // Write column data for each type
-        Self::write_columns(&type_names, &type_map, &rows_by_type, values, writer, state).await
+        Self::write_internal_async(_type, values, writer, state).await
     }
 
     #[allow(clippy::used_underscore_binding)]
@@ -322,31 +381,7 @@ impl DynamicSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // Get metadata from state
-        let (type_names, type_map, total_types) =
-            if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-                let total = usize::try_from(dynamic_state.total_types).unwrap_or(usize::MAX);
-                (dynamic_state.type_names.clone(), dynamic_state.type_map.clone(), total)
-            } else {
-                return Err(crate::Error::SerializeError(
-                    "Dynamic serialization state not found. `analyze_values` must be called \
-                     before `write`."
-                        .to_string(),
-                ));
-            };
-
-        // v3 uses variable-sized discriminators
-        // Build discriminators and count rows per type
-        let (discriminators, rows_by_type) =
-            Self::build_discriminators_and_groups(values, &type_map, total_types);
-
-        // Write discriminators
-        for &disc in &discriminators {
-            write_discriminator!(sync writer, disc, total_types);
-        }
-
-        // Write column data for each type
-        Self::write_columns_sync(&type_names, &type_map, &rows_by_type, values, writer, state)
+        Self::write_internal_sync(_type, values, writer, state)
     }
 }
 
