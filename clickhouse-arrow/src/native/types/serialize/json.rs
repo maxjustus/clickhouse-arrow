@@ -300,8 +300,8 @@ impl JsonSerializer {
         (type_names, type_map, type_to_discriminator)
     }
 
-    /// Write discriminators for column values
-    async fn write_discriminators<W: ClickHouseWrite>(
+    /// Write discriminators for column values (async version)
+    async fn write_discriminators_internal_async<W: ClickHouseWrite>(
         column_values: &[Value],
         type_to_discriminator: &HashMap<String, u8>,
         total_types: u64,
@@ -319,8 +319,8 @@ impl JsonSerializer {
         Ok(())
     }
 
-    /// Write discriminators for column values (sync)
-    fn write_discriminators_sync<W: ClickHouseBytesWrite>(
+    /// Write discriminators for column values (sync version)
+    fn write_discriminators_internal_sync<W: ClickHouseBytesWrite>(
         column_values: &[Value],
         type_to_discriminator: &HashMap<String, u8>,
         total_types: u64,
@@ -337,8 +337,8 @@ impl JsonSerializer {
         }
     }
 
-    /// Write column data for typed values
-    async fn write_typed_columns<W: ClickHouseWrite>(
+    /// Write column data for typed values (async version)
+    async fn write_typed_columns_internal_async<W: ClickHouseWrite>(
         type_names: &[String],
         type_map: &HashMap<String, Vec<(usize, Value)>>,
         writer: &mut W,
@@ -367,8 +367,8 @@ impl JsonSerializer {
         Ok(())
     }
 
-    /// Write column data for typed values (sync)
-    fn write_typed_columns_sync<W: ClickHouseBytesWrite>(
+    /// Write column data for typed values (sync version)
+    fn write_typed_columns_internal_sync<W: ClickHouseBytesWrite>(
         type_names: &[String],
         type_map: &HashMap<String, Vec<(usize, Value)>>,
         writer: &mut W,
@@ -397,8 +397,8 @@ impl JsonSerializer {
         Ok(())
     }
 
-    /// Write Dynamic column data (discriminators + column data)
-    async fn write_dynamic_column_data<W: ClickHouseWrite>(
+    /// Write Dynamic column data (discriminators + column data) - async version
+    async fn write_dynamic_column_data_internal_async<W: ClickHouseWrite>(
         column_values: &[Value],
         writer: &mut W,
         state: &mut SerializerState,
@@ -408,15 +408,20 @@ impl JsonSerializer {
         let total_types = type_names.len() as u64;
 
         // Write discriminators for each row
-        Self::write_discriminators(column_values, &type_to_discriminator, total_types, writer)
-            .await?;
+        Self::write_discriminators_internal_async(
+            column_values,
+            &type_to_discriminator,
+            total_types,
+            writer,
+        )
+        .await?;
 
         // Write column data for each type (in alphabetical order)
-        Self::write_typed_columns(&type_names, &type_map, writer, state).await
+        Self::write_typed_columns_internal_async(&type_names, &type_map, writer, state).await
     }
 
     /// Write Dynamic column data (discriminators + column data) - sync version
-    fn write_dynamic_column_data_sync<W: ClickHouseBytesWrite>(
+    fn write_dynamic_column_data_internal_sync<W: ClickHouseBytesWrite>(
         column_values: &[Value],
         writer: &mut W,
         state: &mut SerializerState,
@@ -426,11 +431,17 @@ impl JsonSerializer {
         let total_types = type_names.len() as u64;
 
         // Write discriminators for each row
-        Self::write_discriminators_sync(column_values, &type_to_discriminator, total_types, writer);
+        Self::write_discriminators_internal_sync(
+            column_values,
+            &type_to_discriminator,
+            total_types,
+            writer,
+        );
 
         // Write column data for each type (in alphabetical order)
-        Self::write_typed_columns_sync(&type_names, &type_map, writer, state)
+        Self::write_typed_columns_internal_sync(&type_names, &type_map, writer, state)
     }
+
 }
 
 impl JsonSerializer {
@@ -616,7 +627,7 @@ impl Serializer for JsonSerializer {
         // Write data for each path (using Dynamic column format)
         for path in &paths {
             if let Some(column_values) = path_columns.get(path) {
-                Self::write_dynamic_column_data(column_values, writer, state).await?;
+                Self::write_dynamic_column_data_internal_async(column_values, writer, state).await?;
             }
         }
 
@@ -661,7 +672,7 @@ impl Serializer for JsonSerializer {
         // Write data for each path (using Dynamic column format)
         for path in &paths {
             if let Some(column_values) = path_columns.get(path) {
-                Self::write_dynamic_column_data_sync(column_values, writer, state)?;
+                Self::write_dynamic_column_data_internal_sync(column_values, writer, state)?;
             }
         }
 
