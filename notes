@@ -1,2 +1,0 @@
-- this line is wrong: ""Skipping {} - requires stable Dynamic/JSON support (ClickHouse 25.5+), found \" - should be 25.6+
-- VersionChecker overall feels a lot more complex than it needs to be
