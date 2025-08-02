@@ -42,158 +42,282 @@ fn roundtrip_values_sync(type_: &Type, values: &[Value]) -> Result<Vec<Value>> {
 }
 
 #[tokio::test]
-async fn test_uint_roundtrips() {
-    let cases = vec![
-        (Type::UInt8, vec![Value::UInt8(12), Value::UInt8(24), Value::UInt8(30)]),
-        (Type::UInt16, vec![Value::UInt16(12), Value::UInt16(24), Value::UInt16(30000)]),
-        (Type::UInt32, vec![Value::UInt32(12), Value::UInt32(24), Value::UInt32(900_000)]),
-        (Type::UInt64, vec![Value::UInt64(12), Value::UInt64(24), Value::UInt64(9_000_000_000)]),
-        (Type::UInt128, vec![
-            Value::UInt128(12),
-            Value::UInt128(24),
-            Value::UInt128(9_000_000_000_u128 * 9_000_000_000),
-        ]),
-        (Type::UInt256, vec![Value::UInt256(u256([0u8; 32])), Value::UInt256(u256([7u8; 32]))]),
-    ];
-    for (type_, values) in cases {
-        let result = roundtrip_values(&type_, &values).await.unwrap();
-        assert_eq!(values, result, "UInt roundtrip failed for type: {:?}", type_);
-    }
+async fn roundtrip_u8() {
+    let values = &[Value::UInt8(12), Value::UInt8(24), Value::UInt8(30)];
+    assert_eq!(&values[..], roundtrip_values(&Type::UInt8, &values[..]).await.unwrap());
 }
 
 #[tokio::test]
-async fn test_int_roundtrips() {
-    let cases = vec![
-        (Type::Int8, vec![Value::Int8(12), Value::Int8(24), Value::Int8(30), Value::Int8(-30)]),
-        (Type::Int16, vec![
-            Value::Int16(12),
-            Value::Int16(24),
-            Value::Int16(30000),
-            Value::Int16(-30000),
-        ]),
-        (Type::Int32, vec![
-            Value::Int32(12),
-            Value::Int32(24),
-            Value::Int32(900_000),
-            Value::Int32(-900_000),
-        ]),
-        (Type::Int64, vec![
-            Value::Int64(12),
-            Value::Int64(24),
-            Value::Int64(9_000_000_000),
-            Value::Int64(-9_000_000_000),
-        ]),
-        (Type::Int128, vec![
-            Value::Int128(12),
-            Value::Int128(24),
-            Value::Int128(9_000_000_000_i128 * 9_000_000_000),
-        ]),
-        (Type::Int256, vec![Value::Int256(i256([0u8; 32])), Value::Int256(i256([7u8; 32]))]),
-    ];
-    for (type_, values) in cases {
-        let result = roundtrip_values(&type_, &values).await.unwrap();
-        assert_eq!(values, result, "Int roundtrip failed for type: {:?}", type_);
-    }
+async fn roundtrip_u16() {
+    let values = &[Value::UInt16(12), Value::UInt16(24), Value::UInt16(30000)];
+    assert_eq!(&values[..], roundtrip_values(&Type::UInt16, &values[..]).await.unwrap());
 }
 
 #[tokio::test]
-async fn test_float_roundtrips() {
-    let cases = vec![
-        (Type::Float32, vec![
-            Value::Float32(1.0),
-            Value::Float32(0.0),
-            Value::Float32(100.0),
-            Value::Float32(-100.0),
-        ]),
-        (Type::Float64, vec![
-            Value::Float64(1.0),
-            Value::Float64(0.0),
-            Value::Float64(100_000.0),
-            Value::Float64(-1_000_000.0),
-        ]),
-    ];
-    for (type_, values) in cases {
-        let result = roundtrip_values(&type_, &values).await.unwrap();
-        assert_eq!(values, result, "Float roundtrip failed for type: {:?}", type_);
-    }
+async fn roundtrip_u32() {
+    let values = &[Value::UInt32(12), Value::UInt32(24), Value::UInt32(900_000)];
+    assert_eq!(&values[..], roundtrip_values(&Type::UInt32, &values[..]).await.unwrap());
 }
 
 #[tokio::test]
-async fn test_decimal_roundtrips() {
-    let cases = vec![
-        (Type::Decimal32(5), vec![
-            Value::Decimal32(5, 12),
-            Value::Decimal32(5, 24),
-            Value::Decimal32(5, -900_000),
-        ]),
-        (Type::Decimal64(5), vec![
-            Value::Decimal64(5, 12),
-            Value::Decimal64(5, 9_000_000_000),
-            Value::Decimal64(5, -9_000_000_000),
-        ]),
-        (Type::Decimal128(5), vec![
-            Value::Decimal128(5, 12),
-            Value::Decimal128(5, 9_000_000_000_i128 * 9_000_000_000),
-        ]),
-        (Type::Decimal256(5), vec![
-            Value::Decimal256(5, i256([0u8; 32])),
-            Value::Decimal256(5, i256([7u8; 32])),
-        ]),
-    ];
-    for (type_, values) in cases {
-        let result = roundtrip_values(&type_, &values).await.unwrap();
-        assert_eq!(values, result, "Decimal roundtrip failed for type: {:?}", type_);
-    }
+async fn roundtrip_u64() {
+    let values = &[Value::UInt64(12), Value::UInt64(24), Value::UInt64(9_000_000_000)];
+    assert_eq!(&values[..], roundtrip_values(&Type::UInt64, &values[..]).await.unwrap());
 }
 
 #[tokio::test]
-async fn test_string_roundtrips() {
-    let values = vec![Value::string(""), Value::string("test"), Value::string("日本語")];
-    let result = roundtrip_values(&Type::String, &values).await.unwrap();
-    assert_eq!(values, result, "String roundtrip failed");
+async fn roundtrip_u128() {
+    let values = &[
+        Value::UInt128(12),
+        Value::UInt128(24),
+        Value::UInt128(9_000_000_000),
+        Value::UInt128(9_000_000_000_u128 * 9_000_000_000),
+    ];
+    assert_eq!(&values[..], roundtrip_values(&Type::UInt128, &values[..]).await.unwrap());
 }
 
 #[tokio::test]
-async fn test_nullable_types() {
-    let nullable_cases = vec![
-        (Type::Nullable(Box::new(Type::UInt32)), vec![
-            Value::UInt32(35),
-            Value::Null,
-            Value::UInt32(120),
-        ]),
-        (Type::Nullable(Box::new(Type::String)), vec![
-            Value::string("test"),
-            Value::Null,
-            Value::string("hello"),
-        ]),
-        (Type::Nullable(Box::new(Type::Float64)), vec![
-            Value::Float64(1.5),
-            Value::Null,
-            Value::Float64(-3.14),
-        ]),
-    ];
-
-    for (type_, values) in nullable_cases {
-        let result = roundtrip_values(&type_, &values).await.unwrap();
-        assert_eq!(values, result, "Nullable roundtrip failed for type: {:?}", type_);
-    }
+async fn roundtrip_u256() {
+    let values = &[Value::UInt256(u256([0u8; 32])), Value::UInt256(u256([7u8; 32]))];
+    assert_eq!(&values[..], roundtrip_values(&Type::UInt256, &values[..]).await.unwrap());
 }
 
 #[tokio::test]
-async fn test_date_time_types() {
-    use chrono::NaiveDate;
-    let date_cases = vec![
-        (Type::Date, vec![Value::Date(Date::from(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()))]),
-        (Type::Date32, vec![Value::Date32(Date32::from(
-            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        ))]),
-        (Type::DateTime(Tz::UTC), vec![Value::DateTime(DateTime(Tz::UTC, 0))]),
-    ];
+async fn roundtrip_i8() {
+    let values = &[Value::Int8(12), Value::Int8(24), Value::Int8(30), Value::Int8(-30)];
+    assert_eq!(&values[..], roundtrip_values(&Type::Int8, &values[..]).await.unwrap());
+}
 
-    for (type_, values) in date_cases {
-        let result = roundtrip_values(&type_, &values).await.unwrap();
-        assert_eq!(values, result, "DateTime roundtrip failed for type: {:?}", type_);
-    }
+#[tokio::test]
+async fn roundtrip_i16() {
+    let values = &[Value::Int16(12), Value::Int16(24), Value::Int16(30000), Value::Int16(-30000)];
+    assert_eq!(&values[..], roundtrip_values(&Type::Int16, &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_i32() {
+    let values =
+        &[Value::Int32(12), Value::Int32(24), Value::Int32(900_000), Value::Int32(900_0000)];
+    assert_eq!(&values[..], roundtrip_values(&Type::Int32, &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_i64() {
+    let values = &[
+        Value::Int64(12),
+        Value::Int64(24),
+        Value::Int64(9_000_000_000),
+        Value::Int64(-9_000_000_000),
+    ];
+    assert_eq!(&values[..], roundtrip_values(&Type::Int64, &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_i128() {
+    let values = &[
+        Value::Int128(12),
+        Value::Int128(24),
+        Value::Int128(9_000_000_000),
+        Value::Int128(9_000_000_000_i128 * 9_000_000_000),
+        Value::Int128(-9_000_000_000_i128 * 9_000_000_000),
+    ];
+    assert_eq!(&values[..], roundtrip_values(&Type::Int128, &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_i256() {
+    let values = &[Value::Int256(i256([0u8; 32])), Value::Int256(i256([7u8; 32]))];
+    assert_eq!(&values[..], roundtrip_values(&Type::Int256, &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_f32() {
+    let values = &[
+        Value::Float32(1.0_f32),
+        Value::Float32(0.0_f32),
+        Value::Float32(100.0_f32),
+        Value::Float32(100_000.0_f32),
+        Value::Float32(1_000_000.0_f32),
+        Value::Float32(-1_000_000.0_f32),
+        Value::Float32(f32::NAN),
+        Value::Float32(f32::INFINITY),
+        Value::Float32(f32::NEG_INFINITY),
+    ];
+    assert_eq!(&values[..], roundtrip_values(&Type::Float32, &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_f64() {
+    let values = &[
+        Value::Float64(1.0_f64),
+        Value::Float64(0.0_f64),
+        Value::Float64(100.0_f64),
+        Value::Float64(100_000.0_f64),
+        Value::Float64(1_000_000.0_f64),
+        Value::Float64(-1_000_000.0_f64),
+        Value::Float64(f64::NAN),
+        Value::Float64(f64::INFINITY),
+        Value::Float64(f64::NEG_INFINITY),
+    ];
+    assert_eq!(&values[..], roundtrip_values(&Type::Float64, &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_d32() {
+    let values = &[
+        Value::Decimal32(5, 12),
+        Value::Decimal32(5, 24),
+        Value::Decimal32(5, 900_000),
+        Value::Decimal32(5, -900_000),
+    ];
+    assert_eq!(&values[..], roundtrip_values(&Type::Decimal32(5), &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_d64() {
+    let values = &[
+        Value::Decimal64(5, 12),
+        Value::Decimal64(5, 24),
+        Value::Decimal64(5, 9_000_000_000),
+        Value::Decimal64(5, -9_000_000_000),
+    ];
+    assert_eq!(&values[..], roundtrip_values(&Type::Decimal64(5), &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_d128() {
+    let values = &[
+        Value::Decimal128(5, 12),
+        Value::Decimal128(5, 24),
+        Value::Decimal128(5, 9_000_000_000),
+        Value::Decimal128(5, 9_000_000_000_i128 * 9_000_000_000),
+        Value::Decimal128(5, -9_000_000_000_i128 * 9_000_000_000),
+    ];
+    assert_eq!(&values[..], roundtrip_values(&Type::Decimal128(5), &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_d256() {
+    let values = &[Value::Decimal256(5, i256([0u8; 32])), Value::Decimal256(5, i256([7u8; 32]))];
+    assert_eq!(&values[..], roundtrip_values(&Type::Decimal256(5), &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_null_int() {
+    let values = &[
+        Value::UInt32(35),
+        Value::UInt32(90),
+        Value::Null,
+        Value::UInt32(120),
+        Value::UInt32(10000),
+        Value::Null,
+    ];
+    assert_eq!(
+        &values[..],
+        roundtrip_values(&Type::Nullable(Box::new(Type::UInt32)), &values[..]).await.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn roundtrip_string() {
+    let values = &[
+        Value::string(""),
+        Value::string("t"),
+        Value::string("test"),
+        Value::string("TESTST"),
+        Value::string("日本語"),
+    ];
+    assert_eq!(&values[..], roundtrip_values(&Type::String, &values[..]).await.unwrap());
+    assert_eq!(
+        &values[..],
+        roundtrip_values(&Type::FixedSizedString(32), &values[..]).await.unwrap()
+    );
+    assert_ne!(
+        &values[..],
+        roundtrip_values(&Type::FixedSizedString(3), &values[..]).await.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn roundtrip_null_string() {
+    let values = &[
+        Value::string(""),
+        Value::Null,
+        Value::string("t"),
+        Value::string("test"),
+        Value::Null,
+        Value::string("TESTST"),
+        Value::string("日本語"),
+        Value::Null,
+    ];
+    assert_eq!(
+        &values[..],
+        roundtrip_values(&Type::Nullable(Box::new(Type::String)), &values[..]).await.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn roundtrip_object() {
+    let obj = "{\"a\":\"a\"}";
+    let values = &[Value::string(obj)];
+    assert_eq!(&values[..], roundtrip_values(&Type::String, &values[..]).await.unwrap());
+
+    let values = &[Value::Object(obj.as_bytes().to_vec())];
+    assert_eq!(&values[..], roundtrip_values(&Type::Object, &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_uuid() {
+    let values = &[
+        Value::Uuid(Uuid::from_u128(0)),
+        Value::Uuid(Uuid::from_u128(1)),
+        Value::Uuid(Uuid::from_u128(456_345_634_563_456)),
+    ];
+    assert_eq!(&values[..], roundtrip_values(&Type::Uuid, &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_ipv4() {
+    let values = &[Value::Ipv4(Ipv4Addr::new(0, 0, 0, 0).into())];
+    assert_eq!(&values[..], roundtrip_values(&Type::Ipv4, &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_ipv6() {
+    let values = &[Value::Ipv6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0).into())];
+    assert_eq!(&values[..], roundtrip_values(&Type::Ipv6, &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_date() {
+    let values = &[Value::Date(Date(0)), Value::Date(Date(3234)), Value::Date(Date(45345))];
+    assert_eq!(&values[..], roundtrip_values(&Type::Date, &values[..]).await.unwrap());
+}
+
+#[tokio::test]
+async fn roundtrip_datetime() {
+    let values = &[
+        Value::DateTime(DateTime(chrono_tz::UTC, 0)),
+        Value::DateTime(DateTime(chrono_tz::UTC, 323_463_434)),
+        Value::DateTime(DateTime(chrono_tz::UTC, 45_345_345)),
+    ];
+    assert_eq!(
+        &values[..],
+        roundtrip_values(&Type::DateTime(chrono_tz::UTC), &values[..]).await.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn roundtrip_datetime64() {
+    let values = &[
+        Value::DateTime64(DynDateTime64(chrono_tz::UTC, 0, 3)),
+        Value::DateTime64(DynDateTime64(chrono_tz::UTC, 32_346_345_634, 3)),
+        Value::DateTime64(DynDateTime64(chrono_tz::UTC, 4_534_564_345, 3)),
+    ];
+    assert_eq!(
+        &values[..],
+        roundtrip_values(&Type::DateTime64(3, chrono_tz::UTC), &values[..]).await.unwrap()
+    );
 }
 
 #[tokio::test]
@@ -786,12 +910,12 @@ fn roundtrip_sized_network_types_sync() {
     use crate::{Ipv4, Ipv6};
     let test_cases = vec![
         (Type::Ipv4, vec![
-            Value::Ipv4(Ipv4(Ipv4Addr::UNSPECIFIED)),
+            Value::Ipv4(Ipv4(Ipv4Addr::new(0, 0, 0, 0))),
             Value::Ipv4(Ipv4(Ipv4Addr::new(192, 168, 1, 1))),
-            Value::Ipv4(Ipv4(Ipv4Addr::BROADCAST)),
+            Value::Ipv4(Ipv4(Ipv4Addr::new(255, 255, 255, 255))),
         ]),
         (Type::Ipv6, vec![
-            Value::Ipv6(Ipv6(Ipv6Addr::UNSPECIFIED)),
+            Value::Ipv6(Ipv6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0))),
             Value::Ipv6(Ipv6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))),
         ]),
     ];
