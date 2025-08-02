@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tokio::io::AsyncReadExt;
 
-use super::{ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
+use super::{read_discriminator, ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
 use crate::formats::{JsonState as JsonStateData, TypeSpecificState};
 use crate::io::{ClickHouseBytesRead, ClickHouseRead};
 use crate::native::values::Value;
@@ -10,26 +10,6 @@ use crate::{Error, Result};
 
 // JSON serialization versions
 const JSON_OBJECT_VERSION_3: u64 = 3;
-
-/// Macro to read discriminator based on size
-macro_rules! read_discriminator {
-    (async $reader:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => u64::from($reader.read_u8().await?),
-            256..=65535 => u64::from($reader.read_u16_le().await?),
-            65536..=4_294_967_295 => u64::from($reader.read_u32_le().await?),
-            _ => $reader.read_u64_le().await?,
-        }
-    };
-    (sync $reader:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => u64::from($reader.get_u8()),
-            256..=65535 => u64::from($reader.get_u16_le()),
-            65536..=4_294_967_295 => u64::from($reader.get_u32_le()),
-            _ => $reader.get_u64_le(),
-        }
-    };
-}
 
 pub(crate) struct JsonDeserializer;
 

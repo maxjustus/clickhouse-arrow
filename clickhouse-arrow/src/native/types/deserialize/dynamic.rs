@@ -5,30 +5,10 @@ use tokio::io::AsyncReadExt;
 use crate::Result;
 use crate::formats::{DeserializerState, DynamicState, TypeSpecificState};
 use crate::io::{ClickHouseBytesRead, ClickHouseRead};
-use crate::native::types::deserialize::ClickHouseNativeDeserializer;
+use crate::native::types::deserialize::{read_discriminator, ClickHouseNativeDeserializer};
 use crate::native::types::{Type, Value};
 
 const DYNAMIC_VERSION_V3: u64 = 3;
-
-/// Macro to read discriminator based on size
-macro_rules! read_discriminator {
-    (async $reader:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => u64::from($reader.read_u8().await?),
-            256..=65535 => u64::from($reader.read_u16_le().await?),
-            65536..=4_294_967_295 => u64::from($reader.read_u32_le().await?),
-            _ => $reader.read_u64_le().await?,
-        }
-    };
-    (sync $reader:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => u64::from($reader.get_u8()),
-            256..=65535 => u64::from($reader.get_u16_le()),
-            65536..=4_294_967_295 => u64::from($reader.get_u32_le()),
-            _ => $reader.get_u64_le(),
-        }
-    };
-}
 
 /// Handles deserialization of Dynamic types
 pub(crate) struct DynamicDeserializer;

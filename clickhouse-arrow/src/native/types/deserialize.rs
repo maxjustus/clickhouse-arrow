@@ -15,6 +15,28 @@ use super::low_cardinality::LOW_CARDINALITY_VERSION;
 use super::*;
 use crate::io::ClickHouseBytesRead;
 
+/// Macro to read discriminator based on size
+/// Used by Dynamic and JSON deserializers for variable-sized discriminators
+macro_rules! read_discriminator {
+    (async $reader:expr, $total_types:expr) => {
+        match $total_types {
+            0..=255 => u64::from($reader.read_u8().await?),
+            256..=65535 => u64::from($reader.read_u16_le().await?),
+            65536..=4_294_967_295 => u64::from($reader.read_u32_le().await?),
+            _ => $reader.read_u64_le().await?,
+        }
+    };
+    (sync $reader:expr, $total_types:expr) => {
+        match $total_types {
+            0..=255 => u64::from($reader.get_u8()),
+            256..=65535 => u64::from($reader.get_u16_le()),
+            65536..=4_294_967_295 => u64::from($reader.get_u32_le()),
+            _ => $reader.get_u64_le(),
+        }
+    };
+}
+pub(crate) use read_discriminator;
+
 // Core protocol parsing
 pub(crate) trait ClickHouseNativeDeserializer {
     fn deserialize_prefix_async<'a, R: ClickHouseRead>(
