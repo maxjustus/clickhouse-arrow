@@ -100,10 +100,7 @@ impl ClickHouseNativeSerializer for Type {
                 }
                 Type::JSON { .. } => {
                     json::JsonSerializer::write_prefix(self, writer, state).await?;
-                } /* TODO: Dynamic type not yet implemented
-                   * Type::Dynamic(_) => {
-                   *     todo!("Dynamic prefix serialization not implemented");
-                   * } */
+                }
             }
             Ok(())
         }
