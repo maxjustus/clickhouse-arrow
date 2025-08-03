@@ -7,6 +7,7 @@ pub(crate) mod object;
 pub(crate) mod sized;
 pub(crate) mod string;
 pub(crate) mod tuple;
+pub(crate) mod variant;
 
 use super::low_cardinality::LOW_CARDINALITY_VERSION;
 use super::*;
@@ -89,6 +90,9 @@ impl ClickHouseNativeSerializer for Type {
                         .await?;
                 }
                 Type::Object => object::ObjectSerializer::write_prefix(self, writer, state).await?,
+                Type::Variant(_) => {
+                    variant::VariantSerializer::write_prefix(self, writer, state).await?;
+                }
             }
             Ok(())
         }
@@ -121,6 +125,10 @@ impl ClickHouseNativeSerializer for Type {
             }
             Type::Object => {
                 writer.put_i8(1);
+                return;
+            }
+            Type::Variant(_) => {
+                variant::VariantSerializer::write_sync_prefix(self, writer, state).unwrap();
                 return;
             }
             _ => return,

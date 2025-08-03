@@ -15,6 +15,11 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use super::protocol::MAX_STRING_SIZE;
+
+// Default parameter values based on ClickHouse documentation and clickhouse-go
+const DEFAULT_DYNAMIC_MAX_TYPES: u32 = 32;
+const DEFAULT_JSON_MAX_DYNAMIC_PATHS: u32 = 1024;
+const DEFAULT_JSON_MAX_DYNAMIC_TYPES: u32 = 32;
 use super::values::{
     Date, DateTime, DynDateTime64, Ipv4, Ipv6, MultiPolygon, Point, Polygon, Ring, Value, i256,
     u256,
@@ -81,6 +86,16 @@ pub enum Type {
     Array(Box<Type>),
     Tuple(Vec<Type>),
     Map(Box<Type>, Box<Type>),
+    Variant(Vec<Type>),
+    Dynamic {
+        max_types: Option<u32>, // Default: 32 if None
+    },
+    JSON {
+        max_dynamic_paths: Option<u32>,              // Default: 1024 if None
+        max_dynamic_types: Option<u32>,              // Default: 32 if None
+        typed_paths:       Vec<(String, Box<Type>)>, // (path, type) pairs like ("Name", String)
+        skip_paths:        Vec<String>,              // Paths to skip, including REGEXP patterns
+    },
 
     Object,
 }
@@ -137,12 +152,78 @@ impl Type {
         }
     }
 
+    /// # Errors
+    ///
+    /// Errors if the type is not a variant
+    pub fn unwrap_variant(&self) -> Result<&[Type]> {
+        match self {
+            Type::Variant(x) => Ok(&x[..]),
+            _ => Err(Error::UnexpectedType(self.clone())),
+        }
+    }
+
+    pub fn unvariant(&self) -> Option<&[Type]> {
+        match self {
+            Type::Variant(x) => Some(&x[..]),
+            _ => None,
+        }
+    }
+
     pub fn unnull(&self) -> Option<&Type> {
         match self {
             Type::Nullable(x) => Some(&**x),
             _ => None,
         }
     }
+
+    /// Get Dynamic type parameters, returning defaults if None
+    pub fn dynamic_max_types(&self) -> Option<u32> {
+        match self {
+            Type::Dynamic { max_types } => Some(max_types.unwrap_or(DEFAULT_DYNAMIC_MAX_TYPES)),
+            _ => None,
+        }
+    }
+
+    /// Get JSON type parameters, returning defaults if None
+    pub fn json_max_dynamic_paths(&self) -> Option<u32> {
+        match self {
+            Type::JSON { max_dynamic_paths, .. } => {
+                Some(max_dynamic_paths.unwrap_or(DEFAULT_JSON_MAX_DYNAMIC_PATHS))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn json_max_dynamic_types(&self) -> Option<u32> {
+        match self {
+            Type::JSON { max_dynamic_types, .. } => {
+                Some(max_dynamic_types.unwrap_or(DEFAULT_JSON_MAX_DYNAMIC_TYPES))
+            }
+            _ => None,
+        }
+    }
+
+    /// Get JSON typed paths
+    pub fn json_typed_paths(&self) -> Option<&[(String, Box<Type>)]> {
+        match self {
+            Type::JSON { typed_paths, .. } => Some(typed_paths),
+            _ => None,
+        }
+    }
+
+    /// Get JSON skip paths
+    pub fn json_skip_paths(&self) -> Option<&[String]> {
+        match self {
+            Type::JSON { skip_paths, .. } => Some(skip_paths),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a Dynamic type
+    pub fn is_dynamic(&self) -> bool { matches!(self, Type::Dynamic { .. }) }
+
+    /// Check if this is a JSON type  
+    pub fn is_json(&self) -> bool { matches!(self, Type::JSON { .. }) }
 
     pub fn strip_null(&self) -> &Type {
         match self {
@@ -204,7 +285,9 @@ impl Type {
             Type::LowCardinality(x) => x.default_value(),
             Type::Array(_) => Value::Array(vec![]),
             Type::Tuple(types) => Value::Tuple(types.iter().map(Type::default_value).collect()),
-            Type::Nullable(_) => Value::Null,
+            Type::Nullable(_) | Type::Variant(_) | Type::Dynamic { .. } | Type::JSON { .. } => {
+                Value::Null
+            }
             Type::Map(_, _) => Value::Map(vec![], vec![]),
             Type::Point => Value::Point(Point::default()),
             Type::Ring => Value::Ring(Ring::default()),
@@ -285,7 +368,47 @@ impl Display for Type {
             ),
             Type::Nullable(inner) => write!(f, "Nullable({inner})"),
             Type::Map(key, value) => write!(f, "Map({key},{value})"),
-            Type::Object => write!(f, "JSON"),
+            Type::Variant(items) => write!(
+                f,
+                "Variant({})",
+                items.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+            ),
+            Type::Dynamic { max_types } => match max_types {
+                Some(max_types) => write!(f, "Dynamic(max_types={max_types})"),
+                None => write!(f, "Dynamic"),
+            },
+            Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_paths } => {
+                let mut params = Vec::new();
+
+                // Add typed paths (Name String, Age Int64, etc.)
+                for (path, typ) in typed_paths {
+                    params.push(format!("{path} {typ}"));
+                }
+
+                // Add skip paths
+                for skip_path in skip_paths {
+                    if skip_path.starts_with("SKIP REGEXP") {
+                        params.push(skip_path.clone());
+                    } else {
+                        params.push(format!("SKIP {skip_path}"));
+                    }
+                }
+
+                // Add config parameters
+                if let Some(paths) = max_dynamic_paths {
+                    params.push(format!("max_dynamic_paths={paths}"));
+                }
+                if let Some(types) = max_dynamic_types {
+                    params.push(format!("max_dynamic_types={types}"));
+                }
+
+                if params.is_empty() {
+                    write!(f, "JSON")
+                } else {
+                    write!(f, "JSON({})", params.join(", "))
+                }
+            }
+            Type::Object => write!(f, "Object"), // TODO: JSON type alias
         }
     }
 }
@@ -358,6 +481,9 @@ impl Type {
                         .await?
                 }
                 Type::Object => object::ObjectDeserializer::read(self, reader, rows, state).await?,
+                Type::Variant(_) => {
+                    variant::VariantDeserializer::read_async(self, reader, rows, state).await?
+                }
             })
         }
         .boxed()
@@ -424,6 +550,7 @@ impl Type {
                 low_cardinality::LowCardinalityDeserializer::read_sync(self, reader, rows, state)?
             }
             Type::Object => object::ObjectDeserializer::read_sync(self, reader, rows, state)?,
+            Type::Variant(_) => variant::VariantDeserializer::read_sync(self, reader, rows, state)?,
         })
     }
 
@@ -496,6 +623,9 @@ impl Type {
                 Type::Object => {
                     object::ObjectSerializer::write(self, values, writer, state).await?;
                 }
+                Type::Variant(_) => {
+                    variant::VariantSerializer::write(self, values, writer, state).await?;
+                }
             }
             Ok(())
         }
@@ -565,6 +695,9 @@ impl Type {
             }
             Type::Object => {
                 object::ObjectSerializer::write_sync(self, values, writer, state)?;
+            }
+            Type::Variant(_) => {
+                variant::VariantSerializer::write_sync(self, &values, writer, state)?;
             }
         }
         Ok(())
@@ -689,8 +822,50 @@ impl Type {
                 key.validate()?;
                 value.validate()?;
             }
-            // TODO: Add Object
-            _ => {}
+            Type::Variant(inner) => {
+                if inner.is_empty() {
+                    return Err(Error::TypeParseError(
+                        "Variant must have at least one type".to_string(),
+                    ));
+                }
+                for inner_type in inner {
+                    inner_type.validate()?;
+                }
+            }
+            // No validation needed for simple scalar types and special types
+            Type::Dynamic { .. }
+            | Type::JSON { .. }
+            | Type::Object
+            | Type::Binary
+            | Type::FixedSizedBinary(_)
+            | Type::String
+            | Type::FixedSizedString(_)
+            | Type::Int8
+            | Type::Int16
+            | Type::Int32
+            | Type::Int64
+            | Type::Int128
+            | Type::Int256
+            | Type::UInt8
+            | Type::UInt16
+            | Type::UInt32
+            | Type::UInt64
+            | Type::UInt128
+            | Type::UInt256
+            | Type::Float32
+            | Type::Float64
+            | Type::Date
+            | Type::Date32
+            | Type::DateTime(_)
+            | Type::Uuid
+            | Type::Ipv4
+            | Type::Ipv6
+            | Type::Enum8(_)
+            | Type::Enum16(_)
+            | Type::Point
+            | Type::Ring
+            | Type::Polygon
+            | Type::MultiPolygon => {}
         }
         Ok(())
     }
@@ -730,7 +905,9 @@ impl Type {
             | (Type::Point, Value::Point(_))
             | (Type::Ring, Value::Ring(_))
             | (Type::Polygon, Value::Polygon(_))
-            | (Type::MultiPolygon, Value::MultiPolygon(_)) => true,
+            | (Type::MultiPolygon, Value::MultiPolygon(_))
+            | (Type::Variant(_), Value::Null)  // NULL is valid for Variant
+            | (Type::Dynamic { .. }, _) => true,      // Dynamic accepts any value
             (Type::DateTime(tz1), Value::DateTime(date)) => tz1 == &date.0,
             (Type::DateTime64(precision1, tz1), Value::DateTime64(tz2)) => {
                 tz1 == &tz2.0 && precision1 == &tz2.2
@@ -767,6 +944,22 @@ impl Type {
                     && keys.iter().all(|x| key.inner_validate_value(x))
                     && values.iter().all(|x| value.inner_validate_value(x))
             }
+            (Type::Variant(types), Value::Variant(discriminator, val)) => {
+                // NULL discriminator is always valid
+                if *discriminator == 0xFF {
+                    return matches!(**val, Value::Null);
+                }
+
+                // Build discriminator map to check if discriminator is valid
+                let discriminator_map = deserialize::variant::DiscriminatorMap::new(types);
+
+                // Check if discriminator maps to a valid type and value matches that type
+                if let Some(expected_type) = discriminator_map.get_type(*discriminator) {
+                    expected_type.inner_validate_value(val)
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
@@ -799,6 +992,20 @@ impl Type {
                 let value_data = value.estimate_capacity();
                 4 + key_data + value_data // 4 bytes for offsets
             }
+            Type::Variant(types) => {
+                // 1 byte for discriminator + average of all type capacities
+                let avg_capacity: usize = if types.is_empty() {
+                    0
+                } else {
+                    types.iter().map(Type::estimate_capacity).sum::<usize>() / types.len()
+                };
+                1 + avg_capacity
+            }
+            Type::Dynamic { .. } => {
+                // Variable discriminator size + some estimated capacity for dynamic data
+                // This is a rough estimate since Dynamic can contain any type
+                4 + 32
+            }
 
             // Placeholder for unsupported types
             _ => 64, // Default to 8 bytes as a safe estimate
@@ -821,38 +1028,27 @@ impl Type {
             Type::FixedSizedString(n) | Type::FixedSizedBinary(n) => {
                 writer.write_all(&vec![0u8; *n]).await?;
             }
-            Type::Int8 => writer.write_i8(0).await?,
-            Type::Int16 => writer.write_i16_le(0).await?,
-            Type::Int32 => writer.write_i32_le(0).await?,
-            Type::Int64 => writer.write_i64_le(0).await?,
-            Type::Int128 => writer.write_all(&[0; 16]).await?,
-            Type::Int256 => writer.write_all(&[0; 32]).await?,
+            Type::Int8 | Type::Enum8(_) => writer.write_i8(0).await?,
+            Type::Int16 | Type::Enum16(_) => writer.write_i16_le(0).await?,
+            Type::Int32 | Type::Date32 | Type::Decimal32(_) => writer.write_i32_le(0).await?,
+            Type::Int64 | Type::Decimal64(_) => writer.write_i64_le(0).await?,
+            Type::Int128 | Type::UInt128 | Type::Uuid | Type::Ipv6 | Type::Decimal128(_) => {
+                writer.write_all(&[0; 16]).await?;
+            }
+            Type::Int256 | Type::UInt256 | Type::Decimal256(_) => {
+                writer.write_all(&[0; 32]).await?;
+            }
             Type::UInt8 => writer.write_u8(0).await?,
-            Type::UInt16 => writer.write_u16_le(0).await?,
-            Type::UInt32 => writer.write_u32_le(0).await?,
+            Type::UInt16 | Type::Date => writer.write_u16_le(0).await?,
+            Type::UInt32 | Type::Ipv4 | Type::DateTime(_) => writer.write_u32_le(0).await?,
             Type::UInt64 => writer.write_u64_le(0).await?,
-            Type::UInt128 => writer.write_all(&[0; 16]).await?,
-            Type::UInt256 => writer.write_all(&[0; 32]).await?,
             Type::Float32 => writer.write_f32_le(0.0).await?,
             Type::Float64 => writer.write_f64_le(0.0).await?,
-            Type::Uuid => writer.write_all(&[0; 16]).await?,
-            Type::Ipv4 => writer.write_u32_le(0).await?,
-            Type::Ipv6 => writer.write_all(&[0; 16]).await?,
-            Type::Date => writer.write_u16_le(0).await?,
-            Type::Date32 => writer.write_i32_le(0).await?,
-            Type::DateTime(_) => writer.write_u32_le(0).await?,
             Type::DateTime64(precision, _) => {
                 let bytes = (0_i64).to_le_bytes();
                 writer.write_all(&bytes[..*precision]).await?;
             }
-            Type::Decimal32(_) => writer.write_i32_le(0).await?,
-            Type::Decimal64(_) => writer.write_i64_le(0).await?,
-            Type::Decimal128(_) => writer.write_all(&[0; 16]).await?,
-            Type::Decimal256(_) => writer.write_all(&[0; 32]).await?,
-            Type::Array(_) => writer.write_var_uint(0).await?, // Empty array
-            Type::Map(_, _) => writer.write_var_uint(0).await?, // Empty map
-            Type::Enum8(_) => writer.write_i8(0).await?,
-            Type::Enum16(_) => writer.write_i16(0).await?,
+            Type::Array(_) | Type::Map(_, _) => writer.write_var_uint(0).await?, /* Empty collection */
             // Recursive
             Type::LowCardinality(inner) => Box::pin(inner.write_default(writer)).await?,
             Type::Tuple(inner) => {
@@ -893,8 +1089,7 @@ impl Type {
                 let bytes = (0_i64).to_le_bytes();
                 writer.put_slice(&bytes[..*precision]);
             }
-            Type::Array(_) => writer.put_var_uint(0)?, // Empty array
-            Type::Map(_, _) => writer.put_var_uint(0)?, // Empty map
+            Type::Array(_) | Type::Map(_, _) => writer.put_var_uint(0)?, // Empty collection
             Type::Enum16(_) => writer.put_i16(0),
             // Recursive
             Type::LowCardinality(inner) => inner.put_default(writer)?,

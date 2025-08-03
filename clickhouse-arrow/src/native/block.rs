@@ -157,14 +157,14 @@ impl Block {
 }
 
 impl ProtocolData<Self, ()> for Block {
-    type Options = ();
+    type Options = Option<crate::client::connection::ClientMetadata>;
 
     async fn write_async<W: ClickHouseWrite>(
         mut self,
         writer: &mut W,
         revision: u64,
         _header: Option<&[(String, Type)]>,
-        _options: (),
+        options: Self::Options,
     ) -> Result<()> {
         if revision > 0 {
             self.info.write_async(writer).await?;
@@ -200,6 +200,13 @@ impl ProtocolData<Self, ()> for Block {
                 }
 
                 let mut state = SerializerState::default();
+                if let Some(metadata) = options
+                    && let Some(version) = metadata.server_version
+                {
+                    state = state.with_server_version(version);
+                }
+
+
                 type_.serialize_prefix_async(writer, &mut state).await?;
                 type_.serialize_column(values, writer, &mut state).await?;
             }
@@ -212,7 +219,7 @@ impl ProtocolData<Self, ()> for Block {
         writer: &mut W,
         revision: u64,
         _header: Option<&[(String, Type)]>,
-        _options: (),
+        options: Self::Options,
     ) -> Result<()> {
         if revision > 0 {
             self.info.write(writer)?;
@@ -248,6 +255,13 @@ impl ProtocolData<Self, ()> for Block {
                 }
 
                 let mut state = SerializerState::default();
+                if let Some(metadata) = options
+                    && let Some(version) = metadata.server_version
+                {
+                    state = state.with_server_version(version);
+                }
+
+
                 type_.serialize_prefix(writer, &mut state);
                 type_.serialize_column_sync(values, writer, &mut state)?;
             }
@@ -258,7 +272,7 @@ impl ProtocolData<Self, ()> for Block {
     async fn read_async<R: ClickHouseRead>(
         reader: &mut R,
         revision: u64,
-        _options: (),
+        _options: Self::Options,
         state: &mut DeserializerState,
     ) -> Result<Self> {
         let info =
@@ -318,7 +332,7 @@ impl ProtocolData<Self, ()> for Block {
     fn read<R: ClickHouseBytesRead + 'static>(
         reader: &mut R,
         revision: u64,
-        _options: (),
+        _options: Self::Options,
         state: &mut DeserializerState,
     ) -> Result<Self> {
         let info = if revision > 0 { BlockInfo::read(reader)? } else { BlockInfo::default() };
