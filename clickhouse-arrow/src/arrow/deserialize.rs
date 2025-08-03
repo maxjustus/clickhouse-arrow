@@ -387,6 +387,16 @@ impl ClickHouseArrowDeserializer for Type {
                     rbuffer
                 )).await?
             }
+            // Variant
+            Type::Variant(_) => {
+                todo!("Variant deserialization not yet implemented")
+            }
+            Type::Dynamic { .. } => {
+                todo!("Dynamic deserialization not yet implemented")
+            }
+            Type::JSON { .. } => {
+                todo!("JSON deserialization not yet implemented")
+            }
         })
     }
 
@@ -542,6 +552,16 @@ impl ClickHouseArrowDeserializer for Type {
                 nulls,
                 rbuffer
             )},
+            // Unimplemented types
+            (_, Type::Variant(_)) => {
+                todo!("Variant deserialization not yet implemented")
+            },
+            (_, Type::Dynamic { .. }) => {
+                todo!("Dynamic deserialization not yet implemented")
+            },
+            (_, Type::JSON { .. }) => {
+                todo!("JSON deserialization not yet implemented")
+            },
             (builder, _) => {
                 // Finish the builder and return an ArrayRef
                 Ok(deser!(() => builder => {

@@ -112,7 +112,7 @@ impl VariantSerializer {
         Ok(())
     }
 
-    pub(crate) fn write_sync_prefix<W: ClickHouseBytesWrite>(
+    pub(crate) fn write_prefix_sync<W: ClickHouseBytesWrite>(
         type_: &Type,
         writer: &mut W,
         state: &mut SerializerState,
@@ -187,7 +187,7 @@ mod tests {
                 // Test sync path
                 let mut sync_buffer = Vec::new();
                 let mut sync_state = SerializerState::default();
-                VariantSerializer::write_sync_prefix(
+                VariantSerializer::write_prefix_sync(
                     &variant_type,
                     &mut sync_buffer,
                     &mut sync_state,
@@ -308,7 +308,7 @@ mod tests {
 
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
-        VariantSerializer::write_sync_prefix(&variant_type, &mut buffer, &mut state).unwrap();
+        VariantSerializer::write_prefix_sync(&variant_type, &mut buffer, &mut state).unwrap();
         VariantSerializer::write_sync(&variant_type, &values, &mut buffer, &mut state).unwrap();
 
         // Verify discriminators
@@ -371,7 +371,7 @@ mod tests {
         let values = vec![variant!(0xFF, Value::Null); 4];
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
-        VariantSerializer::write_sync_prefix(&variant_type, &mut buffer, &mut state).unwrap();
+        VariantSerializer::write_prefix_sync(&variant_type, &mut buffer, &mut state).unwrap();
         VariantSerializer::write_sync(&variant_type, &values, &mut buffer, &mut state).unwrap();
 
         // Verify wire format

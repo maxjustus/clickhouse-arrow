@@ -125,6 +125,7 @@ impl<T: ClientFormat> InternalConn<T> {
         // `inner_pool` it's helpful to distinguish.
         let conn_id = CONN_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let cid = Box::leak(format!("{}.{conn_id}", metadata.client_id).into_boxed_str());
+
         let state = DeserializerState::default().with_arrow_options(metadata.arrow_options);
         InternalConn {
             cid,
@@ -230,11 +231,11 @@ impl<T: ClientFormat> InternalConn<T> {
                 result.inspect_err(|error| error!(?error, { ATT_CID } = cid, "Fatal error"))?;
 
                 // Queue up next query if any
-                if self.executing.is_none() {
-                    if let Some(query) = self.pending.pop_front() {
-                        self.send_query(writer, query).await?;
-                        flush = OperationTask::Chunk(ChunkBoundary::Flush);
-                    }
+                if self.executing.is_none()
+                    && let Some(query) = self.pending.pop_front()
+                {
+                    self.send_query(writer, query).await?;
+                    flush = OperationTask::Chunk(ChunkBoundary::Flush);
                 }
             }
             else => {}

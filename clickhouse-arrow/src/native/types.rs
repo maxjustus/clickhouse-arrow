@@ -299,6 +299,57 @@ impl Type {
     }
 }
 
+fn format_enum_items<T: Display>(
+    f: &mut std::fmt::Formatter<'_>,
+    enum_type: &str,
+    items: &[(String, T)],
+) -> std::fmt::Result {
+    write!(f, "{enum_type}(")?;
+    if !items.is_empty() {
+        let last_index = items.len() - 1;
+        for (i, (name, value)) in items.iter().enumerate() {
+            write!(f, "'{}' = {value}", name.replace('\'', "''"))?;
+            if i < last_index {
+                write!(f, ",")?;
+            }
+        }
+    }
+    write!(f, ")")
+}
+
+fn format_json_params(
+    max_dynamic_paths: Option<u32>,
+    max_dynamic_types: Option<u32>,
+    typed_paths: &[(String, Box<Type>)],
+    skip_paths: &[String],
+) -> Vec<String> {
+    let mut params = Vec::new();
+
+    // Add typed paths (Name String, Age Int64, etc.)
+    for (path, typ) in typed_paths {
+        params.push(format!("{path} {typ}"));
+    }
+
+    // Add skip paths
+    for skip_path in skip_paths {
+        if skip_path.starts_with("SKIP REGEXP") {
+            params.push(skip_path.clone());
+        } else {
+            params.push(format!("SKIP {skip_path}"));
+        }
+    }
+
+    // Add config parameters
+    if let Some(paths) = max_dynamic_paths {
+        params.push(format!("max_dynamic_paths={paths}"));
+    }
+    if let Some(types) = max_dynamic_types {
+        params.push(format!("max_dynamic_types={types}"));
+    }
+
+    params
+}
+
 impl Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -333,32 +384,8 @@ impl Display for Type {
             Type::Ring => write!(f, "Ring"),
             Type::Polygon => write!(f, "Polygon"),
             Type::MultiPolygon => write!(f, "MultiPolygon"),
-            Type::Enum8(items) => {
-                write!(f, "Enum8(")?;
-                if !items.is_empty() {
-                    let last_index = items.len() - 1;
-                    for (i, (name, value)) in items.iter().enumerate() {
-                        write!(f, "'{}' = {value}", name.replace('\'', "''"))?;
-                        if i < last_index {
-                            write!(f, ",")?;
-                        }
-                    }
-                }
-                write!(f, ")")
-            }
-            Type::Enum16(items) => {
-                write!(f, "Enum16(")?;
-                if !items.is_empty() {
-                    let last_index = items.len() - 1;
-                    for (i, (name, value)) in items.iter().enumerate() {
-                        write!(f, "'{}' = {value}", name.replace('\'', "''"))?;
-                        if i < last_index {
-                            write!(f, ",")?;
-                        }
-                    }
-                }
-                write!(f, ")")
-            }
+            Type::Enum8(items) => format_enum_items(f, "Enum8", items),
+            Type::Enum16(items) => format_enum_items(f, "Enum16", items),
             Type::LowCardinality(inner) => write!(f, "LowCardinality({inner})"),
             Type::Array(inner) => write!(f, "Array({inner})"),
             Type::Tuple(items) => write!(
@@ -378,30 +405,12 @@ impl Display for Type {
                 None => write!(f, "Dynamic"),
             },
             Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_paths } => {
-                let mut params = Vec::new();
-
-                // Add typed paths (Name String, Age Int64, etc.)
-                for (path, typ) in typed_paths {
-                    params.push(format!("{path} {typ}"));
-                }
-
-                // Add skip paths
-                for skip_path in skip_paths {
-                    if skip_path.starts_with("SKIP REGEXP") {
-                        params.push(skip_path.clone());
-                    } else {
-                        params.push(format!("SKIP {skip_path}"));
-                    }
-                }
-
-                // Add config parameters
-                if let Some(paths) = max_dynamic_paths {
-                    params.push(format!("max_dynamic_paths={paths}"));
-                }
-                if let Some(types) = max_dynamic_types {
-                    params.push(format!("max_dynamic_types={types}"));
-                }
-
+                let params = format_json_params(
+                    *max_dynamic_paths,
+                    *max_dynamic_types,
+                    typed_paths,
+                    skip_paths,
+                );
                 if params.is_empty() {
                     write!(f, "JSON")
                 } else {
@@ -484,6 +493,12 @@ impl Type {
                 Type::Variant(_) => {
                     variant::VariantDeserializer::read_async(self, reader, rows, state).await?
                 }
+                Type::Dynamic { .. } => {
+                    dynamic::DynamicDeserializer::read_async(self, reader, rows, state).await?
+                }
+                Type::JSON { .. } => {
+                    json::JsonDeserializer::read(self, reader, rows, state).await?
+                }
             })
         }
         .boxed()
@@ -551,6 +566,10 @@ impl Type {
             }
             Type::Object => object::ObjectDeserializer::read_sync(self, reader, rows, state)?,
             Type::Variant(_) => variant::VariantDeserializer::read_sync(self, reader, rows, state)?,
+            Type::Dynamic { .. } => {
+                dynamic::DynamicDeserializer::read_sync(self, reader, rows, state)?
+            }
+            Type::JSON { .. } => json::JsonDeserializer::read_sync(self, reader, rows, state)?,
         })
     }
 
@@ -626,6 +645,12 @@ impl Type {
                 Type::Variant(_) => {
                     variant::VariantSerializer::write(self, values, writer, state).await?;
                 }
+                Type::Dynamic { .. } => {
+                    dynamic::DynamicSerializer::write(self, &values, writer, state).await?;
+                }
+                Type::JSON { .. } => {
+                    json::JsonSerializer::write(self, values, writer, state).await?;
+                }
             }
             Ok(())
         }
@@ -699,6 +724,10 @@ impl Type {
             Type::Variant(_) => {
                 variant::VariantSerializer::write_sync(self, &values, writer, state)?;
             }
+            Type::Dynamic { .. } => {
+                dynamic::DynamicSerializer::write_sync(self, &values, writer, state)?;
+            }
+            Type::JSON { .. } => json::JsonSerializer::write_sync(self, values, writer, state)?,
         }
         Ok(())
     }

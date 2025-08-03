@@ -80,8 +80,6 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
             trace!(?header, columns, rows, "writing column data");
         }
 
-        let mut state = SerializerState::default().with_arrow_options(options);
-
         // Convert and write each column
         for (i, field) in schema.fields().iter().enumerate() {
             let column = self.column(i);
@@ -119,6 +117,19 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
                 continue;
             }
 
+            // Create fresh state for each column (like Native format)
+            let mut state = SerializerState::default().with_arrow_options(options);
+
+            // TODO: When Arrow supports Dynamic/JSON types, add analysis here like Native format:
+            // if matches!(type_, Type::Dynamic) {
+            //     let type_specific_state = DynamicSerializer::analyze_values(&values);
+            //     state.type_specific = type_specific_state;
+            // }
+            // if matches!(type_, Type::JSON) {
+            //     let type_specific_state = JsonSerializer::analyze_values(&values)?;
+            //     state.type_specific = type_specific_state;
+            // }
+
             type_.serialize_prefix_async(writer, &mut state).await?;
             type_.serialize_async(writer, column, data_type, &mut state).await?;
         }
@@ -147,8 +158,6 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
         if debug_arrow() {
             trace!(?header, columns, rows, "writing column data");
         }
-
-        let mut state = SerializerState::default().with_arrow_options(options);
 
         // Convert and write each column
         for (i, field) in schema.fields().iter().enumerate() {
@@ -186,6 +195,19 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
                 }
                 continue;
             }
+
+            // Create fresh state for each column (like Native format)
+            let mut state = SerializerState::default().with_arrow_options(options);
+
+            // TODO: When Arrow supports Dynamic/JSON types, add analysis here like Native format:
+            // if matches!(type_, Type::Dynamic) {
+            //     let type_specific_state = DynamicSerializer::analyze_values(&values);
+            //     state.type_specific = type_specific_state;
+            // }
+            // if matches!(type_, Type::JSON) {
+            //     let type_specific_state = JsonSerializer::analyze_values(&values)?;
+            //     state.type_specific = type_specific_state;
+            // }
 
             type_.serialize_prefix(writer, &mut state);
             type_.serialize(writer, column, data_type, &mut state)?;

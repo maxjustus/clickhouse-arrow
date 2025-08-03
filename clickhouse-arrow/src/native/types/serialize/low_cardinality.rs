@@ -154,3 +154,15 @@ impl Serializer for LowCardinalitySerializer {
         Ok(())
     }
 }
+
+impl LowCardinalitySerializer {
+    #[allow(clippy::unnecessary_wraps)]
+    pub(crate) fn write_prefix_sync<W: ClickHouseBytesWrite>(
+        _type_: &Type,
+        writer: &mut W,
+        _state: &mut SerializerState,
+    ) -> Result<()> {
+        writer.put_u64_le(LOW_CARDINALITY_VERSION);
+        Ok(())
+    }
+}

@@ -60,10 +60,11 @@ pub(crate) mod sealed {
 }
 
 /// Context maintained during deserialization
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct DeserializerState<T: Default = ()> {
-    pub(crate) options:      Option<ArrowOptions>,
-    pub(crate) deserializer: T,
+    pub(crate) options:       Option<ArrowOptions>,
+    pub(crate) deserializer:  T,
+    pub(crate) type_specific: TypeSpecificState,
 }
 
 impl<T: Default> DeserializerState<T> {
@@ -78,10 +79,12 @@ impl<T: Default> DeserializerState<T> {
 }
 
 /// Context maintained during serialization
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct SerializerState<T: Default = ()> {
-    pub(crate) options:    Option<ArrowOptions>,
-    pub(crate) serializer: T,
+    pub(crate) options:        Option<ArrowOptions>,
+    pub(crate) serializer:     T,
+    pub(crate) server_version: Option<(u64, u64, u64)>,
+    pub(crate) type_specific:  TypeSpecificState,
 }
 
 impl<T: Default> SerializerState<T> {
@@ -91,7 +94,50 @@ impl<T: Default> SerializerState<T> {
         self
     }
 
+    #[must_use]
+    pub(crate) fn with_server_version(mut self, version: (u64, u64, u64)) -> Self {
+        self.server_version = Some(version);
+        self
+    }
+
     #[expect(unused)]
     #[must_use]
     pub(crate) fn serializer(&mut self) -> &mut T { &mut self.serializer }
+}
+
+use std::collections::{BTreeMap, HashMap};
+
+use crate::Type;
+use crate::native::values::Value;
+
+/// Type alias for Dynamic type metadata used in JSON deserialization
+pub(crate) type DynamicTypeData = Vec<(u64, Vec<(String, Type)>)>;
+
+/// Metadata for Dynamic type
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DynamicState {
+    pub(crate) version:     Option<u64>,
+    pub(crate) total_types: u64,
+    pub(crate) type_names:  Vec<String>,
+    pub(crate) type_map:    HashMap<String, (usize, Type)>,
+    pub(crate) types:       Vec<(String, Type)>,
+}
+
+/// Metadata for JSON type
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct JsonState {
+    pub(crate) version:      Option<u64>,
+    pub(crate) paths:        Vec<String>,
+    pub(crate) path_columns: Option<BTreeMap<String, Vec<Value>>>,
+    pub(crate) rows:         Option<usize>,
+    pub(crate) dynamic_data: Option<DynamicTypeData>,
+}
+
+/// Enum to hold type-specific state
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum TypeSpecificState {
+    #[default]
+    None,
+    Dynamic(DynamicState),
+    Json(JsonState),
 }

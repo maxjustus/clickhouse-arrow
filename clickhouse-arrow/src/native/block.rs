@@ -7,8 +7,10 @@ use super::block_info::BlockInfo;
 use super::protocol::DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION;
 use crate::deserialize::ClickHouseNativeDeserializer;
 use crate::formats::protocol_data::ProtocolData;
-use crate::formats::{DeserializerState, SerializerState};
+use crate::formats::{DeserializerState, SerializerState, TypeSpecificState};
 use crate::io::{ClickHouseBytesRead, ClickHouseBytesWrite, ClickHouseRead, ClickHouseWrite};
+use crate::native::types::serialize::dynamic::DynamicSerializer;
+use crate::native::types::serialize::json::JsonSerializer;
 use crate::native::values::Value;
 use crate::prelude::*;
 use crate::serialize::ClickHouseNativeSerializer;
@@ -159,6 +161,7 @@ impl Block {
 impl ProtocolData<Self, ()> for Block {
     type Options = Option<crate::client::connection::ClientMetadata>;
 
+    // this code is insanely duplicative..
     async fn write_async<W: ClickHouseWrite>(
         mut self,
         writer: &mut W,
@@ -178,7 +181,7 @@ impl ProtocolData<Self, ()> for Block {
         writer.write_var_uint(columns as u64).await?;
         writer.write_var_uint(self.rows).await?;
 
-        for (name, type_) in self.column_types {
+        for (name, col_type) in self.column_types {
             let mut values = Vec::with_capacity(rows);
             values.extend(self.column_data.drain(..rows));
 
@@ -192,7 +195,7 @@ impl ProtocolData<Self, ()> for Block {
 
             // EncodeStart
             writer.write_string(&name).await?;
-            writer.write_string(type_.to_string()).await?;
+            writer.write_string(col_type.to_string()).await?;
 
             if self.rows > 0 {
                 if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
@@ -206,9 +209,17 @@ impl ProtocolData<Self, ()> for Block {
                     state = state.with_server_version(version);
                 }
 
+                // For Dynamic type, we need to analyze values before writing prefix
+                state.type_specific = if matches!(col_type, Type::Dynamic { .. }) {
+                    DynamicSerializer::analyze_values(&values)
+                } else if matches!(col_type, Type::JSON { .. }) {
+                    JsonSerializer::analyze_values(&values)?
+                } else {
+                    TypeSpecificState::None
+                };
 
-                type_.serialize_prefix_async(writer, &mut state).await?;
-                type_.serialize_column(values, writer, &mut state).await?;
+                col_type.serialize_prefix_async(writer, &mut state).await?;
+                col_type.serialize_column(values, writer, &mut state).await?;
             }
         }
         Ok(())
@@ -233,7 +244,7 @@ impl ProtocolData<Self, ()> for Block {
         writer.put_var_uint(columns as u64)?;
         writer.put_var_uint(self.rows)?;
 
-        for (name, type_) in self.column_types {
+        for (name, col_type) in self.column_types {
             let mut values = Vec::with_capacity(rows);
             values.extend(self.column_data.drain(..rows));
 
@@ -247,7 +258,7 @@ impl ProtocolData<Self, ()> for Block {
 
             // EncodeStart
             writer.put_string(&name)?;
-            writer.put_string(type_.to_string())?;
+            writer.put_string(col_type.to_string())?;
 
             if self.rows > 0 {
                 if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
@@ -261,9 +272,17 @@ impl ProtocolData<Self, ()> for Block {
                     state = state.with_server_version(version);
                 }
 
+                // For Dynamic type, we need to analyze values before writing prefix
+                state.type_specific = if matches!(col_type, Type::Dynamic { .. }) {
+                    DynamicSerializer::analyze_values(&values)
+                } else if matches!(col_type, Type::JSON { .. }) {
+                    JsonSerializer::analyze_values(&values)?
+                } else {
+                    TypeSpecificState::None
+                };
 
-                type_.serialize_prefix(writer, &mut state);
-                type_.serialize_column_sync(values, writer, &mut state)?;
+                col_type.serialize_prefix(writer, &mut state);
+                col_type.serialize_column_sync(values, writer, &mut state)?;
             }
         }
         Ok(())

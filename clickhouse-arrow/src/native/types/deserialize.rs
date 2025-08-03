@@ -1,5 +1,7 @@
 pub(crate) mod array;
+pub(crate) mod dynamic;
 pub(crate) mod geo;
+pub(crate) mod json;
 pub(crate) mod low_cardinality;
 pub(crate) mod map;
 pub(crate) mod nullable;
@@ -118,6 +120,12 @@ impl ClickHouseNativeDeserializer for Type {
                 Type::Variant(_) => {
                     variant::VariantDeserializer::read_prefix(self, reader, state).await?;
                 }
+                Type::Dynamic { .. } => {
+                    dynamic::DynamicDeserializer::read_prefix(self, reader, state).await?;
+                }
+                Type::JSON { .. } => {
+                    json::JsonDeserializer::read_prefix(self, reader, state).await?;
+                }
             }
             Ok(())
         }
@@ -154,6 +162,13 @@ impl ClickHouseNativeDeserializer for Type {
             }
             Type::Variant(_) => {
                 variant::VariantDeserializer::read_prefix_sync(self, reader)?;
+            }
+            Type::Dynamic { .. } => {
+                dynamic::DynamicDeserializer::read_prefix_sync(
+                    self,
+                    reader,
+                    &mut DeserializerState::default(),
+                )?;
             }
             _ => {}
         }
@@ -283,9 +298,9 @@ enum EnumParseState {
     InValue,
 }
 
-fn parse_json_parameters(
-    args: Vec<&str>,
-) -> Result<(Option<u32>, Option<u32>, Vec<(String, Box<Type>)>, Vec<String>)> {
+type JsonParameters = (Option<u32>, Option<u32>, Vec<(String, Box<Type>)>, Vec<String>);
+
+fn parse_json_parameters(args: Vec<&str>) -> Result<JsonParameters> {
     let mut max_dynamic_paths = None;
     let mut max_dynamic_types = None;
     let mut typed_paths = Vec::new();
@@ -1359,8 +1374,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("Failed to parse '{type_string}': {e}"));
             assert_eq!(
                 original_type, parsed_type,
-                "Round-trip failed: {} -> {} -> {}",
-                original_type, type_string, parsed_type
+                "Round-trip failed: {original_type} -> {type_string} -> {parsed_type}"
             );
         }
     }

@@ -1,5 +1,7 @@
 pub(crate) mod array;
+pub(crate) mod dynamic;
 pub(crate) mod geo;
+pub(crate) mod json;
 pub(crate) mod low_cardinality;
 pub(crate) mod map;
 pub(crate) mod nullable;
@@ -9,7 +11,6 @@ pub(crate) mod string;
 pub(crate) mod tuple;
 pub(crate) mod variant;
 
-use super::low_cardinality::LOW_CARDINALITY_VERSION;
 use super::*;
 use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
 
@@ -93,6 +94,12 @@ impl ClickHouseNativeSerializer for Type {
                 Type::Variant(_) => {
                     variant::VariantSerializer::write_prefix(self, writer, state).await?;
                 }
+                Type::Dynamic { .. } => {
+                    dynamic::DynamicSerializer::write_prefix(self, writer, state).await?;
+                }
+                Type::JSON { .. } => {
+                    json::JsonSerializer::write_prefix(self, writer, state).await?;
+                }
             }
             Ok(())
         }
@@ -120,19 +127,33 @@ impl ClickHouseNativeSerializer for Type {
                 return;
             }
             Type::LowCardinality(_) => {
-                writer.put_u64_le(LOW_CARDINALITY_VERSION);
+                low_cardinality::LowCardinalitySerializer::write_prefix_sync(self, writer, state)
+                    .expect("LowCardinality prefix serialization failed");
                 return;
             }
             Type::Object => {
-                writer.put_i8(1);
+                object::ObjectSerializer::write_prefix_sync(self, writer, state)
+                    .expect("Object prefix serialization failed");
                 return;
             }
             Type::Variant(_) => {
-                variant::VariantSerializer::write_sync_prefix(self, writer, state).unwrap();
+                variant::VariantSerializer::write_prefix_sync(self, writer, state)
+                    .expect("Variant prefix serialization failed");
+                return;
+            }
+            Type::Dynamic { .. } => {
+                dynamic::DynamicSerializer::write_prefix_sync(self, writer, state)
+                    .expect("Dynamic prefix serialization failed");
+                return;
+            }
+            Type::JSON { .. } => {
+                json::JsonSerializer::write_prefix_sync(self, writer, state)
+                    .expect("JSON prefix serialization failed");
                 return;
             }
             _ => return,
         };
+
         type_.serialize_prefix(writer, state);
     }
 }

@@ -78,6 +78,8 @@ pub enum Value {
 
     Map(Vec<Value>, Vec<Value>),
 
+    Variant(u8, Box<Value>),     // discriminator and value
+    Dynamic(String, Box<Value>), // type_name and value
     Ipv4(Ipv4),
     Ipv6(Ipv6),
 
@@ -122,12 +124,16 @@ impl PartialEq for Value {
             (Self::Array(l0), Self::Array(r0)) => l0 == r0,
             (Self::Tuple(l0), Self::Tuple(r0)) => l0 == r0,
             (Self::Map(l0, l1), Self::Map(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::Variant(l0, l1), Self::Variant(r0, r1)) => l0 == r0 && l1 == r1,
             (Self::Ipv4(l0), Self::Ipv4(r0)) => l0 == r0,
             (Self::Ipv6(l0), Self::Ipv6(r0)) => l0 == r0,
             (Self::Point(l0), Self::Point(r0)) => l0 == r0,
             (Self::Ring(l0), Self::Ring(r0)) => l0 == r0,
             (Self::Polygon(l0), Self::Polygon(r0)) => l0 == r0,
             (Self::MultiPolygon(l0), Self::MultiPolygon(r0)) => l0 == r0,
+            (Self::Dynamic(l_type, l_val), Self::Dynamic(r_type, r_val)) => {
+                l_type == r_type && l_val == r_val
+            }
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
     }
@@ -185,6 +191,14 @@ impl Hash for Value {
                 ::core::hash::Hash::hash(x, state);
                 ::core::hash::Hash::hash(__self_1, state);
             }
+            Value::Variant(disc, val) => {
+                ::core::hash::Hash::hash(disc, state);
+                ::core::hash::Hash::hash(val, state);
+            }
+            Value::Dynamic(type_name, val) => {
+                ::core::hash::Hash::hash(type_name, state);
+                ::core::hash::Hash::hash(val, state);
+            }
             Value::Ipv4(x) => ::core::hash::Hash::hash(x, state),
             Value::Ipv6(x) => ::core::hash::Hash::hash(x, state),
 
@@ -200,8 +214,260 @@ impl Hash for Value {
 
 impl Eq for Value {}
 
+/// Helper function to format decimal values with correct decimal point placement
+#[cfg(feature = "serde")]
+fn format_decimal(mut value: String, scale: usize) -> String {
+    if scale == 0 {
+        return value;
+    }
+
+    let is_negative = value.starts_with('-');
+    if is_negative {
+        let _ = value.remove(0);
+    }
+
+    // Pad with leading zeros if needed
+    while value.len() <= scale {
+        value.insert(0, '0');
+    }
+
+    // Insert decimal point
+    let point_pos = value.len() - scale;
+    value.insert(point_pos, '.');
+
+    // Add negative sign back if needed
+    if is_negative {
+        value.insert(0, '-');
+    }
+
+    value
+}
+
 impl Value {
     pub fn string(value: impl Into<String>) -> Self { Value::String(value.into().into_bytes()) }
+
+    /// Convert a `ClickHouse` Value to JSON representation
+    ///
+    /// # Errors
+    /// Returns an error if the value contains invalid UTF-8 or other conversion issues
+    #[cfg(feature = "serde")]
+    #[allow(clippy::too_many_lines)]
+    pub fn to_json(&self) -> Result<serde_json::Value> {
+        use serde_json::{Number, Value as JsonValue};
+
+        Ok(match self {
+            Value::Null => JsonValue::Null,
+
+            // Numeric types that fit in JSON numbers
+            Value::Int8(i) => JsonValue::Number(Number::from(*i)),
+            Value::Int16(i) => JsonValue::Number(Number::from(*i)),
+            Value::Int32(i) => JsonValue::Number(Number::from(*i)),
+            Value::Int64(i) => JsonValue::Number(Number::from(*i)),
+            Value::UInt8(i) => JsonValue::Number(Number::from(*i)),
+            Value::UInt16(i) => JsonValue::Number(Number::from(*i)),
+            Value::UInt32(i) => JsonValue::Number(Number::from(*i)),
+            Value::UInt64(i) => JsonValue::Number(Number::from(*i)),
+
+            // Large integers as strings
+            Value::Int128(i) => JsonValue::String(i.to_string()),
+            Value::Int256(i) => JsonValue::String(i.to_string()),
+            Value::UInt128(i) => JsonValue::String(i.to_string()),
+            Value::UInt256(i) => JsonValue::String(i.to_string()),
+
+            // Floats
+            Value::Float32(f) => {
+                Number::from_f64(f64::from(*f)).map_or(JsonValue::Null, JsonValue::Number)
+            }
+            Value::Float64(f) => Number::from_f64(*f).map_or(JsonValue::Null, JsonValue::Number),
+
+            // String
+            Value::String(bytes) => JsonValue::String(
+                String::from_utf8(bytes.clone())
+                    .map_err(|e| crate::Error::DeserializeError(format!("Invalid UTF-8: {e}")))?,
+            ),
+
+            // Decimal types - format with proper decimal point
+            Value::Decimal32(scale, value) => {
+                JsonValue::String(format_decimal(value.to_string(), *scale))
+            }
+            Value::Decimal64(scale, value) => {
+                JsonValue::String(format_decimal(value.to_string(), *scale))
+            }
+            Value::Decimal128(scale, value) => {
+                JsonValue::String(format_decimal(value.to_string(), *scale))
+            }
+            Value::Decimal256(scale, value) => {
+                JsonValue::String(format_decimal(value.to_string(), *scale))
+            }
+
+            // Date/Time types - format as ISO strings
+            Value::Date(date) => {
+                let chrono_date: NaiveDate = (*date).into();
+                JsonValue::String(chrono_date.format("%Y-%m-%d").to_string())
+            }
+            Value::Date32(date) => {
+                let chrono_date: NaiveDate = (*date).into();
+                JsonValue::String(chrono_date.format("%Y-%m-%d").to_string())
+            }
+            Value::DateTime(datetime) => {
+                let chrono_date: chrono::DateTime<Tz> = (*datetime)
+                    .try_into()
+                    .map_err(|_| crate::Error::DeserializeError("Invalid DateTime".to_string()))?;
+                // Match ClickHouse's native JSON format: "YYYY-MM-DD HH:MM:SS"
+                JsonValue::String(chrono_date.format("%Y-%m-%d %H:%M:%S").to_string())
+            }
+            Value::DateTime64(datetime) => {
+                let chrono_date: chrono::DateTime<Tz> =
+                    FromSql::from_sql(&Type::DateTime64(datetime.2, datetime.0), self.clone())
+                        .map_err(|e| {
+                            crate::Error::DeserializeError(format!("Invalid DateTime64: {e}"))
+                        })?;
+                // Match ClickHouse's native JSON format with precision
+                let formatted = match datetime.2 {
+                    0 => chrono_date.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    3 => chrono_date.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+                    6 => chrono_date.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+                    9 => chrono_date.format("%Y-%m-%d %H:%M:%S%.9f").to_string(),
+                    _ => {
+                        // For other precisions, format manually
+                        let nanos = chrono_date.timestamp_subsec_nanos();
+                        #[allow(clippy::cast_possible_truncation)]
+                        let divisor = 10_u32.pow(9_u32.saturating_sub(datetime.2 as u32));
+                        let subsec = nanos / divisor;
+                        format!(
+                            "{}.{:0width$}",
+                            chrono_date.format("%Y-%m-%d %H:%M:%S"),
+                            subsec,
+                            width = datetime.2
+                        )
+                    }
+                };
+                JsonValue::String(formatted)
+            }
+
+            // UUID - standard hyphenated format
+            Value::Uuid(uuid) => JsonValue::String(uuid.to_string()),
+
+            // Network types
+            Value::Ipv4(ip) => JsonValue::String(ip.to_string()),
+            Value::Ipv6(ip) => JsonValue::String(ip.to_string()),
+
+            // Enum types - just the string value
+            Value::Enum8(name, _) | Value::Enum16(name, _) => JsonValue::String(name.clone()),
+
+            // Container types
+            Value::Array(array) => {
+                let mut arr = Vec::with_capacity(array.len());
+                for item in array {
+                    arr.push(item.to_json()?);
+                }
+                JsonValue::Array(arr)
+            }
+            Value::Tuple(tuple) => {
+                let mut arr = Vec::with_capacity(tuple.len());
+                for item in tuple {
+                    arr.push(item.to_json()?);
+                }
+                JsonValue::Array(arr)
+            }
+            Value::Map(keys, values) => {
+                // ClickHouse always converts maps to JSON objects with string keys
+                let mut map = serde_json::Map::new();
+                for (key, value) in keys.iter().zip(values.iter()) {
+                    // Convert any key type to string
+                    #[allow(clippy::single_match_else)]
+                    let key_str = match key {
+                        Value::String(bytes) => String::from_utf8(bytes.clone()).map_err(|e| {
+                            crate::Error::DeserializeError(format!("Invalid UTF-8 in map key: {e}"))
+                        })?,
+                        // For non-string keys, convert to JSON string representation
+                        _ => {
+                            let json_key = key.to_json()?;
+                            match json_key {
+                                JsonValue::String(s) => s,
+                                JsonValue::Number(n) => n.to_string(),
+                                JsonValue::Bool(b) => b.to_string(),
+                                JsonValue::Null => "null".to_string(),
+                                _ => serde_json::to_string(&json_key).map_err(|e| {
+                                    crate::Error::DeserializeError(format!(
+                                        "Failed to convert map key to string: {e}"
+                                    ))
+                                })?,
+                            }
+                        }
+                    };
+                    drop(map.insert(key_str, value.to_json()?));
+                }
+                JsonValue::Object(map)
+            }
+
+            // Variant and Dynamic - unwrap and serialize contained value
+            Value::Variant(_, boxed_value) | Value::Dynamic(_, boxed_value) => {
+                boxed_value.to_json()?
+            }
+
+            // Object type - already JSON, parse it
+            Value::Object(json_bytes) => serde_json::from_slice(json_bytes).map_err(|e| {
+                crate::Error::DeserializeError(format!("Invalid JSON in Object: {e}"))
+            })?,
+
+            // Geo types - as coordinate arrays
+            Value::Point(point) => JsonValue::Array(vec![
+                JsonValue::Number(Number::from_f64(point.0[0]).unwrap_or(Number::from(0))),
+                JsonValue::Number(Number::from_f64(point.0[1]).unwrap_or(Number::from(0))),
+            ]),
+            Value::Ring(ring) => {
+                let mut arr = Vec::with_capacity(ring.0.len());
+                for point in &ring.0 {
+                    arr.push(JsonValue::Array(vec![
+                        JsonValue::Number(Number::from_f64(point.0[0]).unwrap_or(Number::from(0))),
+                        JsonValue::Number(Number::from_f64(point.0[1]).unwrap_or(Number::from(0))),
+                    ]));
+                }
+                JsonValue::Array(arr)
+            }
+            Value::Polygon(polygon) => {
+                let mut arr = Vec::with_capacity(polygon.0.len());
+                for ring in &polygon.0 {
+                    let mut ring_arr = Vec::with_capacity(ring.0.len());
+                    for point in &ring.0 {
+                        ring_arr.push(JsonValue::Array(vec![
+                            JsonValue::Number(
+                                Number::from_f64(point.0[0]).unwrap_or(Number::from(0)),
+                            ),
+                            JsonValue::Number(
+                                Number::from_f64(point.0[1]).unwrap_or(Number::from(0)),
+                            ),
+                        ]));
+                    }
+                    arr.push(JsonValue::Array(ring_arr));
+                }
+                JsonValue::Array(arr)
+            }
+            Value::MultiPolygon(multi) => {
+                let mut arr = Vec::with_capacity(multi.0.len());
+                for polygon in &multi.0 {
+                    let mut poly_arr = Vec::with_capacity(polygon.0.len());
+                    for ring in &polygon.0 {
+                        let mut ring_arr = Vec::with_capacity(ring.0.len());
+                        for point in &ring.0 {
+                            ring_arr.push(JsonValue::Array(vec![
+                                JsonValue::Number(
+                                    Number::from_f64(point.0[0]).unwrap_or(Number::from(0)),
+                                ),
+                                JsonValue::Number(
+                                    Number::from_f64(point.0[1]).unwrap_or(Number::from(0)),
+                                ),
+                            ]));
+                        }
+                        poly_arr.push(JsonValue::Array(ring_arr));
+                    }
+                    arr.push(JsonValue::Array(poly_arr));
+                }
+                JsonValue::Array(arr)
+            }
+        })
+    }
 
     /// # Errors
     /// Returns an error if the value is an unsigned integer.
@@ -308,6 +574,15 @@ impl Value {
                 Box::new(k.first().map_or(Type::String, Value::guess_type)),
                 Box::new(v.first().map_or(Type::String, Value::guess_type)),
             ),
+            Value::Variant(_, val) => {
+                // For Variant, we can only guess a single-type variant based on the value
+                Type::Variant(vec![val.guess_type()])
+            }
+            Value::Dynamic(_, _val) => {
+                // For Dynamic, we guess a Dynamic type with max_types=None (no limit)
+                // The actual type registry would be determined during serialization
+                Type::Dynamic { max_types: None }
+            }
             Value::Ipv4(_) => Type::Ipv4,
             Value::Ipv6(_) => Type::Ipv6,
 
@@ -476,6 +751,12 @@ impl fmt::Display for Value {
                     write!(f, ",{key}:{value}")?;
                 }
                 write!(f, "}}")
+            }
+            Value::Variant(discriminator, value) => {
+                write!(f, "variant({discriminator},{value})")
+            }
+            Value::Dynamic(type_name, value) => {
+                write!(f, "dynamic('{type_name}',{value})")
             }
             Value::Ipv4(ipv4) => write!(f, "'{ipv4}'"),
             Value::Ipv6(ipv6) => write!(f, "'{ipv6}'"),
