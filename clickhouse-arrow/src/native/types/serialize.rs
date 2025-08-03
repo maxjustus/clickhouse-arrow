@@ -1,5 +1,12 @@
+//! This module and its submodules handle the serialization of `Value`s into ClickHouse's native
+//! format. The `ClickHouseNativeSerializer` trait is the main entry point, dispatching to
+//! type-specific serializers.
+
 pub(crate) mod array;
+pub(crate) mod discriminator;
+pub mod dynamic;
 pub(crate) mod geo;
+pub(crate) mod json;
 pub(crate) mod low_cardinality;
 pub(crate) mod map;
 pub(crate) mod nullable;
@@ -7,6 +14,7 @@ pub(crate) mod object;
 pub(crate) mod sized;
 pub(crate) mod string;
 pub(crate) mod tuple;
+pub(crate) mod variant;
 
 use super::*;
 use crate::io::ClickHouseWrite;
@@ -66,7 +74,9 @@ impl ClickHouseNativeSerializer for Type {
                 }
 
                 Type::Array(_) => array::ArraySerializer::write_prefix(self, writer, state).await?,
-                Type::Tuple(_) => tuple::TupleSerializer::write_prefix(self, writer, state).await?,
+                Type::Tuple(_) | Type::TupleNamed(_) => {
+                    tuple::TupleSerializer::write_prefix(self, writer, state).await?
+                }
                 Type::Point => geo::PointSerializer::write_prefix(self, writer, state).await?,
                 Type::Ring => geo::RingSerializer::write_prefix(self, writer, state).await?,
                 Type::Polygon => geo::PolygonSerializer::write_prefix(self, writer, state).await?,
@@ -82,6 +92,15 @@ impl ClickHouseNativeSerializer for Type {
                         .await?;
                 }
                 Type::Object => object::ObjectSerializer::write_prefix(self, writer, state).await?,
+                Type::Variant(_) => {
+                    variant::VariantSerializer::write_prefix(self, writer, state).await?;
+                }
+                Type::Dynamic { .. } => {
+                    dynamic::DynamicSerializer::write_prefix(self, writer, state).await?;
+                }
+                Type::JSON { .. } => {
+                    json::JsonSerializer::write_prefix(self, writer, state).await?;
+                }
             }
             Ok(())
         }

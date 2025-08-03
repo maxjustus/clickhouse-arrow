@@ -37,6 +37,8 @@ impl Serializer for LowCardinalitySerializer {
             return Ok(());
         }
 
+        // Nullability is derived from the declared inner type.
+        // For LowCardinality(Nullable(T)), include Null in the dictionary; otherwise do not.
         let is_nullable = inner_type.is_nullable();
         let inner_type = inner_type.strip_null();
 
@@ -60,6 +62,7 @@ impl Serializer for LowCardinalitySerializer {
             flags |= TUINT8;
         }
         flags |= HAS_ADDITIONAL_KEYS_BIT;
+
         writer.write_u64_le(flags).await?;
 
         writer.write_u64_le(keys.len() as u64).await?;

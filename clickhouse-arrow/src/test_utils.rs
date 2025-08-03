@@ -28,7 +28,7 @@ const CLICKHOUSE_CONFIG_DEST: &str = "/etc/clickhouse-server/config.xml";
 // Env defaults
 const CLICKHOUSE_USER: &str = "clickhouse";
 const CLICKHOUSE_PASSWORD: &str = "clickhouse";
-const CLICKHOUSE_VERSION: &str = "latest";
+const CLICKHOUSE_VERSION: &str = "25.8";
 const CLICKHOUSE_NATIVE_PORT: u16 = 9000;
 const CLICKHOUSE_HTTP_PORT: u16 = 8123;
 const CLICKHOUSE_ENDPOINT: &str = "localhost";
@@ -104,6 +104,12 @@ pub async fn get_or_create_container(conf: Option<&str>) -> &'static Arc<ClickHo
             .expect("Failed to initialize ClickHouse container");
         CONTAINER.get_or_init(|| Arc::new(ch))
     }
+}
+
+/// # Panics
+/// You bet it panics. Better be careful.
+pub async fn get_shared_container() -> Arc<ClickHouseContainer> {
+    Arc::clone(get_or_create_container(None).await)
 }
 
 /// # Panics

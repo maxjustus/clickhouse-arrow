@@ -189,8 +189,9 @@ mod client;
 mod compression;
 mod constants;
 mod errors;
+pub mod file_stream;
 mod flags;
-mod formats;
+pub mod formats;
 mod io;
 pub mod native;
 #[cfg(feature = "pool")]
@@ -207,8 +208,8 @@ pub mod test_utils;
 #[cfg(feature = "derive")]
 /// Derive macro for the [Row] trait.
 ///
-/// This is similar in usage and implementation to the [`serde::Serialize`] and
-/// [`serde::Deserialize`] derive macros.
+/// This is similar in usage and implementation to the [`::serde::Serialize`] and
+/// [`::serde::Deserialize`] derive macros.
 ///
 /// ## serde attributes
 /// The following [serde attributes](https://serde.rs/attributes.html) are supported, using `#[clickhouse_arrow(...)]` instead of `#[serde(...)]`:
@@ -239,6 +240,7 @@ pub use client::*;
 pub use constants::{CONN_READ_BUFFER_ENV_VAR, CONN_WRITE_BUFFER_ENV_VAR, DEBUG_ARROW_ENV_VAR};
 pub use errors::*;
 pub use formats::{ArrowFormat, ClientFormat, NativeFormat};
+pub use io::{ClickHouseRead, ClickHouseWrite};
 /// Contains useful top-level traits to interface with [`crate::prelude::NativeFormat`]
 pub use native::convert::*;
 pub use native::progress::Progress;
@@ -281,5 +283,5 @@ pub use reexports::*;
 mod dev_deps {
     //! This is here to silence rustc's unused-crate-dependencies warnings.
     //! See tracking issue [#95513](https://github.com/rust-lang/rust/issues/95513).
-    use {clickhouse as _, criterion as _};
+    use {clickhouse as _, criterion as _, serde_transcode as _};
 }

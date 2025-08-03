@@ -2,8 +2,30 @@ use tokio::io::AsyncWriteExt;
 
 use super::{ClickHouseNativeSerializer, Serializer, SerializerState, Type};
 use crate::io::ClickHouseWrite;
+use crate::native::coerce::discriminate;
 use crate::prelude::*;
 use crate::{Result, Value};
+
+/// Transform array elements to Variant when type expects Array(Variant(...)) but values are raw
+fn wrap_heterogeneous_elements(elements: &[Value], variant_types: &[Type]) -> Result<Vec<Value>> {
+    let mut wrapped = Vec::with_capacity(elements.len());
+    for element in elements {
+        let (disc, _orig_idx) = discriminate(element, variant_types)?;
+        wrapped.push(Value::Variant(disc, Box::new(element.clone())));
+    }
+    Ok(wrapped)
+}
+
+/// Check if we need to transform values for type mismatch
+fn needs_heterogeneous_transformation(array_type: &Type, values: &[Value]) -> Option<Vec<Type>> {
+    if let Type::Variant(variant_types) = array_type {
+        // Check if any values are not already Variant
+        if values.iter().any(|v| !matches!(v, Value::Variant(_, _) | Value::Null)) {
+            return Some(variant_types.clone());
+        }
+    }
+    None
+}
 
 // Trait to allow serializing [Values] wrapping an array of items.
 pub(crate) trait ArraySerializerGeneric {
@@ -48,7 +70,16 @@ impl<T: ArraySerializerGeneric + 'static> Serializer for T {
             all_values.append(&mut Self::values(value)?);
         }
 
-        match type_.serialize_column(all_values, writer, state).await {
+        // Check if we need to transform values for heterogeneous arrays
+        // TODO: confirm that this is needed and the best way to do this
+        let final_values =
+            if let Some(variant_types) = needs_heterogeneous_transformation(type_, &all_values) {
+                wrap_heterogeneous_elements(&all_values, &variant_types)?
+            } else {
+                all_values
+            };
+
+        match type_.serialize_column(final_values, writer, state).await {
             Ok(()) => {}
             Err(e) => {
                 error!("error serializing column in array type={type_:?}: {}", e);

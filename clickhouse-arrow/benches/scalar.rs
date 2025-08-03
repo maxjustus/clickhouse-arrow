@@ -5,6 +5,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ::serde::{Deserialize, Serialize};
 use clickhouse::{Client as ClickHouseRsClient, Row as ClickHouseRow};
 use clickhouse_arrow::CompressionMethod;
 use clickhouse_arrow::prelude::*;
@@ -12,7 +13,6 @@ use clickhouse_arrow::test_utils::{arrow_tests, get_or_create_container};
 use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
 use self::common::{init, print_msg};

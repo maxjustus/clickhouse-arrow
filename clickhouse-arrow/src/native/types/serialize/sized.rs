@@ -20,6 +20,7 @@ impl Serializer for SizedSerializer {
         writer: &mut W,
         _state: &mut SerializerState,
     ) -> Result<()> {
+        // We do not write sparse/custom serialization on client side. Always write dense.
         for value in values {
             match value.justify_null_ref(type_).as_ref() {
                 Value::Int8(x) | Value::Enum8(_, x) => writer.write_i8(*x).await?,
@@ -60,6 +61,18 @@ impl Serializer for SizedSerializer {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+// TODO: do I need this?
+impl SizedSerializer {
+    pub(crate) async fn write_prefix<W: ClickHouseWrite>(
+        _type_: &Type,
+        _writer: &mut W,
+        _state: &mut SerializerState,
+    ) -> Result<()> {
+        // No-op: we do not use client-side sparse/custom serialization on writes.
         Ok(())
     }
 }

@@ -67,6 +67,11 @@ macro_rules! typed_build {
                 // Geo types need to be normalized before creating the builder.
                 unimplemented!()
             }
+            Type::Variant(_) => {
+                return Err(Error::ArrowDeserialize(
+                    "Variant type is not yet supported in Arrow builder".into()
+                ));
+            }
             _ => return Err(Error::UnexpectedType($type_hint.clone())),
         }
     }

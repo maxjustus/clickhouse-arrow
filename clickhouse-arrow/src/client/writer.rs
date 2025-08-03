@@ -128,6 +128,12 @@ impl<W: ClickHouseWrite> Writer<W> {
     ) -> Result<()> {
         writer.write_var_uint(ClientPacketId::Data as u64).await?;
         writer.write_string("").await?; // Table name
+        trace!(
+            { ATT_QID } = %qid,
+            "send_data: starting format write (format={}, compression={:?})",
+            T::FORMAT,
+            metadata.compression
+        );
         T::write(writer, data, qid, header, revision, metadata).await?;
         writer
             .flush()

@@ -73,6 +73,16 @@ impl<R: ClickHouseRead + 'static> Reader<R> {
             ServerPacketId::Progress => {
                 Self::read_progress(reader, revision).await.map(ServerPacket::Progress)
             }
+            // Accept pre-header events/logs/info as some servers may emit them early
+            ServerPacketId::ProfileEvents => Self::read_profile_events(reader, revision, metadata)
+                .await
+                .map(ServerPacket::ProfileEvents),
+            ServerPacketId::Log => {
+                Self::read_log_data(reader, revision, metadata).await.map(ServerPacket::Log)
+            }
+            ServerPacketId::ProfileInfo => {
+                Self::read_profile_info(reader, revision).await.map(ServerPacket::ProfileInfo)
+            }
             ServerPacketId::TableColumns => {
                 Self::read_table_columns(reader).await.map(ServerPacket::TableColumns)
             }
@@ -97,7 +107,8 @@ impl<R: ClickHouseRead + 'static> Reader<R> {
         metadata: ClientMetadata,
         state: &mut DeserializerState<T::Deser>,
     ) -> Result<ServerPacket<T::Data>> {
-        let packet = ServerPacketId::from_u64(reader.read_var_uint().await?)
+        let packet_id = reader.read_var_uint().await?;
+        let packet = ServerPacketId::from_u64(packet_id)
             .inspect_err(|error| error!(?error, "Failed to read packet ID"))?;
         trace!({ ATT_PID } = packet.as_ref(), "Read packet ID");
         match packet {
@@ -463,7 +474,8 @@ impl<R: ClickHouseRead + 'static> Reader<R> {
         revision: u64,
         metadata: ClientMetadata,
     ) -> Result<Option<ServerData<Block>>> {
-        drop(reader.read_string().await?);
+        drop(reader.read_string().await?); // table name..? TODO: confirm that. How does that make
+        // sense for select query results?
         let mut state = DeserializerState::default();
         let Some(block) = NativeFormat::read(reader, revision, metadata, &mut state)
             .await
@@ -483,7 +495,7 @@ impl<R: ClickHouseRead + 'static> Reader<R> {
         metadata: ClientMetadata,
         state: &mut DeserializerState<T::Deser>,
     ) -> Result<Option<ServerData<T::Data>>> {
-        drop(reader.read_string().await?);
+        let _table_name = reader.read_string().await?;
         let Some(block) =
             T::read(reader, revision, metadata, state).await.inspect_err(|error| {
                 error!(?error, { ATT_CID } = metadata.client_id, "Data read fail");

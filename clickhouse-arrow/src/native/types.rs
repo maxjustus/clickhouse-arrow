@@ -2,7 +2,7 @@ pub(crate) mod deserialize;
 pub mod geo;
 pub(crate) mod low_cardinality;
 pub mod map;
-pub(crate) mod serialize;
+pub mod serialize;
 #[cfg(test)]
 mod tests;
 
@@ -15,6 +15,11 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use super::protocol::MAX_STRING_SIZE;
+
+// Default parameter values based on ClickHouse documentation and clickhouse-go
+const DEFAULT_DYNAMIC_MAX_TYPES: u32 = 32;
+const DEFAULT_JSON_MAX_DYNAMIC_PATHS: u32 = 1024;
+const DEFAULT_JSON_MAX_DYNAMIC_TYPES: u32 = 32;
 use super::values::{
     Date, DateTime, DynDateTime64, Ipv4, Ipv6, MultiPolygon, Point, Polygon, Ring, Value, i256,
     u256,
@@ -25,7 +30,7 @@ use crate::{Date32, Error, Result};
 
 /// A raw `ClickHouse` type.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub enum Type {
     Int8,
     Int16,
@@ -80,7 +85,20 @@ pub enum Type {
     LowCardinality(Box<Type>),
     Array(Box<Type>),
     Tuple(Vec<Type>),
+    /// Named tuple fields (Tuple with field names)
+    TupleNamed(Vec<(String, Type)>),
     Map(Box<Type>, Box<Type>),
+    Variant(Vec<Type>),
+    Dynamic {
+        max_types: Option<u32>, // Default: 32 if None
+    },
+    JSON {
+        max_dynamic_paths: Option<u32>,              // Default: 1024 if None
+        max_dynamic_types: Option<u32>,              // Default: 32 if None
+        typed_paths:       Vec<(String, Box<Type>)>, // (path, type) pairs like ("Name", String)
+        skip_exact:        Vec<String>,              // Exact paths to skip
+        skip_regex:        Vec<String>,              // Regex patterns to skip
+    },
 
     Object,
 }
@@ -137,12 +155,99 @@ impl Type {
         }
     }
 
+    /// # Errors
+    ///
+    /// Errors if the type is not a variant
+    pub fn unwrap_variant(&self) -> Result<&[Type]> {
+        match self {
+            Type::Variant(x) => Ok(&x[..]),
+            _ => Err(Error::UnexpectedType(self.clone())),
+        }
+    }
+
+    pub fn unvariant(&self) -> Option<&[Type]> {
+        match self {
+            Type::Variant(x) => Some(&x[..]),
+            _ => None,
+        }
+    }
+
+    /// Create a Variant type with alphabetically sorted inner types to match ClickHouse canonical
+    /// ordering
+    pub fn variant(mut types: Vec<Type>) -> Type {
+        types.sort_by_key(ToString::to_string);
+        Type::Variant(types)
+    }
+
     pub fn unnull(&self) -> Option<&Type> {
         match self {
             Type::Nullable(x) => Some(&**x),
             _ => None,
         }
     }
+
+    /// Get Dynamic type parameters, returning defaults if None
+    pub fn dynamic_max_types(&self) -> Option<u32> {
+        match self {
+            Type::Dynamic { max_types } => Some(max_types.unwrap_or(DEFAULT_DYNAMIC_MAX_TYPES)),
+            _ => None,
+        }
+    }
+
+    /// Get JSON type parameters, returning defaults if None
+    pub fn json_max_dynamic_paths(&self) -> Option<u32> {
+        match self {
+            Type::JSON { max_dynamic_paths, .. } => {
+                Some(max_dynamic_paths.unwrap_or(DEFAULT_JSON_MAX_DYNAMIC_PATHS))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn json_max_dynamic_types(&self) -> Option<u32> {
+        match self {
+            Type::JSON { max_dynamic_types, .. } => {
+                Some(max_dynamic_types.unwrap_or(DEFAULT_JSON_MAX_DYNAMIC_TYPES))
+            }
+            _ => None,
+        }
+    }
+
+    /// Get JSON typed paths
+    pub fn json_typed_paths(&self) -> Option<&[(String, Box<Type>)]> {
+        match self {
+            Type::JSON { typed_paths, .. } => Some(typed_paths),
+            _ => None,
+        }
+    }
+
+    /// Get JSON skip paths
+    pub fn json_skip_paths(&self) -> Option<&[String]> {
+        match self {
+            Type::JSON { skip_exact, .. } => Some(skip_exact),
+            _ => None,
+        }
+    }
+
+    pub fn json_skip_exact(&self) -> Option<&[String]> {
+        match self {
+            Type::JSON { skip_exact, .. } => Some(skip_exact),
+            _ => None,
+        }
+    }
+
+    pub fn json_skip_regex(&self) -> Option<&[String]> {
+        match self {
+            Type::JSON { skip_regex, .. } => Some(skip_regex),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a Dynamic type
+    pub fn is_dynamic(&self) -> bool { matches!(self, Type::Dynamic { .. }) }
+
+    /// Check if this is a JSON type  
+    pub fn is_json(&self) -> bool { matches!(self, Type::JSON { .. }) }
 
     pub fn strip_null(&self) -> &Type {
         match self {
@@ -204,7 +309,12 @@ impl Type {
             Type::LowCardinality(x) => x.default_value(),
             Type::Array(_) => Value::Array(vec![]),
             Type::Tuple(types) => Value::Tuple(types.iter().map(Type::default_value).collect()),
-            Type::Nullable(_) => Value::Null,
+            Type::TupleNamed(fields) => {
+                Value::Tuple(fields.iter().map(|(_, t)| t.default_value()).collect())
+            }
+            Type::Nullable(_) | Type::Variant(_) | Type::Dynamic { .. } | Type::JSON { .. } => {
+                Value::Null
+            }
             Type::Map(_, _) => Value::Map(vec![], vec![]),
             Type::Point => Value::Point(Point::default()),
             Type::Ring => Value::Ring(Ring::default()),
@@ -214,6 +324,59 @@ impl Type {
             Type::Object => Value::Object("{}".as_bytes().to_vec()),
         }
     }
+}
+
+fn format_enum_items<T: Display>(
+    f: &mut std::fmt::Formatter<'_>,
+    enum_type: &str,
+    items: &[(String, T)],
+) -> std::fmt::Result {
+    write!(f, "{enum_type}(")?;
+    if !items.is_empty() {
+        let last_index = items.len() - 1;
+        for (i, (name, value)) in items.iter().enumerate() {
+            write!(f, "'{}' = {value}", name.replace('\'', "''"))?;
+            if i < last_index {
+                write!(f, ",")?;
+            }
+        }
+    }
+    write!(f, ")")
+}
+
+fn format_json_params(
+    max_dynamic_paths: Option<u32>,
+    max_dynamic_types: Option<u32>,
+    typed_paths: &[(String, Box<Type>)],
+    skip_exact: &[String],
+    skip_regex: &[String],
+) -> Vec<String> {
+    let mut params = Vec::new();
+
+    // Add typed paths (Name String, Age Int64, etc.)
+    for (path, typ) in typed_paths {
+        params.push(format!("{path} {typ}"));
+    }
+
+    // Add skip paths: exact then regex
+    for exact in skip_exact {
+        params.push(format!("SKIP {exact}"));
+    }
+    for pattern in skip_regex {
+        // Quote the pattern for ClickHouse syntax
+        let escaped = pattern.replace('\'', "''");
+        params.push(format!("SKIP REGEXP '{escaped}'"));
+    }
+
+    // Add config parameters
+    if let Some(paths) = max_dynamic_paths {
+        params.push(format!("max_dynamic_paths={paths}"));
+    }
+    if let Some(types) = max_dynamic_types {
+        params.push(format!("max_dynamic_types={types}"));
+    }
+
+    params
 }
 
 impl Display for Type {
@@ -243,61 +406,76 @@ impl Display for Type {
             Type::Date => write!(f, "Date"),
             Type::Date32 => write!(f, "Date32"),
             Type::DateTime(tz) => write!(f, "DateTime('{tz}')"),
-            Type::DateTime64(precision, tz) => write!(f, "DateTime64({precision},'{tz}')"),
+            Type::DateTime64(precision, tz) => write!(f, "DateTime64({precision}, '{tz}')"),
             Type::Ipv4 => write!(f, "IPv4"),
             Type::Ipv6 => write!(f, "IPv6"),
             Type::Point => write!(f, "Point"),
             Type::Ring => write!(f, "Ring"),
             Type::Polygon => write!(f, "Polygon"),
             Type::MultiPolygon => write!(f, "MultiPolygon"),
-            Type::Enum8(items) => {
-                write!(f, "Enum8(")?;
-                if !items.is_empty() {
-                    let last_index = items.len() - 1;
-                    for (i, (name, value)) in items.iter().enumerate() {
-                        write!(f, "'{}' = {value}", name.replace('\'', "''"))?;
-                        if i < last_index {
-                            write!(f, ",")?;
-                        }
-                    }
-                }
-                write!(f, ")")
-            }
-            Type::Enum16(items) => {
-                write!(f, "Enum16(")?;
-                if !items.is_empty() {
-                    let last_index = items.len() - 1;
-                    for (i, (name, value)) in items.iter().enumerate() {
-                        write!(f, "'{}' = {value}", name.replace('\'', "''"))?;
-                        if i < last_index {
-                            write!(f, ",")?;
-                        }
-                    }
-                }
-                write!(f, ")")
-            }
+            Type::Enum8(items) => format_enum_items(f, "Enum8", items),
+            Type::Enum16(items) => format_enum_items(f, "Enum16", items),
             Type::LowCardinality(inner) => write!(f, "LowCardinality({inner})"),
             Type::Array(inner) => write!(f, "Array({inner})"),
             Type::Tuple(items) => write!(
                 f,
                 "Tuple({})",
-                items.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")
+                items.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
             ),
+            Type::TupleNamed(items) => {
+                let parts = items
+                    .iter()
+                    .map(|(name, t)| format!("{name} {t}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "Tuple({parts})")
+            }
             Type::Nullable(inner) => write!(f, "Nullable({inner})"),
-            Type::Map(key, value) => write!(f, "Map({key},{value})"),
-            Type::Object => write!(f, "JSON"),
+            Type::Map(key, value) => write!(f, "Map({key}, {value})"),
+            Type::Variant(items) => write!(
+                f,
+                "Variant({})",
+                items.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+            ),
+            Type::Dynamic { max_types } => match max_types {
+                Some(max_types) => write!(f, "Dynamic(max_types={max_types})"),
+                None => write!(f, "Dynamic"),
+            },
+            Type::JSON {
+                max_dynamic_paths,
+                max_dynamic_types,
+                typed_paths,
+                skip_exact,
+                skip_regex,
+            } => {
+                let params = format_json_params(
+                    *max_dynamic_paths,
+                    *max_dynamic_types,
+                    typed_paths,
+                    skip_exact,
+                    skip_regex,
+                );
+                if params.is_empty() {
+                    write!(f, "JSON")
+                } else {
+                    write!(f, "JSON({})", params.join(", "))
+                }
+            }
+            // Serialize Object with explicit schema format to satisfy ClickHouse expectations
+            Type::Object => write!(f, "Object('json')"),
         }
     }
 }
 
 impl Type {
-    pub(crate) fn deserialize_column<'a, R: ClickHouseRead>(
+    pub(crate) fn deserialize_column_with_path<'a, R: ClickHouseRead>(
         &'a self,
         reader: &'a mut R,
         rows: usize,
         state: &'a mut DeserializerState,
+        path: &'a mut Vec<u16>,
     ) -> impl Future<Output = Result<Vec<Value>>> + Send + 'a {
-        use deserialize::*;
+        // dispatch handled explicitly below (path-aware)
         async move {
             if rows > MAX_STRING_SIZE {
                 return Err(Error::Protocol(format!(
@@ -306,6 +484,7 @@ impl Type {
             }
 
             Ok(match self {
+                // Sized primitives
                 Type::Int8
                 | Type::Int16
                 | Type::Int32
@@ -333,32 +512,78 @@ impl Type {
                 | Type::Ipv6
                 | Type::Enum8(_)
                 | Type::Enum16(_) => {
-                    sized::SizedDeserializer::read(self, reader, rows, state).await?
+                    deserialize::sized::read_with_path(self, reader, rows, state, path).await?
                 }
+                // Strings
                 Type::String
                 | Type::FixedSizedString(_)
                 | Type::Binary
                 | Type::FixedSizedBinary(_) => {
-                    string::StringDeserializer::read(self, reader, rows, state).await?
+                    deserialize::string::read_with_path(self, reader, rows, state, path).await?
                 }
-                Type::Array(_) => array::ArrayDeserializer::read(self, reader, rows, state).await?,
-                Type::Ring => geo::RingDeserializer::read(self, reader, rows, state).await?,
-                Type::Polygon => geo::PolygonDeserializer::read(self, reader, rows, state).await?,
-                Type::MultiPolygon => {
-                    geo::MultiPolygonDeserializer::read(self, reader, rows, state).await?
+                // Composites (path-aware)
+                Type::Array(_) => {
+                    deserialize::array::read_with_path(self, reader, rows, state, path).await?
                 }
-                Type::Tuple(_) => tuple::TupleDeserializer::read(self, reader, rows, state).await?,
-                Type::Point => geo::PointDeserializer::read(self, reader, rows, state).await?,
+                Type::Tuple(_) | Type::TupleNamed(_) => {
+                    deserialize::tuple::read_with_path(self, reader, rows, state, path).await?
+                }
                 Type::Nullable(_) => {
-                    nullable::NullableDeserializer::read(self, reader, rows, state).await?
+                    deserialize::nullable::read_with_path(self, reader, rows, state, path).await?
                 }
-                Type::Map(_, _) => map::MapDeserializer::read(self, reader, rows, state).await?,
-                Type::LowCardinality(_) => {
-                    low_cardinality::LowCardinalityDeserializer::read(self, reader, rows, state)
+                Type::Map(_, _) => {
+                    deserialize::map::read_with_path(self, reader, rows, state, path).await?
+                }
+
+                // Existing implementations unaffected
+                Type::Ring => {
+                    deserialize::geo::RingDeserializer::read(self, reader, rows, state).await?
+                }
+                Type::Polygon => {
+                    deserialize::geo::PolygonDeserializer::read(self, reader, rows, state).await?
+                }
+                Type::MultiPolygon => {
+                    deserialize::geo::MultiPolygonDeserializer::read(self, reader, rows, state)
                         .await?
                 }
-                Type::Object => object::ObjectDeserializer::read(self, reader, rows, state).await?,
+                Type::LowCardinality(_) => {
+                    deserialize::low_cardinality::LowCardinalityDeserializer::read(
+                        self, reader, rows, state,
+                    )
+                    .await?
+                }
+                Type::Point => {
+                    deserialize::geo::PointDeserializer::read(self, reader, rows, state).await?
+                }
+                Type::Variant(_) => {
+                    deserialize::variant::VariantDeserializer::read_async(self, reader, rows, state)
+                        .await?
+                }
+                Type::Dynamic { .. } => {
+                    deserialize::dynamic::DynamicDeserializer::read_async(self, reader, rows, state)
+                        .await?
+                }
+                Type::JSON { .. } => {
+                    deserialize::json::JsonDeserializer::read(self, reader, rows, state).await?
+                }
+                Type::Object => {
+                    deserialize::object::ObjectDeserializer::read(self, reader, rows, state).await?
+                }
             })
+        }
+        .boxed()
+    }
+
+    // TODO: is this needed since it just wraps _with_path?
+    pub(crate) fn deserialize_column<'a, R: ClickHouseRead>(
+        &'a self,
+        reader: &'a mut R,
+        rows: usize,
+        state: &'a mut DeserializerState,
+    ) -> impl Future<Output = Result<Vec<Value>>> + Send + 'a {
+        async move {
+            let mut path = Vec::<u16>::new();
+            self.deserialize_column_with_path(reader, rows, state, &mut path).await
         }
         .boxed()
     }
@@ -412,7 +637,7 @@ impl Type {
                 Type::Array(_) => {
                     array::ArraySerializer::write(self, values, writer, state).await?;
                 }
-                Type::Tuple(_) => {
+                Type::Tuple(_) | Type::TupleNamed(_) => {
                     tuple::TupleSerializer::write(self, values, writer, state).await?;
                 }
                 Type::Point => geo::PointSerializer::write(self, values, writer, state).await?,
@@ -431,6 +656,15 @@ impl Type {
                 }
                 Type::Object => {
                     object::ObjectSerializer::write(self, values, writer, state).await?;
+                }
+                Type::Variant(_) => {
+                    variant::VariantSerializer::write(self, values, writer, state).await?;
+                }
+                Type::Dynamic { .. } => {
+                    dynamic::DynamicSerializer::write(self, &values, writer, state).await?;
+                }
+                Type::JSON { .. } => {
+                    json::JsonSerializer::write(self, values, writer, state).await?;
                 }
             }
             Ok(())
@@ -511,11 +745,17 @@ impl Type {
                     inner.validate()?;
                 }
             }
+            Type::TupleNamed(fields) => {
+                for (_, inner) in fields {
+                    inner.validate()?;
+                }
+            }
             Type::Nullable(inner) => match &**inner {
                 Type::Array(_)
                 | Type::Map(_, _)
                 | Type::LowCardinality(_)
                 | Type::Tuple(_)
+                | Type::TupleNamed(_)
                 | Type::Nullable(_) => {
                     return Err(Error::TypeParseError(format!(
                         "nullable cannot contain composite type '{inner:?}'"
@@ -557,8 +797,50 @@ impl Type {
                 key.validate()?;
                 value.validate()?;
             }
-            // TODO: Add Object
-            _ => {}
+            Type::Variant(inner) => {
+                if inner.is_empty() {
+                    return Err(Error::TypeParseError(
+                        "Variant must have at least one type".to_string(),
+                    ));
+                }
+                for inner_type in inner {
+                    inner_type.validate()?;
+                }
+            }
+            // No validation needed for simple scalar types and special types
+            Type::Dynamic { .. }
+            | Type::JSON { .. }
+            | Type::Object
+            | Type::Binary
+            | Type::FixedSizedBinary(_)
+            | Type::String
+            | Type::FixedSizedString(_)
+            | Type::Int8
+            | Type::Int16
+            | Type::Int32
+            | Type::Int64
+            | Type::Int128
+            | Type::Int256
+            | Type::UInt8
+            | Type::UInt16
+            | Type::UInt32
+            | Type::UInt64
+            | Type::UInt128
+            | Type::UInt256
+            | Type::Float32
+            | Type::Float64
+            | Type::Date
+            | Type::Date32
+            | Type::DateTime(_)
+            | Type::Uuid
+            | Type::Ipv4
+            | Type::Ipv6
+            | Type::Enum8(_)
+            | Type::Enum16(_)
+            | Type::Point
+            | Type::Ring
+            | Type::Polygon
+            | Type::MultiPolygon => {}
         }
         Ok(())
     }
@@ -598,7 +880,9 @@ impl Type {
             | (Type::Point, Value::Point(_))
             | (Type::Ring, Value::Ring(_))
             | (Type::Polygon, Value::Polygon(_))
-            | (Type::MultiPolygon, Value::MultiPolygon(_)) => true,
+            | (Type::MultiPolygon, Value::MultiPolygon(_))
+            | (Type::Variant(_), Value::Null)  // NULL is valid for Variant
+            | (Type::Dynamic { .. }, _) => true,      // Dynamic accepts any value
             (Type::DateTime(tz1), Value::DateTime(date)) => tz1 == &date.0,
             (Type::DateTime64(precision1, tz1), Value::DateTime64(tz2)) => {
                 tz1 == &tz2.0 && precision1 == &tz2.2
@@ -635,6 +919,22 @@ impl Type {
                     && keys.iter().all(|x| key.inner_validate_value(x))
                     && values.iter().all(|x| value.inner_validate_value(x))
             }
+            (Type::Variant(types), Value::Variant(discriminator, val)) => {
+                // NULL discriminator is always valid
+                if *discriminator == 0xFF {
+                    return matches!(**val, Value::Null);
+                }
+
+                // Build discriminator map to check if discriminator is valid
+                let discriminator_map = deserialize::variant::DiscriminatorMap::new(types);
+
+                // Check if discriminator maps to a valid type and value matches that type
+                if let Some(expected_type) = discriminator_map.get_type(*discriminator) {
+                    expected_type.inner_validate_value(val)
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
@@ -662,10 +962,25 @@ impl Type {
             }
             Type::Nullable(inner) => inner.estimate_capacity(),
             Type::Tuple(types) => types.iter().map(Type::estimate_capacity).sum(),
+            Type::TupleNamed(fields) => fields.iter().map(|(_, t)| t.estimate_capacity()).sum(),
             Type::Map(key, value) => {
                 let key_data = key.estimate_capacity();
                 let value_data = value.estimate_capacity();
                 4 + key_data + value_data // 4 bytes for offsets
+            }
+            Type::Variant(types) => {
+                // 1 byte for discriminator + average of all type capacities
+                let avg_capacity: usize = if types.is_empty() {
+                    0
+                } else {
+                    types.iter().map(Type::estimate_capacity).sum::<usize>() / types.len()
+                };
+                1 + avg_capacity
+            }
+            Type::Dynamic { .. } => {
+                // Variable discriminator size + some estimated capacity for dynamic data
+                // This is a rough estimate since Dynamic can contain any type
+                4 + 32
             }
 
             // Placeholder for unsupported types
@@ -717,6 +1032,11 @@ impl Type {
                     Box::pin(t.write_default(writer)).await?;
                 }
             }
+            Type::TupleNamed(fields) => {
+                for (_, t) in fields {
+                    Box::pin(t.write_default(writer)).await?;
+                }
+            }
             _ => {
                 return Err(Error::SerializeError(format!("No default value for type: {self:?}")));
             }
@@ -726,16 +1046,6 @@ impl Type {
 }
 
 pub(crate) trait Deserializer {
-    // TODO:
-    // Add custom serialization here. Will need to pass in state or via arg.
-    // Example from python:
-    // ```
-    //  def read_state_prefix(self, buf):
-    //     if self.has_custom_serialization:
-    //         use_custom_serialization = read_varint(buf)
-    //         if use_custom_serialization:
-    //             self.serialization = SparseSerialization(self)
-    // ```
     fn read_prefix<R: ClickHouseRead>(
         _type_: &Type,
         _reader: &mut R,
@@ -744,6 +1054,7 @@ pub(crate) trait Deserializer {
         async { Ok(()) }
     }
 
+    // TODO: should this include path and we get rid of the read_with_path vs read?
     fn read<R: ClickHouseRead>(
         type_: &Type,
         reader: &mut R,

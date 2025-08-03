@@ -103,7 +103,7 @@ impl From<QueryParams> for Settings {
 /// In the future this will enable better validation of queries, possibly
 /// saving a roundtrip to the database.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct ParsedQuery(pub(crate) String);
 
 impl std::ops::Deref for ParsedQuery {

@@ -244,47 +244,33 @@ impl ClickHouseArrowDeserializer for Type {
             | Type::Ipv6
             | Type::Uuid
             | Type::Ipv4 => binary::deserialize_async(self, builder, reader, rows, nulls).await?,
+            // Nullable
             Type::Nullable(inner) => {
-                Box::pin(null::deserialize_async(
-                    inner.as_ref(),
-                    builder,
-                    data_type,
-                    reader,
-                    rows,
-                    rbuffer,
-                ))
-                .await?
+                Box::pin(null::deserialize_async(inner, builder, data_type, reader, rows, rbuffer))
+                    .await?
             }
+            // Array
             Type::Array(inner) => {
                 Box::pin(list::deserialize_async(
-                    inner.as_ref(),
-                    builder,
-                    data_type,
-                    reader,
-                    rows,
-                    nulls,
-                    rbuffer,
+                    inner, builder, data_type, reader, rows, nulls, rbuffer,
                 ))
                 .await?
             }
+            // LowCardinality
             Type::LowCardinality(inner) => {
                 Box::pin(low_cardinality::deserialize_async(
-                    inner.as_ref(),
-                    builder,
-                    data_type,
-                    reader,
-                    rows,
-                    nulls,
-                    rbuffer,
+                    inner, builder, data_type, reader, rows, nulls, rbuffer,
                 ))
                 .await?
             }
+            // Enum
             Type::Enum8(_) | Type::Enum16(_) => {
                 enums::deserialize_async(self, builder, reader, rows, nulls).await?
             }
+            // Map
             Type::Map(key, value) => {
                 Box::pin(map::deserialize_async(
-                    (key.as_ref(), value.as_ref()),
+                    (key, value),
                     builder,
                     data_type,
                     reader,
@@ -294,15 +280,17 @@ impl ClickHouseArrowDeserializer for Type {
                 ))
                 .await?
             }
+            // Tuple (named or unnamed)
             Type::Tuple(inner) => {
                 Box::pin(tuple::deserialize_async(
-                    inner.as_slice(),
-                    builder,
-                    data_type,
-                    reader,
-                    rows,
-                    nulls,
-                    rbuffer,
+                    inner, builder, data_type, reader, rows, nulls, rbuffer,
+                ))
+                .await?
+            }
+            Type::TupleNamed(fields) => {
+                let inner: Vec<Type> = fields.iter().map(|(_, t)| t.clone()).collect();
+                Box::pin(tuple::deserialize_async(
+                    &inner, builder, data_type, reader, rows, nulls, rbuffer,
                 ))
                 .await?
             }
@@ -319,6 +307,16 @@ impl ClickHouseArrowDeserializer for Type {
                     rbuffer,
                 ))
                 .await?
+            }
+            // Variant
+            Type::Variant(_) => {
+                todo!("Variant deserialization not yet implemented")
+            }
+            Type::Dynamic { .. } => {
+                todo!("Dynamic deserialization not yet implemented")
+            }
+            Type::JSON { .. } => {
+                todo!("JSON deserialization not yet implemented")
             }
         })
     }

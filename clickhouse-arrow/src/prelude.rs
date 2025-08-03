@@ -28,7 +28,7 @@ pub use crate::{ArrowClient, Client, ClientBuilder, CompressionMethod, NativeCli
 /// println!("{:?}", password); // Prints: Secret(REDACTED)
 /// ```
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Deserialize))]
 pub struct Secret(String);
 
 impl Secret {
@@ -50,10 +50,10 @@ impl<T: AsRef<str>> From<T> for Secret {
 
 /// Custom Deserialize implementation to prevent storing passwords
 #[cfg(feature = "serde")]
-impl serde::Serialize for Secret {
+impl ::serde::Serialize for Secret {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: serde::Serializer,
+        S: ::serde::Serializer,
     {
         serializer.serialize_str(&format!("{self:?}"))
     }

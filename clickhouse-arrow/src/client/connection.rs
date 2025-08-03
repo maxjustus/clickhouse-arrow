@@ -51,18 +51,20 @@ impl From<ConnectionStatus> for u8 {
 /// Client metadata passed around the internal client
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ClientMetadata {
-    pub(crate) client_id:     u16,
-    pub(crate) compression:   CompressionMethod,
-    pub(crate) arrow_options: ArrowOptions,
+    pub(crate) client_id:      u16,
+    pub(crate) compression:    CompressionMethod,
+    pub(crate) arrow_options:  ArrowOptions,
+    pub(crate) server_version: Option<(u64, u64, u64)>,
 }
 
 impl ClientMetadata {
     /// Helper function to disable compression on the metadata.
     pub(crate) fn disable_compression(self) -> Self {
         Self {
-            client_id:     self.client_id,
-            compression:   CompressionMethod::None,
-            arrow_options: self.arrow_options,
+            client_id:      self.client_id,
+            compression:    CompressionMethod::None,
+            arrow_options:  self.arrow_options,
+            server_version: self.server_version,
         }
     }
 
@@ -137,6 +139,7 @@ impl<T: ClientFormat> Connection<T> {
             client_id,
             compression: options.compression,
             arrow_options: options.ext.arrow.unwrap_or_default(),
+            server_version: None, // Will be set after handshake
         };
 
         // Install rustls provider if using tls
@@ -197,7 +200,7 @@ impl<T: ClientFormat> Connection<T> {
         io_task: &mut IoHandle<T::Data>,
         events: Arc<broadcast::Sender<Event>>,
         options: &ClientOptions,
-        metadata: ClientMetadata,
+        mut metadata: ClientMetadata,
     ) -> Result<ConnectState<T::Data>> {
         let cid = metadata.client_id;
 
@@ -207,6 +210,9 @@ impl<T: ClientFormat> Connection<T> {
 
         // Perform connection handshake
         let server_hello = Arc::new(Self::perform_handshake(&mut stream, cid, options).await?);
+
+        // Extract server version from hello
+        metadata.server_version = Some(server_hello.version);
 
         // Create operation channel
         let (operations, op_rx) = mpsc::channel(InternalConn::<T>::CAPACITY);

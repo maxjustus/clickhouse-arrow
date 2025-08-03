@@ -1,12 +1,17 @@
 //! Geo types
 //! <https://clickhouse.com/docs/en/sql-reference/data-types/geo>
-use super::*;
+use std::hash::Hash;
+
+use crate::Result;
+use crate::native::convert::{FromSql, ToSql, unexpected_type};
+use crate::native::types::Type;
+use crate::native::values::Value;
 
 /// Geo point, represented by its x and y coordinates.
 ///
 /// <https://clickhouse.com/docs/en/sql-reference/data-types/geo#point>
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct Point(pub [f64; 2]);
 
 impl Hash for Point {
@@ -29,7 +34,7 @@ impl AsRef<[f64; 2]> for Point {
 ///
 /// <https://clickhouse.com/docs/en/sql-reference/data-types/geo#ring>
 #[derive(Clone, Hash, Default, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct Ring(pub Vec<Point>);
 
 /// Polygon with holes. The first element is the outer polygon, and the following ones are the
@@ -37,14 +42,14 @@ pub struct Ring(pub Vec<Point>);
 ///
 /// <https://clickhouse.com/docs/en/sql-reference/data-types/geo#polygon>
 #[derive(Clone, Hash, Default, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct Polygon(pub Vec<Ring>);
 
 /// Union of polygons.
 ///
 /// <https://clickhouse.com/docs/en/sql-reference/data-types/geo#multipolygon>
 #[derive(Clone, Hash, Default, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct MultiPolygon(pub Vec<Polygon>);
 
 macro_rules! to_from_sql {

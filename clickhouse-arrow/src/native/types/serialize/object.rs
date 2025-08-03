@@ -30,6 +30,12 @@ impl Serializer for ObjectSerializer {
                 Value::Object(bytes) => {
                     writer.write_string(bytes).await?;
                 }
+                #[cfg(feature = "serde")]
+                Value::Json(v) => {
+                    let bytes =
+                        serde_json::to_vec(&v).map_err(|e| Error::SerializeError(e.to_string()))?;
+                    writer.write_string(bytes).await?;
+                }
                 _ => {
                     return Err(Error::SerializeError(format!(
                         "ObjectSerializer unimplemented: {type_:?} for value = {value:?}",

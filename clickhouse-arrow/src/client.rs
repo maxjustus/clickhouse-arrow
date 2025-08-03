@@ -22,6 +22,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU16;
 
+#[cfg(feature = "serde")]
+use ::serde::ser::SerializeSeq;
 use arrow::array::{ArrayRef, RecordBatch};
 use arrow::compute::take_record_batch;
 use arrow::datatypes::SchemaRef;
@@ -39,13 +41,33 @@ use crate::arrow::utils::batch_to_rows;
 use crate::constants::*;
 use crate::formats::{ClientFormat, NativeFormat};
 use crate::native::block::Block;
-use crate::native::protocol::{CompressionMethod, ProfileEvent};
+#[cfg(feature = "serde")]
+use crate::native::block_info::BlockInfo;
+use crate::native::protocol::{CompressionMethod, LogData, ProfileEvent, ProfileInfo};
+#[cfg(feature = "serde")]
+use crate::native::values::serde;
 use crate::prelude::*;
 use crate::query::{ParsedQuery, QueryParams};
 use crate::schema::CreateOptions;
-use crate::{Error, Progress, Result, Row};
+use crate::{Error, Progress, Result, Row, Settings};
+// use std::str::FromStr; // no longer needed with header-driven serialization
 
 static CLIENT_ID: AtomicU16 = AtomicU16::new(0);
+
+fn merge_settings(base: Option<Arc<Settings>>, extra: Option<Settings>) -> Option<Arc<Settings>> {
+    match (base, extra) {
+        (None, None) => None,
+        (some @ Some(_), None) => some,
+        (None, Some(extra)) => Some(Arc::new(extra)),
+        (Some(base_arc), Some(extra)) => {
+            let mut combined = Settings::from(base_arc.encode_to_key_value_strings());
+            for (key, value) in extra.encode_to_key_value_strings() {
+                combined.add_setting(key, value);
+            }
+            Some(Arc::new(combined))
+        }
+    }
+}
 
 /// A `ClickHouse` client configured for the native format.
 ///
@@ -90,6 +112,8 @@ pub struct Event {
 pub enum ClickHouseEvent {
     Progress(Progress),
     Profile(Vec<ProfileEvent>),
+    Log(Vec<LogData>),
+    ProfileInfo(ProfileInfo),
 }
 
 /// A thread-safe handle for interacting with a `ClickHouse` database over its native protocol.
@@ -441,11 +465,12 @@ impl<T: ClientFormat> Client<T> {
     ) -> Result<impl Stream<Item = Result<()>> + '_> {
         let (query, qid) = record_query(qid, query.into(), self.client_id);
 
-        // Create metadata channel
-        let (tx, rx) = oneshot::channel();
+        // Create metadata + header channels for the query
+        let (tx_query, rx_query) = oneshot::channel();
+        let (header_tx, header_rx) = oneshot::channel();
         let connection = self.conn().await?;
 
-        // Send query
+        // Send query first; also request header so we can wait for it before data
         #[cfg_attr(not(feature = "inner_pool"), expect(unused_variables))]
         let conn_idx = connection
             .send_operation(
@@ -453,28 +478,35 @@ impl<T: ClientFormat> Client<T> {
                     query,
                     settings: self.settings.clone(),
                     params: None,
-                    response: tx,
-                    header: None,
+                    response: tx_query,
+                    header: Some(header_tx),
                 },
                 qid,
                 false,
             )
             .await?;
 
-        trace!({ ATT_CID } = self.client_id, { ATT_QID } = %qid, "sent query, awaiting response");
-        let responses = rx
+        // Wait for the server's Header before sending data
+        let _header = header_rx
+            .await
+            .map_err(|_| Error::Protocol(format!("Failed to receive header for query {qid}")))?;
+
+        // Immediately send data block for this INSERT
+        let (tx_insert, rx_insert) = oneshot::channel();
+        let _ = connection
+            .send_operation(Operation::Insert { data: block, response: tx_insert }, qid, true)
+            .await?;
+        // Await insert ack
+        rx_insert.await.map_err(|_| {
+            Error::Protocol(format!("Failed to receive response from insert {qid}"))
+        })??;
+
+        trace!({ ATT_CID } = self.client_id, { ATT_QID } = %qid, "sent insert data, awaiting query response stream");
+        // Now await the query response stream
+        let responses = rx_query
             .await
             .map_err(|_| Error::Protocol(format!("Failed to receive response for query {qid}")))?
             .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "Error receiving header"))?;
-
-        // Send data
-        let (tx, rx) = oneshot::channel();
-        let _ = connection
-            .send_operation(Operation::Insert { data: block, response: tx }, qid, true)
-            .await?;
-        rx.await.map_err(|_| {
-            Error::Protocol(format!("Failed to receive response from insert {qid}"))
-        })??;
 
         // Decrement load balancer
         #[cfg(feature = "inner_pool")]
@@ -482,6 +514,8 @@ impl<T: ClientFormat> Client<T> {
 
         Ok(self.insert_response(responses, qid))
     }
+
+    // insert_with_block_builder is specialized for NativeFormat; see impl Client<NativeFormat>.
 
     /// Inserts multiple blocks of data into `ClickHouse` using the native protocol.
     ///
@@ -646,7 +680,23 @@ impl<T: ClientFormat> Client<T> {
         params: Option<P>,
         qid: Qid,
     ) -> Result<impl Stream<Item = Result<T::Data>> + 'static> {
-        // Create metadata channel
+        self.query_raw_with_settings(query, params, Option::<Settings>::None, qid).await
+    }
+
+    pub async fn query_raw_with_settings<P, S>(
+        &self,
+        query: String,
+        params: Option<P>,
+        settings: Option<S>,
+        qid: Qid,
+    ) -> Result<impl Stream<Item = Result<T::Data>> + 'static>
+    where
+        P: Into<QueryParams>,
+        S: Into<Settings>,
+    {
+        let merged_settings = merge_settings(self.settings.clone(), settings.map(Into::into));
+        let params = params.map(Into::into);
+
         let (tx, rx) = oneshot::channel();
         let connection = self.conn().await?;
 
@@ -655,8 +705,8 @@ impl<T: ClientFormat> Client<T> {
             .send_operation(
                 Operation::Query {
                     query,
-                    settings: self.settings.clone(),
-                    params: params.map(Into::into),
+                    settings: merged_settings,
+                    params,
                     response: tx,
                     header: None,
                 },
@@ -673,7 +723,6 @@ impl<T: ClientFormat> Client<T> {
             .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "Error receiving header"))?;
         trace!({ ATT_CID } = self.client_id, { ATT_QID } = %qid, "sent query, awaiting response");
 
-        // Decrement load balancer
         #[cfg(feature = "inner_pool")]
         connection.finish(conn_idx, Operation::<T::Data>::weight_query());
 
@@ -991,6 +1040,54 @@ impl<T: ClientFormat> Client<T> {
         let stmt = drop_db_statement(database, sync)?;
         self.execute(stmt, qid).await?;
         Ok(())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl Client<crate::formats::NativeFormat> {
+    /// Stream a query's rows directly into a serde Serializer as a sequence.
+    /// Named tuples serialize as objects (JSONEachRow semantics).
+    #[instrument(
+        name = "clickhouse.query_transcode",
+        skip_all,
+        fields(
+            db.system = "clickhouse",
+            db.operation = "query_transcode",
+            db.format = "native",
+            clickhouse.client.id = self.client_id,
+            clickhouse.query.id = %qid
+        ),
+    )]
+    pub async fn query_transcode<S, P>(
+        &self,
+        query: String,
+        params: Option<P>,
+        qid: Qid,
+        serializer: S,
+    ) -> Result<S::Ok>
+    where
+        S: ::serde::Serializer,
+        P: Into<QueryParams>,
+    {
+        use futures_util::StreamExt as _;
+
+        use crate::native::values::serde::RowSerializer;
+
+        let mut stream = self.query_raw(query, params, qid).await?;
+        let mut seq =
+            serializer.serialize_seq(None).map_err(|e| Error::SerializeError(e.to_string()))?;
+
+        while let Some(item) = stream.next().await {
+            let mut block: Block = item?;
+            let cols = block.column_types.clone();
+            for row in block.take_iter_rows() {
+                let row_values: Vec<_> = row.into_iter().map(|(_n, _t, v)| v).collect();
+                seq.serialize_element(&RowSerializer { cols: &cols, row: &row_values })
+                    .map_err(|e| Error::SerializeError(e.to_string()))?;
+            }
+        }
+
+        seq.end().map_err(|e| Error::SerializeError(e.to_string()))
     }
 }
 
@@ -1383,6 +1480,93 @@ impl Client<NativeFormat> {
         stream.next().await.transpose()
     }
 
+    /// Query `ClickHouse` and return rows as dynamic JSON objects.
+    ///
+    /// This method executes a query and returns the results as a vector of
+    /// `serde_json::Map<String, serde_json::Value>` objects, providing schema-less
+    /// access to query results. Each row becomes a JSON object with column names
+    /// as keys and column values converted to appropriate JSON types.
+    ///
+    /// This method is the inverse of the serde Object-based dynamic insert functionality,
+    /// allowing for flexible data retrieval without predefined structs.
+    ///
+    /// # Arguments
+    /// * `query` - The SQL query to execute
+    /// * `qid` - Optional query ID for tracking and debugging
+    ///
+    /// # Returns
+    /// A `Result` containing a vector of JSON objects (one per row)
+    ///
+    /// # Errors
+    /// - Fails if the query is malformed or contains syntax errors.
+    /// - Fails if the connection to `ClickHouse` is interrupted.
+    /// - Fails if `ClickHouse` returns an exception.
+    /// - Fails if data conversion to JSON fails.
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// use clickhouse_arrow::prelude::*;
+    ///
+    /// let client = Client::builder()
+    ///     .destination("localhost:9000")
+    ///     .build_native()
+    ///     .await?;
+    ///
+    /// let rows = client.query_json("SELECT id, name, created_at FROM users LIMIT 10", None).await?;
+    /// for row in rows {
+    ///     println!("ID: {}, Name: {}", row["id"], row["name"]);
+    /// }
+    /// ```
+    /// TODO: why bother with this AND query_json_params? Just rename query_json_params to
+    /// query_json.
+    #[cfg(feature = "serde")]
+    #[instrument(
+        name = "clickhouse.query_json",
+        skip_all,
+        fields(db.system = "clickhouse", db.operation = "query", db.format = NativeFormat::FORMAT)
+    )]
+    pub async fn query_json(
+        &self,
+        query: impl Into<ParsedQuery>,
+        qid: Option<Qid>,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>> {
+        self.query_json_params(query, None, qid).await
+    }
+
+    /// Query `ClickHouse` with parameters and return rows as dynamic JSON objects.
+    ///
+    /// This is the parameterized version of `query_json`.
+    #[cfg(feature = "serde")]
+    #[instrument(
+        name = "clickhouse.query_json_params",
+        skip_all,
+        fields(db.system = "clickhouse", db.operation = "query", db.format = NativeFormat::FORMAT)
+    )]
+    pub async fn query_json_params(
+        &self,
+        query: impl Into<ParsedQuery>,
+        params: Option<QueryParams>,
+        qid: Option<Qid>,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>> {
+        use futures_util::StreamExt;
+
+        let (query, qid) = record_query(qid, query.into(), self.client_id);
+        let raw = self.query_raw(query, params, qid).await?;
+
+        let mut all_rows = Vec::new();
+        tokio::pin!(raw);
+
+        while let Some(block) = raw.next().await.transpose()? {
+            // Convert block to JSON rows - would nice if this was streaming? All these different
+            // ways to query json data are a total mess. I'd almost like to just keep it as
+            // reference and strip it all out and start fresh.
+            let json_rows = block_to_json_rows(block)?;
+            all_rows.extend(json_rows);
+        }
+
+        Ok(all_rows)
+    }
+
     /// Creates a `ClickHouse` table from a Rust struct that implements the `Row` trait.
     ///
     /// This method generates and executes a `CREATE TABLE` DDL statement based on the
@@ -1439,8 +1623,223 @@ impl Client<NativeFormat> {
         self.execute(stmt, qid).await?;
         Ok(())
     }
+
+    /// Inserts data by first awaiting the server's header, then building the block from it.
+    ///
+    /// Use this when the outgoing block must be constructed based on the exact server schema.
+    pub async fn insert_with_block_builder(
+        &self,
+        query: impl Into<ParsedQuery>,
+        qid: Option<Qid>,
+        build: impl FnOnce(&[(String, Type)]) -> Result<Block>,
+    ) -> Result<impl Stream<Item = Result<()>> + '_> {
+        let (query, qid) = record_query(qid, query.into(), self.client_id);
+
+        let (tx_query, rx_query) = oneshot::channel();
+        let (header_tx, header_rx) = oneshot::channel();
+        let connection = self.conn().await?;
+
+        #[cfg_attr(not(feature = "inner_pool"), expect(unused_variables))]
+        let conn_idx = connection
+            .send_operation(
+                Operation::Query {
+                    query,
+                    settings: self.settings.clone(),
+                    params: None,
+                    response: tx_query,
+                    header: Some(header_tx),
+                },
+                qid,
+                false,
+            )
+            .await?;
+
+        let header = header_rx
+            .await
+            .map_err(|_| Error::Protocol(format!("Failed to receive header for query {qid}")))?;
+        let block = build(&header)?;
+
+        let (tx_insert, rx_insert) = oneshot::channel();
+        let _ = connection
+            .send_operation(Operation::Insert { data: block, response: tx_insert }, qid, true)
+            .await?;
+        rx_insert.await.map_err(|_| {
+            Error::Protocol(format!("Failed to receive response from insert {qid}"))
+        })??;
+
+        let responses = rx_query
+            .await
+            .map_err(|_| Error::Protocol(format!("Failed to receive response for query {qid}")))?
+            .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "Error receiving header"))?;
+
+        #[cfg(feature = "inner_pool")]
+        connection.finish(conn_idx, Operation::<Block>::weight_insert());
+
+        Ok(self.insert_response(responses, qid))
+    }
+
+    /// Begins a streaming insert operation that can accept multiple batches of Serde rows.
+    ///
+    /// This handle caches the table schema and opens/closes an insert for each flushed batch.
+    /// Call `write_rows` one or more times to send batches; call `finish` to ensure the last
+    /// partial batch is flushed. For the first iteration, this implementation focuses on tables
+    /// with a single JSON column: each Serde row is serialized as the JSON value for that column.
+    /// The JSON serializer handles typed paths, defaults for non-nullable typed paths, and
+    /// dynamic paths automatically based on the table's JSON type.
+    #[cfg(feature = "serde")]
+    pub async fn insert_into(&self, table: &str, options: InsertOptions) -> Result<InsertInto<'_>> {
+        let (database, table) = split_db_table(self.connection.database(), table);
+        Ok(InsertInto {
+            client: self,
+            database: database.to_string(),
+            table: table.to_string(),
+            options,
+            pending: Vec::new(),
+            total_rows: 0,
+        })
+    }
 }
 
+#[cfg(feature = "serde")]
+fn split_db_table<'a>(default_db: &'a str, table: &'a str) -> (&'a str, &'a str) {
+    match table.split_once('.') {
+        Some((db, t)) if !db.is_empty() && !t.is_empty() => (db, t),
+        _ => {
+            let db = if default_db.is_empty() { "default" } else { default_db };
+            (db, table)
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+#[derive(Debug, Clone)]
+pub struct InsertOptions {
+    pub batch_size:          usize,
+    pub strict:              bool,
+    pub on_missing_default:  bool,
+    // TODO: get rid of this. It's a weird  thing to include.
+    pub set_object_settings: bool,
+    /// Optional explicit column list to include in the INSERT statement,
+    /// e.g. INSERT INTO db.table (col1, col2) VALUES ...
+    /// When set, the server applies defaults for unspecified columns.
+    pub columns:             Option<Vec<String>>,
+}
+
+#[cfg(feature = "serde")]
+impl InsertOptions {
+    pub fn default_batch() -> usize { 10_000 }
+}
+
+#[cfg(feature = "serde")]
+impl Default for InsertOptions {
+    fn default() -> Self {
+        Self {
+            batch_size:          Self::default_batch(),
+            strict:              false,
+            on_missing_default:  true,
+            set_object_settings: true,
+            columns:             None,
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+pub struct InsertInto<'a> {
+    client:     &'a Client<NativeFormat>,
+    database:   String,
+    table:      String,
+    options:    InsertOptions,
+    pending:    Vec<serde_json::Value>,
+    total_rows: usize,
+}
+
+#[cfg(feature = "serde")]
+impl InsertInto<'_> {
+    /// Write a batch of Serde rows. For single JSON-column tables, each row is serialized
+    /// as the JSON value for that column.
+    pub async fn write_rows<T: ::serde::Serialize>(
+        &mut self,
+        rows: impl IntoIterator<Item = T>,
+    ) -> Result<usize> {
+        // Apply settings once if requested
+        // TODO: this is a dumb top level setting to have. Remove it.
+        if self.options.set_object_settings {
+            // Best-effort: ignore errors if already set
+            let _unused = self.client.execute("SET allow_experimental_object_type = 1", None).await;
+        }
+
+        let mut wrote = 0usize;
+        for row in rows {
+            let v = serde_json::to_value(row)
+                .map_err(|e| Error::SerializeError(format!("serde serialize error: {e}")))?;
+            self.pending.push(v);
+            if self.pending.len() >= self.options.batch_size {
+                self.flush().await?;
+            }
+            wrote += 1;
+        }
+        Ok(wrote)
+    }
+
+    /// Flush the current batch to the server as a single block.
+    pub async fn flush(&mut self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+
+        let rows_len = self.pending.len();
+
+        // Build query and send using header-driven builder
+        let query = if let Some(columns) = &self.options.columns {
+            // Build explicit column list; backtick-escape identifiers minimally
+            let collist = columns
+                .iter()
+                .map(|c| format!("`{}`", c.replace('`', "``")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("INSERT INTO `{}`.`{}` ({}) VALUES", self.database, self.table, collist)
+        } else {
+            format!("INSERT INTO `{}`.`{}` VALUES", self.database, self.table)
+        };
+        tracing::debug!(query = %query, rows = rows_len, "insert_into: executing insert (header-driven)");
+        let pending = std::mem::take(&mut self.pending);
+        let strict = self.options.strict;
+        let on_missing_default = self.options.on_missing_default;
+        let mut stream = self
+            .client
+            .insert_with_block_builder(query, None, move |header: &[(String, Type)]| {
+                let column_types: Vec<(String, Type)> = header.to_vec();
+                let mut column_data: Vec<Value> = Vec::with_capacity(header.len() * rows_len);
+                // Map each column using server-declared names/types
+                for (col_name, col_type) in header {
+                    let mut values: Vec<Value> = Vec::with_capacity(rows_len);
+                    for row in &pending {
+                        let cell = row.get(col_name);
+                        let val = serde::cell_to_value(cell, col_type, strict, on_missing_default)?;
+                        values.push(val);
+                    }
+                    column_data.extend(values.into_iter());
+                }
+                Ok(Block {
+                    info: BlockInfo::default(),
+                    rows: rows_len as u64,
+                    column_types,
+                    column_data,
+                })
+            })
+            .await?;
+        while let Some(res) = stream.next().await {
+            res?;
+        }
+        self.total_rows += rows_len;
+        // Clear pending rows after successful flush
+        self.pending.clear();
+        Ok(())
+    }
+
+    /// Finish the insert operation by flushing any remaining rows.
+    pub async fn finish(mut self) -> Result<()> { self.flush().await }
+}
 impl Client<ArrowFormat> {
     /// Executes a `ClickHouse` query and streams Arrow [`RecordBatch`] results.
     ///
@@ -2180,6 +2579,45 @@ fn record_query(qid: Option<Qid>, query: ParsedQuery, cid: u16) -> (String, Qid)
     let query = query.0;
     trace!(query, { ATT_CID } = cid, "Querying clickhouse");
     (query, qid)
+}
+
+/// Convert a Block to a vector of JSON objects (`serde_json::Map`).
+/// Each row becomes a JSON object with column names as keys.
+#[cfg(feature = "serde")]
+fn block_to_json_rows(mut block: Block) -> Result<Vec<serde_json::Map<String, serde_json::Value>>> {
+    let mut json_rows = Vec::with_capacity(block.rows as usize);
+
+    // Use the block's row iterator to get row data
+    let mut row_iter = block.take_iter_rows();
+
+    while let Some(row_data) = row_iter.next() {
+        // Build a per-row (name, Type) schema and value slice
+        use crate::native::types::Type;
+        use crate::native::values::{Value, serde};
+        let mut cols: Vec<(String, Type)> = Vec::new();
+        let mut row_vals: Vec<Value> = Vec::new();
+
+        for (column_name, column_type, value) in row_data {
+            cols.push((column_name.to_string(), column_type.clone()));
+            row_vals.push(value);
+        }
+
+        // Serialize the entire row via RowSer for correct named-tuple/object shaping
+        // Render with default typed behavior (named tuples as objects)
+        let row_ser = serde::RowSerializer { cols: &cols, row: &row_vals };
+        let json_value =
+            serde_json::to_value(row_ser).map_err(|e| Error::DeserializeError(e.to_string()))?;
+        match json_value {
+            serde_json::Value::Object(map) => json_rows.push(map),
+            other => {
+                return Err(Error::DeserializeError(format!(
+                    "Expected object for row, got {other}"
+                )));
+            }
+        }
+    }
+
+    Ok(json_rows)
 }
 
 #[cfg(test)]

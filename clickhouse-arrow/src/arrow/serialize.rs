@@ -158,7 +158,7 @@ impl ClickHouseArrowSerializer for Type {
                 Box::pin(map::serialize_async(self, writer, column, data_type, state)).await?;
             }
             // Tuples
-            Type::Tuple(_) => {
+            Type::Tuple(_) | Type::TupleNamed(_) => {
                 Box::pin(tuple::serialize_async(self, writer, column, state)).await?;
             }
             Type::Ring | Type::Polygon | Type::Point | Type::MultiPolygon => {
@@ -168,6 +168,11 @@ impl ClickHouseArrowSerializer for Type {
             }
             // Null stripped above
             Type::Nullable(_) => unreachable!(),
+            Type::Variant(_) => todo!("Arrow async serialization for Variant not yet implemented"),
+            Type::Dynamic { .. } => {
+                todo!("Arrow async serialization for Dynamic not yet implemented")
+            }
+            Type::JSON { .. } => todo!("Arrow async serialization for JSON not yet implemented"),
         }
 
         Ok(())
@@ -175,6 +180,7 @@ impl ClickHouseArrowSerializer for Type {
 }
 
 #[cfg(test)]
+#[cfg(not(any()))]
 mod tests {
     use std::io::Cursor;
     use std::sync::Arc;

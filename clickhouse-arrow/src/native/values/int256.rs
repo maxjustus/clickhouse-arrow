@@ -6,7 +6,7 @@ use crate::{FromSql, Result, ToSql, Type, Value, unexpected_type};
 /// Wrapper type for `ClickHouse` `Int256` type.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Debug, Default)]
 #[allow(non_camel_case_types)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct i256(pub [u8; 32]);
 
 impl From<i256> for u256 {
@@ -85,11 +85,12 @@ impl From<(i128, u8)> for i256 {
 
 impl fmt::Display for i256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x")?;
-        for b in self.0 {
-            write!(f, "{b:02X}")?;
-        }
-        Ok(())
+        // Convert our byte array to bnum's I256
+        // from_be_slice returns None if slice length doesn't match, but we have exactly 32 bytes
+        let value =
+            bnum::types::I256::from_be_slice(&self.0).expect("32 bytes should always convert");
+        // bnum's Display implementation outputs decimal format, consistent with clickhouse-go
+        write!(f, "{value}")
     }
 }
 
@@ -160,7 +161,7 @@ impl std::ops::Mul<i256> for i256 {
 
 /// Wrapper type for `ClickHouse` `UInt256` type.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[allow(non_camel_case_types)]
 pub struct u256(pub [u8; 32]);
 
@@ -206,11 +207,12 @@ impl From<(u128, u128)> for u256 {
 
 impl fmt::Display for u256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x")?;
-        for b in self.0 {
-            write!(f, "{b:02X}")?;
-        }
-        Ok(())
+        // Convert our byte array to bnum's U256
+        // from_be_slice returns None if slice length doesn't match, but we have exactly 32 bytes
+        let value =
+            bnum::types::U256::from_be_slice(&self.0).expect("32 bytes should always convert");
+        // bnum's Display implementation outputs decimal format, consistent with clickhouse-go
+        write!(f, "{value}")
     }
 }
 
@@ -397,19 +399,25 @@ mod tests {
 
     #[test]
     fn test_display_formatting() {
-        // Test i256 display
-        let i = i256([
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
-            0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B,
-            0x1C, 0x1D, 0x1E, 0x1F,
-        ]);
+        // Test i256 display with a simple positive number
+        let i = i256::from((0u128, 12345u128));
         let formatted = format!("{i}");
-        assert_eq!(formatted, "0x000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F");
+        assert_eq!(formatted, "12345");
 
-        // Test u256 display
-        let u = u256([0xFF; 32]);
+        // Test i256 display with a negative number
+        let i_neg = i256::from((-100i128, 0u8)); // -100
+        let formatted_neg = format!("{i_neg}");
+        assert_eq!(formatted_neg, "-100");
+
+        // Test u256 display with a simple number
+        let u = u256::from((0u128, 42u128));
         let formatted = format!("{u}");
-        assert_eq!(formatted, "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
+        assert_eq!(formatted, "42");
+
+        // Test u256 display with max u128 value
+        let u_max = u256::from((0u128, u128::MAX));
+        let formatted_max = format!("{u_max}");
+        assert_eq!(formatted_max, "340282366920938463463374607431768211455");
     }
 
     #[test]
@@ -449,5 +457,30 @@ mod tests {
         // Verify these don't panic and produce some result
         let _: (u128, u128) = min_result.into();
         let _: (u128, u128) = max_result.into();
+    }
+
+    #[test]
+    fn test_large_number_display() {
+        // Test that very large numbers display correctly in decimal
+
+        // Test max i128 value
+        let max_i128 = i256::from(i128::MAX);
+        assert_eq!(max_i128.to_string(), "170141183460469231731687303715884105727");
+
+        // Test min i128 value
+        let min_i128 = i256::from(i128::MIN);
+        assert_eq!(min_i128.to_string(), "-170141183460469231731687303715884105728");
+
+        // Test 2^128 (requires full 256 bits)
+        let pow_128 = u256::from((1u128, 0u128));
+        assert_eq!(pow_128.to_string(), "340282366920938463463374607431768211456");
+
+        // Test max u128 value
+        let max_u128_val = u256::from((0u128, u128::MAX));
+        assert_eq!(max_u128_val.to_string(), "340282366920938463463374607431768211455");
+
+        // Test a value that uses both high and low parts
+        let large_val = u256::from((1u128, 1u128));
+        assert_eq!(large_val.to_string(), "340282366920938463463374607431768211457");
     }
 }

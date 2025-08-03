@@ -435,6 +435,16 @@ pub fn ch_to_arrow_type(ch_type: &Type, options: Option<ArrowOptions>) -> Result
                 .collect::<Result<Vec<_>>>()?;
             DataType::Struct(fields.into())
         }
+        Type::TupleNamed(fields) => {
+            let fields: Vec<Field> = fields
+                .iter()
+                .map(|(name, t)| {
+                    ch_to_arrow_type(t, options)
+                        .map(|(arrow_type, is_null)| Field::new(name.clone(), arrow_type, is_null))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            DataType::Struct(fields.into())
+        }
         Type::Map(key_type, value_type) => {
             let (key_arrow_type, _) = ch_to_arrow_type(key_type, options)?;
             let (value_arrow_type, is_null) = ch_to_arrow_type(value_type, options)?;
@@ -477,7 +487,21 @@ pub fn ch_to_arrow_type(ch_type: &Type, options: Option<ArrowOptions>) -> Result
             let normalized = normalize_geo_type(ch_type).unwrap();
             return ch_to_arrow_type(&normalized, options);
         }
-        // Unwrapped above
+        Type::Variant(_) => {
+            return Err(Error::ArrowUnsupportedType(
+                "Variant type is not yet supported in Arrow conversion".to_string(),
+            ));
+        }
+        Type::Dynamic { .. } => {
+            return Err(Error::ArrowUnsupportedType(
+                "Dynamic type is not yet supported in Arrow conversion".to_string(),
+            ));
+        }
+        Type::JSON { .. } => {
+            return Err(Error::ArrowUnsupportedType(
+                "JSON type is not yet supported in Arrow conversion".to_string(),
+            ));
+        }
         Type::Nullable(_) => unreachable!(),
     };
 

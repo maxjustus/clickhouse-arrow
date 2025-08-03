@@ -124,9 +124,7 @@ impl<T: ToSql, Y: ToSql, S: ::std::hash::BuildHasher> ToSql for IndexMap<T, Y, S
 
 #[cfg(feature = "serde")]
 impl ToSql for serde_json::Value {
-    fn to_sql(self, _type_hint: Option<&Type>) -> Result<Value> {
-        Ok(Value::Object(self.to_string().into_bytes()))
-    }
+    fn to_sql(self, _type_hint: Option<&Type>) -> Result<Value> { Ok(Value::Json(self)) }
 }
 
 impl<T: ToSql> ToSql for Option<T> {
@@ -196,4 +194,16 @@ tuple_impls! {
     14 => (0 T0 1 T1 2 T2 3 T3 4 T4 5 T5 6 T6 7 T7 8 T8 9 T9 10 T10 11 T11 12 T12 13 T13)
     15 => (0 T0 1 T1 2 T2 3 T3 4 T4 5 T5 6 T6 7 T7 8 T8 9 T9 10 T10 11 T11 12 T12 13 T13 14 T14)
     16 => (0 T0 1 T1 2 T2 3 T3 4 T4 5 T5 6 T6 7 T7 8 T8 9 T9 10 T10 11 T11 12 T12 13 T13 14 T14 15 T15)
+}
+
+/// ToSql implementation for serde_json::Map<String, serde_json::Value>
+/// This enables inserting JSON objects directly as Object columns
+/// TODO: expound on this / what the code path for this is and verify tests
+#[cfg(feature = "serde")]
+impl ToSql for serde_json::Map<String, serde_json::Value> {
+    fn to_sql(self, type_hint: Option<&Type>) -> Result<Value> {
+        // Convert Map to serde_json::Value::Object and use its ToSql implementation
+        let json_value = serde_json::Value::Object(self);
+        json_value.to_sql(type_hint)
+    }
 }

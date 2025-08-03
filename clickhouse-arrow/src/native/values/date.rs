@@ -32,8 +32,8 @@ impl Date {
 }
 
 #[cfg(feature = "serde")]
-impl serde::Serialize for Date {
-    fn serialize<S: serde::Serializer>(
+impl ::serde::Serialize for Date {
+    fn serialize<S: ::serde::Serializer>(
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
@@ -43,8 +43,8 @@ impl serde::Serialize for Date {
 }
 
 #[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for Date {
-    fn deserialize<D: serde::Deserializer<'de>>(
+impl<'de> ::serde::Deserialize<'de> for Date {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
         let date: NaiveDate = NaiveDate::deserialize(deserializer)?;
@@ -101,8 +101,8 @@ impl Date32 {
 }
 
 #[cfg(feature = "serde")]
-impl serde::Serialize for Date32 {
-    fn serialize<S: serde::Serializer>(
+impl ::serde::Serialize for Date32 {
+    fn serialize<S: ::serde::Serializer>(
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
@@ -112,8 +112,8 @@ impl serde::Serialize for Date32 {
 }
 
 #[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for Date32 {
-    fn deserialize<D: serde::Deserializer<'de>>(
+impl<'de> ::serde::Deserialize<'de> for Date32 {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
         let date: NaiveDate = NaiveDate::deserialize(deserializer)?;
@@ -231,29 +231,29 @@ impl DateTime {
 }
 
 #[cfg(feature = "serde")]
-impl serde::Serialize for DateTime {
-    fn serialize<S: serde::Serializer>(
+impl ::serde::Serialize for DateTime {
+    fn serialize<S: ::serde::Serializer>(
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         let date: chrono::DateTime<Tz> = (*self)
             .try_into()
-            .map_err(|e: TryFromIntError| serde::ser::Error::custom(e.to_string()))?;
+            .map_err(|e: TryFromIntError| ::serde::ser::Error::custom(e.to_string()))?;
         date.to_rfc3339().serialize(serializer)
     }
 }
 
 #[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for DateTime {
-    fn deserialize<D: serde::Deserializer<'de>>(
+impl<'de> ::serde::Deserialize<'de> for DateTime {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
         let raw: String = String::deserialize(deserializer)?;
         let date: chrono::DateTime<FixedOffset> =
             chrono::DateTime::<FixedOffset>::parse_from_rfc3339(&raw)
-                .map_err(|e: chrono::ParseError| serde::de::Error::custom(e.to_string()))?;
+                .map_err(|e: chrono::ParseError| ::serde::de::Error::custom(e.to_string()))?;
 
-        date.try_into().map_err(|e: TryFromIntError| serde::de::Error::custom(e.to_string()))
+        date.try_into().map_err(|e: TryFromIntError| ::serde::de::Error::custom(e.to_string()))
     }
 }
 
@@ -386,61 +386,61 @@ impl<const PRECISION: usize> From<DateTime64<PRECISION>> for DynDateTime64 {
 }
 
 #[cfg(feature = "serde")]
-impl serde::Serialize for DynDateTime64 {
-    fn serialize<S: serde::Serializer>(
+impl ::serde::Serialize for DynDateTime64 {
+    fn serialize<S: ::serde::Serializer>(
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         let date: chrono::DateTime<Tz> = (*self)
             .try_into()
-            .map_err(|e: TryFromIntError| serde::ser::Error::custom(e.to_string()))?;
+            .map_err(|e: TryFromIntError| ::serde::ser::Error::custom(e.to_string()))?;
         date.to_rfc3339().serialize(serializer)
     }
 }
 
 #[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for DynDateTime64 {
-    fn deserialize<D: serde::Deserializer<'de>>(
+impl<'de> ::serde::Deserialize<'de> for DynDateTime64 {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
         let raw: String = String::deserialize(deserializer)?;
         let date: chrono::DateTime<Utc> = Utc.from_utc_datetime(
             &chrono::DateTime::<FixedOffset>::parse_from_rfc3339(&raw)
-                .map_err(|e: chrono::ParseError| serde::de::Error::custom(e.to_string()))?
+                .map_err(|e: chrono::ParseError| ::serde::de::Error::custom(e.to_string()))?
                 .naive_utc(),
         );
 
         DynDateTime64::try_from_utc(date, 6)
-            .map_err(|e: TryFromIntError| serde::de::Error::custom(e.to_string()))
+            .map_err(|e: TryFromIntError| ::serde::de::Error::custom(e.to_string()))
     }
 }
 
 #[cfg(feature = "serde")]
-impl<const PRECISION: usize> serde::Serialize for DateTime64<PRECISION> {
-    fn serialize<S: serde::Serializer>(
+impl<const PRECISION: usize> ::serde::Serialize for DateTime64<PRECISION> {
+    fn serialize<S: ::serde::Serializer>(
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         let date: chrono::DateTime<Tz> = (*self)
             .try_into()
-            .map_err(|e: TryFromIntError| serde::ser::Error::custom(e.to_string()))?;
+            .map_err(|e: TryFromIntError| ::serde::ser::Error::custom(e.to_string()))?;
         date.to_rfc3339().serialize(serializer)
     }
 }
 
 #[cfg(feature = "serde")]
-impl<'de, const PRECISION: usize> serde::Deserialize<'de> for DateTime64<PRECISION> {
-    fn deserialize<D: serde::Deserializer<'de>>(
+impl<'de, const PRECISION: usize> ::serde::Deserialize<'de> for DateTime64<PRECISION> {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
         let raw: String = String::deserialize(deserializer)?;
         let date: chrono::DateTime<Utc> = Utc.from_utc_datetime(
             &chrono::DateTime::<FixedOffset>::parse_from_rfc3339(&raw)
-                .map_err(|e: chrono::ParseError| serde::de::Error::custom(e.to_string()))?
+                .map_err(|e: chrono::ParseError| ::serde::de::Error::custom(e.to_string()))?
                 .naive_utc(),
         );
 
-        date.try_into().map_err(|e: TryFromIntError| serde::de::Error::custom(e.to_string()))
+        date.try_into().map_err(|e: TryFromIntError| ::serde::de::Error::custom(e.to_string()))
     }
 }
 

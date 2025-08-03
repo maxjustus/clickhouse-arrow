@@ -125,6 +125,7 @@ impl<T: ClientFormat> InternalConn<T> {
         // `inner_pool` it's helpful to distinguish.
         let conn_id = CONN_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let cid = Box::leak(format!("{}.{conn_id}", metadata.client_id).into_boxed_str());
+
         let state = DeserializerState::default().with_arrow_options(metadata.arrow_options);
         InternalConn {
             cid,
@@ -281,6 +282,7 @@ impl<T: ClientFormat> InternalConn<T> {
             }
             // Inserts
             Operation::Insert { data, response } => {
+                tracing::trace!("send_insert: inserting single block");
                 let insert = InsertState::Data(data);
                 let header = self.executing.as_ref().and_then(|e| e.header.as_deref());
                 let result = self.send_insert(writer, insert, header, qid).await;
@@ -363,6 +365,10 @@ impl<T: ClientFormat> InternalConn<T> {
                 let event = ClickHouseEvent::Profile(info);
                 let _ = self.events.send(Event { event, qid, client_id }).ok();
             }
+            ServerPacket::Log(logs) => {
+                let event = ClickHouseEvent::Log(logs);
+                let _ = self.events.send(Event { event, qid, client_id }).ok();
+            }
             ServerPacket::Progress(progress) => {
                 let event = ClickHouseEvent::Progress(progress);
                 let _ = self.events.send(Event { event, qid, client_id }).ok();
@@ -385,11 +391,12 @@ impl<T: ClientFormat> InternalConn<T> {
             ServerPacket::Hello(_) => {
                 return Err(Error::Protocol("Unexpected Server Hello".to_string()));
             }
-            // Ignored
-            // TODO: Should profile info be returned to caller?
+            // Publish as event
             ServerPacket::ProfileInfo(info) => {
-                debug!(?info, "Profile info");
+                let event = ClickHouseEvent::ProfileInfo(info);
+                let _ = self.events.send(Event { event, qid, client_id }).ok();
             }
+            // TODO: verify log events don't end up here?
             ServerPacket::Ignore(ignored) => trace!(ignored = ignored.as_ref(), "Ignored packet"),
 
             _ => {}

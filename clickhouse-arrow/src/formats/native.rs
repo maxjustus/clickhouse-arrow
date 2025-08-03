@@ -38,11 +38,11 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
         // parallel. Even given that it seems like we're 3x faster for single threaded reading?
         // It would still be cool to support parallel reading/deserialization in the future.
         Ok(if let CompressionMethod::None = metadata.compression {
-            Block::read_async(reader, revision, (), state).await?.into_option()
+            Block::read_async(reader, revision, None, state).await?.into_option()
         } else {
             // Stream-decompress all chunks for this packet and read block asynchronously
             let mut decompressor = StreamingDecompressor::new(metadata.compression, reader).await?;
-            Block::read_async(&mut decompressor, revision, (), state).await?.into_option()
+            Block::read_async(&mut decompressor, revision, None, state).await?.into_option()
         })
     }
 
@@ -57,7 +57,7 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
     ) -> Result<()> {
         // No-op: avoid noisy header logs in normal operation
         if let CompressionMethod::None = metadata.compression {
-            data.write_async(writer, revision, header, ())
+            data.write_async(writer, revision, header, Some(metadata))
                 .instrument(trace_span!("serialize_block"))
                 .await
                 .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "(block:uncompressed)"))
@@ -70,7 +70,7 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
                 1 << 20, // 1 MiB chunks (consider exposing via ClientOptions in the future)
             );
             let res = data
-                .write_async(&mut sc, revision, header, ())
+                .write_async(&mut sc, revision, header, Some(metadata))
                 .instrument(trace_span!("serialize_block_streaming"))
                 .await
                 .inspect_err(

@@ -4,7 +4,7 @@ use crate::native::protocol::MAX_STRING_SIZE;
 use crate::{Error, Result};
 
 /// An extension trait on [`AsyncRead`] providing `ClickHouse` specific functionality.
-pub(crate) trait ClickHouseRead: AsyncRead + Unpin + Send + Sync {
+pub trait ClickHouseRead: AsyncRead + Unpin + Send + Sync {
     fn read_var_uint(&mut self) -> impl Future<Output = Result<u64>> + Send + '_;
 
     fn read_string(&mut self) -> impl Future<Output = Result<Vec<u8>>> + Send + '_;
@@ -48,7 +48,7 @@ impl<T: AsyncRead + Unpin + Send + Sync> ClickHouseRead for T {
 }
 
 /// An extension trait on [`AsyncWrite`] providing `ClickHouse` specific functionality.
-pub(crate) trait ClickHouseWrite: AsyncWrite + Unpin + Send + Sync {
+pub trait ClickHouseWrite: AsyncWrite + Unpin + Send + Sync {
     fn write_var_uint(&mut self, value: u64) -> impl Future<Output = Result<()>> + Send + '_;
 
     fn write_string<V: AsRef<[u8]> + Send>(

@@ -85,7 +85,7 @@ impl std::fmt::Display for ClickHouseEngine {
 ///     .with_ttl("1 DAY");
 /// ```
 #[derive(Debug, Default, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct CreateOptions {
     pub engine:                String,
     pub order_by:              Vec<String>,

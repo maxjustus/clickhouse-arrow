@@ -9,6 +9,8 @@ mod int256;
 mod ip;
 #[cfg(feature = "serde")]
 pub mod json;
+#[cfg(feature = "serde")]
+pub mod serde;
 pub mod vec_tuple;
 
 #[cfg(test)]
@@ -35,7 +37,7 @@ use crate::Result;
 /// Types are not strictly/completely preserved (i.e. types `Type::String` and `Type::FixedString`
 /// both are value `Type::String`). Use this if you want dynamically typed queries.
 #[derive(Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub enum Value {
     Int8(i8),
     Int16(i16),
@@ -72,12 +74,16 @@ pub enum Value {
     Enum16(String, i16),
     Array(Vec<Value>),
 
+    // TODO: missing named tuples here? Or actually.. names come from the type, and are not
+    // inherent to the value
     Tuple(Vec<Value>),
 
     Null,
 
     Map(Vec<Value>, Vec<Value>),
 
+    Variant(u8, Box<Value>),     // discriminator and value
+    Dynamic(String, Box<Value>), // type_name and value
     Ipv4(Ipv4),
     Ipv6(Ipv6),
 
@@ -87,6 +93,8 @@ pub enum Value {
     MultiPolygon(MultiPolygon),
 
     Object(Vec<u8>),
+    #[cfg(feature = "serde")]
+    Json(serde_json::Value),
 }
 
 impl PartialEq for Value {
@@ -122,12 +130,18 @@ impl PartialEq for Value {
             (Self::Array(l0), Self::Array(r0)) => l0 == r0,
             (Self::Tuple(l0), Self::Tuple(r0)) => l0 == r0,
             (Self::Map(l0, l1), Self::Map(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::Variant(l0, l1), Self::Variant(r0, r1)) => l0 == r0 && l1 == r1,
             (Self::Ipv4(l0), Self::Ipv4(r0)) => l0 == r0,
             (Self::Ipv6(l0), Self::Ipv6(r0)) => l0 == r0,
             (Self::Point(l0), Self::Point(r0)) => l0 == r0,
             (Self::Ring(l0), Self::Ring(r0)) => l0 == r0,
             (Self::Polygon(l0), Self::Polygon(r0)) => l0 == r0,
             (Self::MultiPolygon(l0), Self::MultiPolygon(r0)) => l0 == r0,
+            (Self::Dynamic(l_type, l_val), Self::Dynamic(r_type, r_val)) => {
+                l_type == r_type && l_val == r_val
+            }
+            #[cfg(feature = "serde")]
+            (Self::Json(l0), Self::Json(r0)) => l0 == r0,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
     }
@@ -185,6 +199,14 @@ impl Hash for Value {
                 ::core::hash::Hash::hash(x, state);
                 ::core::hash::Hash::hash(__self_1, state);
             }
+            Value::Variant(disc, val) => {
+                ::core::hash::Hash::hash(disc, state);
+                ::core::hash::Hash::hash(val, state);
+            }
+            Value::Dynamic(type_name, val) => {
+                ::core::hash::Hash::hash(type_name, state);
+                ::core::hash::Hash::hash(val, state);
+            }
             Value::Ipv4(x) => ::core::hash::Hash::hash(x, state),
             Value::Ipv6(x) => ::core::hash::Hash::hash(x, state),
 
@@ -194,14 +216,70 @@ impl Hash for Value {
             Value::MultiPolygon(x) => ::core::hash::Hash::hash(x, state),
 
             Value::Null => {}
+            #[cfg(feature = "serde")]
+            Value::Json(x) => {
+                // serde_json::Value is not Hash; hash its canonical serialized form
+                // Fallback: serialize; errors are unlikely here; ignore errors by hashing empty
+                if let Ok(bytes) = serde_json::to_vec(x) {
+                    ::core::hash::Hash::hash(&bytes, state);
+                }
+            }
         }
     }
 }
 
 impl Eq for Value {}
 
+/// Helper function to format decimal values with correct decimal point placement
+fn format_decimal(mut value: String, scale: usize) -> String {
+    if scale == 0 {
+        return value;
+    }
+
+    let is_negative = value.starts_with('-');
+    if is_negative {
+        let _ = value.remove(0);
+    }
+
+    // Pad with leading zeros if needed
+    while value.len() <= scale {
+        value.insert(0, '0');
+    }
+
+    // Insert decimal point
+    let point_pos = value.len() - scale;
+    value.insert(point_pos, '.');
+
+    // Add negative sign back if needed
+    if is_negative {
+        value.insert(0, '-');
+    }
+
+    value
+}
+
 impl Value {
     pub fn string(value: impl Into<String>) -> Self { Value::String(value.into().into_bytes()) }
+
+    /// Convert a `ClickHouse` Value to JSON representation via the typed serializer.
+    ///
+    /// Uses `guess_type()` as schema when no explicit type is known.
+    ///
+    /// # Errors
+    /// Returns an error if serialization fails.
+    pub fn to_json(&self) -> Result<serde_json::Value> {
+        #[cfg(feature = "serde")]
+        {
+            let t = self.guess_type();
+            let typed = serde::Typed { v: self, t: &t };
+            serde_json::to_value(typed)
+                .map_err(|e| crate::Error::DeserializeError(format!("serde error: {e}")))
+        }
+        #[cfg(not(feature = "serde"))]
+        {
+            Err(crate::Error::DeserializeError("serde feature not enabled".to_string()))
+        }
+    }
 
     /// # Errors
     /// Returns an error if the value is an unsigned integer.
@@ -300,14 +378,101 @@ impl Value {
             Value::Enum8(_, i) => Type::Enum8(vec![(String::new(), *i)]),
             Value::Enum16(_, i) => Type::Enum16(vec![(String::new(), *i)]),
             Value::Array(x) => {
-                Type::Array(Box::new(x.first().map_or(Type::String, Value::guess_type)))
+                if x.is_empty() {
+                    return Type::Array(Box::new(Type::String)); // Default for empty arrays
+                }
+
+                // Check if all elements have the same type
+                let mut types = Vec::new();
+                for value in x {
+                    // Skip NULL values when building variant types
+                    // NULLs are handled specially in Variants and don't contribute to type
+                    // signatures
+                    if !matches!(value, Value::Null) {
+                        let value_type = value.guess_type();
+                        // Check if this type is already in our list
+                        if !types.iter().any(|t| t == &value_type) {
+                            types.push(value_type);
+                        }
+                    }
+                }
+
+                if types.is_empty() {
+                    // Array contains only NULLs - default to String array
+                    Type::Array(Box::new(Type::String))
+                } else if types.len() == 1 {
+                    // Homogeneous array - all non-NULL elements have the same type
+                    Type::Array(Box::new(types.into_iter().next().unwrap()))
+                } else {
+                    // Heterogeneous array - wrap non-NULL types in Variant
+                    // Sort types for consistent ordering
+                    types.sort_by_key(ToString::to_string);
+                    Type::Array(Box::new(Type::Variant(types)))
+                }
             }
             Value::Tuple(values) => Type::Tuple(values.iter().map(Value::guess_type).collect()),
             Value::Null => Type::Nullable(Box::new(Type::String)),
-            Value::Map(k, v) => Type::Map(
-                Box::new(k.first().map_or(Type::String, Value::guess_type)),
-                Box::new(v.first().map_or(Type::String, Value::guess_type)),
-            ),
+            Value::Map(k, v) => {
+                // TODO: the key and value path here.. Can it be simplified?
+                // For keys - check if heterogeneous
+                let key_type = if k.is_empty() {
+                    Type::String
+                } else {
+                    let mut key_types = Vec::new();
+                    for key in k {
+                        // Skip NULL values when building variant types
+                        if !matches!(key, Value::Null) {
+                            let kt = key.guess_type();
+                            if !key_types.iter().any(|t| t == &kt) {
+                                key_types.push(kt);
+                            }
+                        }
+                    }
+                    if key_types.is_empty() {
+                        Type::String // Default if only NULLs
+                    } else if key_types.len() == 1 {
+                        key_types.into_iter().next().unwrap()
+                    } else {
+                        key_types.sort_by_key(ToString::to_string);
+                        Type::Variant(key_types)
+                    }
+                };
+
+                // For values - check if heterogeneous
+                let value_type = if v.is_empty() {
+                    Type::String
+                } else {
+                    let mut value_types = Vec::new();
+                    for val in v {
+                        // Skip NULL values when building variant types
+                        if !matches!(val, Value::Null) {
+                            let vt = val.guess_type();
+                            if !value_types.iter().any(|t| t == &vt) {
+                                value_types.push(vt);
+                            }
+                        }
+                    }
+                    if value_types.is_empty() {
+                        Type::String // Default if only NULLs
+                    } else if value_types.len() == 1 {
+                        value_types.into_iter().next().unwrap()
+                    } else {
+                        value_types.sort_by_key(ToString::to_string);
+                        Type::Variant(value_types)
+                    }
+                };
+
+                Type::Map(Box::new(key_type), Box::new(value_type))
+            }
+            Value::Variant(_, val) => {
+                // For Variant, we can only guess a single-type variant based on the value
+                Type::Variant(vec![val.guess_type()])
+            }
+            Value::Dynamic(_, _val) => {
+                // For Dynamic, we guess a Dynamic type with max_types=None (no limit)
+                // The actual type registry would be determined during serialization
+                Type::Dynamic { max_types: None }
+            }
             Value::Ipv4(_) => Type::Ipv4,
             Value::Ipv6(_) => Type::Ipv6,
 
@@ -316,6 +481,8 @@ impl Value {
             Value::Polygon(_) => Type::Polygon,
             Value::MultiPolygon(_) => Type::MultiPolygon,
             Value::Object(_) => Type::Object,
+            #[cfg(feature = "serde")]
+            Value::Json(_) => Type::Object,
         }
     }
 }
@@ -429,6 +596,7 @@ impl fmt::Display for Value {
                 let chrono_date: chrono::DateTime<Tz> =
                     (*datetime).try_into().map_err(|_| fmt::Error)?;
                 let string = chrono_date.to_rfc3339_opts(SecondsFormat::AutoSi, true);
+                // TODO: get rid of this weird wrapper text
                 write!(f, "parseDateTimeBestEffort('")?;
                 escape_string(f, &string)?;
                 write!(f, "')")
@@ -477,12 +645,25 @@ impl fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
+            Value::Variant(discriminator, value) => {
+                write!(f, "variant({discriminator},{value})")
+            }
+            Value::Dynamic(type_name, value) => {
+                write!(f, "dynamic('{type_name}',{value})")
+            }
             Value::Ipv4(ipv4) => write!(f, "'{ipv4}'"),
             Value::Ipv6(ipv6) => write!(f, "'{ipv6}'"),
             Value::Point(x) => write!(f, "{x:?}"),
             Value::Ring(x) => write!(f, "{x:?}"),
             Value::Polygon(x) => write!(f, "{x:?}"),
             Value::MultiPolygon(x) => write!(f, "{x:?}"),
+            #[cfg(feature = "serde")]
+            Value::Json(v) => {
+                write!(f, "'")?;
+                let s = serde_json::to_string(v).map_err(|_| fmt::Error)?;
+                escape_string(f, &s)?;
+                write!(f, "'")
+            }
             Value::Object(x) => {
                 write!(f, "'")?;
                 let obj_str = std::str::from_utf8(x).ok();

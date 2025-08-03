@@ -6,7 +6,7 @@ use crate::{FromSql, Result, ToSql, Type, Value, i256, unexpected_type};
 
 /// Wrapper type for `ClickHouse` `FixedPoint32` type.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct FixedPoint32<const SCALE: u64>(pub i32);
 
 impl<const SCALE: u64> FixedPoint32<SCALE> {
@@ -43,7 +43,7 @@ impl<const SCALE: u64> From<FixedPoint32<SCALE>> for f64 {
 
 /// Wrapper type for `ClickHouse` `FixedPoint64` type.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct FixedPoint64<const SCALE: u64>(pub i64);
 
 impl<const SCALE: u64> ToSql for FixedPoint64<SCALE> {
@@ -80,7 +80,7 @@ impl<const SCALE: u64> From<FixedPoint64<SCALE>> for f64 {
 
 /// Wrapper type for `ClickHouse` `FixedPoint128` type.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct FixedPoint128<const SCALE: u64>(pub i128);
 
 impl<const SCALE: u64> ToSql for FixedPoint128<SCALE> {
@@ -117,7 +117,7 @@ impl<const SCALE: u64> From<FixedPoint128<SCALE>> for f64 {
 
 /// Wrapper type for `ClickHouse` `FixedPoint256` type.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct FixedPoint256<const SCALE: u64>(pub i256);
 
 impl<const SCALE: u64> FixedPoint256<SCALE> {

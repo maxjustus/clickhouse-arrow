@@ -19,7 +19,6 @@ impl Deserializer for NullableDeserializer {
                 return Err(Error::DeserializeError("Expected Nullable type".to_string()));
             }
         };
-        // Delegate to inner type
         inner_type.deserialize_prefix_async(reader, state).await
     }
 
@@ -43,4 +42,29 @@ impl Deserializer for NullableDeserializer {
 
         Ok(out)
     }
+}
+
+pub(crate) async fn read_with_path<R: ClickHouseRead>(
+    type_: &Type,
+    reader: &mut R,
+    rows: usize,
+    state: &mut DeserializerState,
+    path: &mut Vec<u16>,
+) -> Result<Vec<Value>> {
+    // if mask[i] == 0, item is present
+    let mut mask = vec![0u8; rows];
+    let _ = reader.read_exact(&mut mask).await?;
+
+    path.push(0);
+    let mut out =
+        type_.strip_null().deserialize_column_with_path(reader, rows, state, path).await?;
+    let _ = path.pop();
+
+    for (i, mask) in mask.iter().enumerate() {
+        if *mask != 0 {
+            out[i] = Value::Null;
+        }
+    }
+
+    Ok(out)
 }

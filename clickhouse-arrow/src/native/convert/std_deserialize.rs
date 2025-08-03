@@ -164,6 +164,7 @@ impl FromSql for f64 {
 
 impl FromSql for String {
     fn from_sql(type_: &Type, value: Value) -> Result<Self> {
+        // Accept strings for classic string-like types, Object and JSON
         if !matches!(
             type_,
             Type::String
@@ -171,11 +172,16 @@ impl FromSql for String {
                 | Type::Binary
                 | Type::FixedSizedBinary(_)
                 | Type::Object
+                | Type::JSON { .. }
         ) {
             return Err(unexpected_type(type_));
         }
         match value {
             Value::String(x) | Value::Object(x) => Ok(String::from_utf8(x)?),
+            #[cfg(feature = "serde")]
+            Value::Json(v) => {
+                Ok(serde_json::to_string(&v).map_err(|e| Error::DeserializeError(e.to_string()))?)
+            }
             _ => Err(unexpected_type(type_)),
         }
     }
@@ -275,15 +281,18 @@ impl<T: FromSql + Hash + Eq, Y: FromSql, S: ::std::hash::BuildHasher + Default> 
 #[cfg(feature = "serde")]
 impl FromSql for serde_json::Value {
     fn from_sql(type_: &Type, value: Value) -> Result<Self> {
-        if !matches!(type_, Type::Object | Type::String) {
+        // Allow serde_json::Value for Object, JSON, and raw String carrying JSON text
+        if !matches!(type_, Type::Object | Type::JSON { .. } | Type::String) {
             return Err(unexpected_type(type_));
         }
         match value {
-            Value::Object(x) => {
+            Value::Json(v) => Ok(v),
+            Value::Object(x) | Value::String(x) => {
                 Ok(serde_json::from_slice(&x)
                     .map_err(|e| Error::DeserializeError(e.to_string()))?)
             }
-            _ => Err(unexpected_type(type_)),
+            // For complex JSON structures from JSON columns, use the to_json conversion
+            other => other.to_json().map_err(|e| Error::DeserializeError(e.to_string())),
         }
     }
 }
