@@ -14,7 +14,6 @@ pub use super::types::{
     LIST_ITEM_FIELD_NAME, MAP_FIELD_NAME, STRUCT_KEY_FIELD_NAME, STRUCT_VALUE_FIELD_NAME,
     TUPLE_FIELD_NAME_PREFIX,
 };
-use crate::deserialize::ClickHouseNativeDeserializer;
 use crate::flags::debug_arrow;
 use crate::formats::protocol_data::ProtocolData;
 use crate::formats::{DeserializerState, SerializerState};
@@ -348,7 +347,8 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
                     builders.last_mut().unwrap()
                 };
 
-                type_hint.deserialize_prefix(reader)?;
+                let mut prefix_state = DeserializerState::default();
+                type_hint.deserialize_prefix(reader, &mut prefix_state)?;
                 type_hint
                     .deserialize_arrow(builder, reader, dt, rows, &[], &mut deser.buffer)
                     .inspect_err(|error| error!(?error, ?type_hint, ?field, "deserialize {i}"))?

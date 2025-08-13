@@ -9,6 +9,7 @@ pub(crate) mod object;
 pub(crate) mod sized;
 pub(crate) mod string;
 pub(crate) mod tuple;
+pub(crate) mod utils;
 pub(crate) mod variant;
 
 use super::*;
@@ -36,72 +37,46 @@ impl ClickHouseNativeSerializer for Type {
     ) -> impl Future<Output = Result<()>> + Send + 'a {
         use serialize::*;
         async move {
-            match self {
-                Type::Int8
-                | Type::Int16
-                | Type::Int32
-                | Type::Int64
-                | Type::Int128
-                | Type::Int256
-                | Type::UInt8
-                | Type::UInt16
-                | Type::UInt32
-                | Type::UInt64
-                | Type::UInt128
-                | Type::UInt256
-                | Type::Float32
-                | Type::Float64
-                | Type::Decimal32(_)
-                | Type::Decimal64(_)
-                | Type::Decimal128(_)
-                | Type::Decimal256(_)
-                | Type::Uuid
-                | Type::Date
-                | Type::Date32
-                | Type::DateTime(_)
-                | Type::DateTime64(_, _)
-                | Type::Ipv4
-                | Type::Ipv6
-                | Type::Enum8(_)
-                | Type::Enum16(_) => {
-                    sized::SizedSerializer::write_prefix(self, writer, state).await?;
+            let type_ = match self {
+                Type::Nullable(inner) | Type::Array(inner) => inner,
+                Type::Map(key, value) => &super::map::normalize_map_type(key, value),
+                Type::Tuple(inner) => {
+                    for item in inner {
+                        item.serialize_prefix_async(writer, state).await?;
+                    }
+                    return Ok(());
                 }
-
-                Type::String
-                | Type::FixedSizedString(_)
-                | Type::Binary
-                | Type::FixedSizedBinary(_) => {
-                    string::StringSerializer::write_prefix(self, writer, state).await?;
+                Type::Point => {
+                    for _ in 0..2 {
+                        Type::Float64.serialize_prefix_async(writer, state).await?;
+                    }
+                    return Ok(());
                 }
-
-                Type::Array(_) => array::ArraySerializer::write_prefix(self, writer, state).await?,
-                Type::Tuple(_) => tuple::TupleSerializer::write_prefix(self, writer, state).await?,
-                Type::Point => geo::PointSerializer::write_prefix(self, writer, state).await?,
-                Type::Ring => geo::RingSerializer::write_prefix(self, writer, state).await?,
-                Type::Polygon => geo::PolygonSerializer::write_prefix(self, writer, state).await?,
-                Type::MultiPolygon => {
-                    geo::MultiPolygonSerializer::write_prefix(self, writer, state).await?;
-                }
-                Type::Nullable(_) => {
-                    nullable::NullableSerializer::write_prefix(self, writer, state).await?;
-                }
-                Type::Map(_, _) => map::MapSerializer::write_prefix(self, writer, state).await?,
                 Type::LowCardinality(_) => {
                     low_cardinality::LowCardinalitySerializer::write_prefix(self, writer, state)
                         .await?;
+                    return Ok(());
                 }
-                Type::Object => object::ObjectSerializer::write_prefix(self, writer, state).await?,
+                Type::Object => {
+                    object::ObjectSerializer::write_prefix(self, writer, state).await?;
+                    return Ok(());
+                }
                 Type::Variant(_) => {
                     variant::VariantSerializer::write_prefix(self, writer, state).await?;
+                    return Ok(());
                 }
                 Type::Dynamic { .. } => {
                     dynamic::DynamicSerializer::write_prefix(self, writer, state).await?;
+                    return Ok(());
                 }
                 Type::JSON { .. } => {
                     json::JsonSerializer::write_prefix(self, writer, state).await?;
+                    return Ok(());
                 }
-            }
-            Ok(())
+                _ => return Ok(()), // All primitive types do nothing
+            };
+
+            type_.serialize_prefix_async(writer, state).await
         }
         .boxed()
     }

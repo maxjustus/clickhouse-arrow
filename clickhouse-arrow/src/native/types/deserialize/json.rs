@@ -2,9 +2,8 @@ use std::collections::HashMap;
 
 use tokio::io::AsyncReadExt;
 
-use super::{
-    ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type, read_discriminator,
-};
+use super::utils::{build_offsets, parse_type_entry};
+use super::{Deserializer, DeserializerState, Type, read_discriminator};
 use crate::formats::{JsonState as JsonStateData, TypeSpecificState};
 use crate::io::{ClickHouseBytesRead, ClickHouseRead};
 use crate::native::values::Value;
@@ -54,7 +53,7 @@ impl JsonDeserializer {
 
                     // Build offsets
                     let (offsets, row_count_by_type) =
-                        Self::build_offsets(&discriminators, *total_types);
+                        build_offsets(&discriminators, *total_types);
 
                     // Read column data
                     let mut columns = HashMap::new();
@@ -128,7 +127,7 @@ impl JsonDeserializer {
 
                     // Build offsets
                     let (offsets, row_count_by_type) =
-                        Self::build_offsets(&discriminators, *total_types);
+                        build_offsets(&discriminators, *total_types);
 
                     // Read column data
                     let mut columns = HashMap::new();
@@ -200,33 +199,6 @@ impl JsonDeserializer {
     }
 
     /// Parse type entry from bytes
-    fn parse_type_entry(type_name_bytes: Vec<u8>) -> Result<(String, Type)> {
-        let type_name = String::from_utf8(type_name_bytes)
-            .map_err(|e| Error::DeserializeError(format!("Invalid UTF-8 in type name: {e}")))?;
-        let typ = type_name
-            .parse::<Type>()
-            .map_err(|_| Error::DeserializeError(format!("Unknown type: {type_name}")))?;
-        Ok((type_name, typ))
-    }
-
-    /// Build offsets and count rows per type
-    fn build_offsets(
-        discriminators: &[u64],
-        total_types: u64,
-    ) -> (Vec<usize>, HashMap<u64, usize>) {
-        let mut row_count_by_type = HashMap::new();
-        let mut offsets = vec![0; discriminators.len()];
-
-        for (i, &disc) in discriminators.iter().enumerate() {
-            if disc != total_types {
-                let count = row_count_by_type.entry(disc).or_default();
-                offsets[i] = *count;
-                *count += 1;
-            }
-        }
-
-        (offsets, row_count_by_type)
-    }
 
     /// Reconstruct values from columns
     fn reconstruct_path_values(
@@ -323,7 +295,7 @@ impl Deserializer for JsonDeserializer {
             let total_types = reader.read_var_uint().await?;
             let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
             for _ in 0..total_types {
-                types.push(Self::parse_type_entry(reader.read_string().await?)?);
+                types.push(parse_type_entry(reader.read_string().await?)?);
             }
 
             // Read prefixes
@@ -405,12 +377,12 @@ impl JsonDeserializer {
             let total_types = reader.try_get_var_uint()?;
             let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
             for _ in 0..total_types {
-                types.push(Self::parse_type_entry(reader.try_get_string()?.to_vec())?);
+                types.push(parse_type_entry(reader.try_get_string()?.to_vec())?);
             }
 
             // Read prefixes for nested types
             for (_, typ) in &types {
-                typ.deserialize_prefix(reader)?;
+                typ.deserialize_prefix(reader, state)?;
             }
 
             dynamic_data.push((total_types, types));

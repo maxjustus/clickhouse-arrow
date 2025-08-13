@@ -77,3 +77,23 @@ impl Deserializer for ObjectDeserializer {
         }
     }
 }
+
+impl ObjectDeserializer {
+    pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
+        type_: &Type,
+        reader: &mut R,
+        _state: &mut DeserializerState,
+    ) -> Result<()> {
+        match type_ {
+            Type::Object => {
+                let _ = reader.try_get_i8()?;
+            }
+            _ => {
+                return Err(Error::DeserializeError(
+                    "ObjectDeserializer called with non-object type".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}

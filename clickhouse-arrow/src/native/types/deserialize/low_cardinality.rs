@@ -189,3 +189,19 @@ impl Deserializer for LowCardinalityDeserializer {
         ))
     }
 }
+
+impl LowCardinalityDeserializer {
+    pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
+        _type: &Type,
+        reader: &mut R,
+        _state: &mut DeserializerState,
+    ) -> Result<()> {
+        let version = reader.try_get_u64_le()?;
+        if version != LOW_CARDINALITY_VERSION {
+            return Err(Error::DeserializeError(format!(
+                "LowCardinality: invalid low cardinality version: {version}"
+            )));
+        }
+        Ok(())
+    }
+}

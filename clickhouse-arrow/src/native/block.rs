@@ -5,7 +5,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::block_info::BlockInfo;
 use super::protocol::DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION;
-use crate::deserialize::ClickHouseNativeDeserializer;
 use crate::formats::protocol_data::ProtocolData;
 use crate::formats::{DeserializerState, SerializerState, TypeSpecificState};
 use crate::io::{ClickHouseBytesRead, ClickHouseBytesWrite, ClickHouseRead, ClickHouseWrite};
@@ -394,7 +393,7 @@ impl ProtocolData<Self, ()> for Block {
 
             #[allow(clippy::cast_possible_truncation)]
             let mut row_data = if rows > 0 {
-                type_.deserialize_prefix(reader)?;
+                type_.deserialize_prefix(reader, state)?;
                 type_
                     .deserialize_column_sync(reader, rows as usize, state)
                     .inspect_err(|e| error!("deserialize (name {name}): {e}"))?

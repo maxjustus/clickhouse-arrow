@@ -9,9 +9,11 @@ pub(crate) mod object;
 pub(crate) mod sized;
 pub(crate) mod string;
 pub(crate) mod tuple;
+pub(crate) mod utils;
 pub(crate) mod variant;
 
-use super::low_cardinality::LOW_CARDINALITY_VERSION;
+use std::future::Future;
+
 use super::*;
 use crate::io::ClickHouseBytesRead;
 
@@ -37,150 +39,77 @@ macro_rules! read_discriminator {
 }
 pub(crate) use read_discriminator;
 
-// Core protocol parsing
-pub(crate) trait ClickHouseNativeDeserializer {
-    fn deserialize_prefix_async<'a, R: ClickHouseRead>(
-        &'a self,
-        reader: &'a mut R,
-        state: &'a mut DeserializerState,
-    ) -> impl Future<Output = Result<()>> + Send + 'a;
-
-    fn deserialize_prefix<R: ClickHouseBytesRead>(&self, reader: &mut R) -> Result<()>;
-}
-
-impl ClickHouseNativeDeserializer for Type {
-    fn deserialize_prefix_async<'a, R: ClickHouseRead>(
+// Direct implementation on Type - no intermediate abstractions
+impl Type {
+    pub(crate) fn deserialize_prefix_async<'a, R: ClickHouseRead>(
         &'a self,
         reader: &'a mut R,
         state: &'a mut DeserializerState,
     ) -> impl Future<Output = Result<()>> + Send + 'a {
-        use deserialize::*;
-        async move {
+        Box::pin(async move {
+            use deserialize::*;
             match self {
-                Type::Int8
-                | Type::Int16
-                | Type::Int32
-                | Type::Int64
-                | Type::Int128
-                | Type::Int256
-                | Type::UInt8
-                | Type::UInt16
-                | Type::UInt32
-                | Type::UInt64
-                | Type::UInt128
-                | Type::UInt256
-                | Type::Float32
-                | Type::Float64
-                | Type::Decimal32(_)
-                | Type::Decimal64(_)
-                | Type::Decimal128(_)
-                | Type::Decimal256(_)
-                | Type::Uuid
-                | Type::Date
-                | Type::Date32
-                | Type::DateTime(_)
-                | Type::DateTime64(_, _)
-                | Type::Ipv4
-                | Type::Ipv6
-                | Type::Enum8(_)
-                | Type::Enum16(_) => {
-                    sized::SizedDeserializer::read_prefix(self, reader, state).await?;
+                Type::Nullable(inner) | Type::Array(inner) => {
+                    inner.deserialize_prefix_async(reader, state).await
                 }
-
-                Type::String
-                | Type::FixedSizedString(_)
-                | Type::Binary
-                | Type::FixedSizedBinary(_) => {
-                    string::StringDeserializer::read_prefix(self, reader, state).await?;
+                Type::Map(key, value) => {
+                    let nested = super::map::normalize_map_type(key, value);
+                    nested.deserialize_prefix_async(reader, state).await
                 }
-
-                Type::Array(_) => {
-                    array::ArrayDeserializer::read_prefix(self, reader, state).await?;
+                Type::Tuple(types) => {
+                    for t in types {
+                        t.deserialize_prefix_async(reader, state).await?;
+                    }
+                    Ok(())
                 }
-                Type::Tuple(_) => {
-                    tuple::TupleDeserializer::read_prefix(self, reader, state).await?;
-                }
-                Type::Point => geo::PointDeserializer::read_prefix(self, reader, state).await?,
-                Type::Ring => geo::RingDeserializer::read_prefix(self, reader, state).await?,
-                Type::Polygon => geo::PolygonDeserializer::read_prefix(self, reader, state).await?,
-                Type::MultiPolygon => {
-                    geo::MultiPolygonDeserializer::read_prefix(self, reader, state).await?;
-                }
-                Type::Nullable(_) => {
-                    nullable::NullableDeserializer::read_prefix(self, reader, state).await?;
-                }
-                Type::Map(_, _) => map::MapDeserializer::read_prefix(self, reader, state).await?,
                 Type::LowCardinality(_) => {
                     low_cardinality::LowCardinalityDeserializer::read_prefix(self, reader, state)
-                        .await?;
+                        .await
                 }
-                Type::Object => {
-                    object::ObjectDeserializer::read_prefix(self, reader, state).await?;
-                }
+                Type::Object => object::ObjectDeserializer::read_prefix(self, reader, state).await,
                 Type::Variant(_) => {
-                    variant::VariantDeserializer::read_prefix(self, reader, state).await?;
+                    variant::VariantDeserializer::read_prefix(self, reader, state).await
                 }
                 Type::Dynamic { .. } => {
-                    dynamic::DynamicDeserializer::read_prefix(self, reader, state).await?;
+                    dynamic::DynamicDeserializer::read_prefix(self, reader, state).await
                 }
-                Type::JSON { .. } => {
-                    json::JsonDeserializer::read_prefix(self, reader, state).await?;
-                }
+                Type::JSON { .. } => json::JsonDeserializer::read_prefix(self, reader, state).await,
+                _ => Ok(()), // Primitive types have no prefix
             }
-            Ok(())
-        }
-        .boxed()
+        })
     }
 
-    fn deserialize_prefix<R: ClickHouseBytesRead>(&self, reader: &mut R) -> Result<()> {
+    pub(crate) fn deserialize_prefix<R: ClickHouseBytesRead>(
+        &self,
+        reader: &mut R,
+        state: &mut DeserializerState,
+    ) -> Result<()> {
+        use deserialize::*;
         match self {
-            Type::Array(inner) | Type::Nullable(inner) => inner.deserialize_prefix(reader)?,
-            Type::Point => {
-                for _ in 0..2 {
-                    Type::Float64.deserialize_prefix(reader)?;
-                }
-            }
-            Type::LowCardinality(_) => {
-                let version = reader.try_get_u64_le()?;
-                if version != LOW_CARDINALITY_VERSION {
-                    return Err(Error::DeserializeError(format!(
-                        "LowCardinality: invalid low cardinality version: {version}"
-                    )));
-                }
-            }
+            Type::Nullable(inner) | Type::Array(inner) => inner.deserialize_prefix(reader, state),
             Type::Map(key, value) => {
                 let nested = super::map::normalize_map_type(key, value);
-                nested.deserialize_prefix(reader)?;
+                nested.deserialize_prefix(reader, state)
             }
-            Type::Tuple(inner) => {
-                for inner_type in inner {
-                    inner_type.deserialize_prefix(reader)?;
+            Type::Tuple(types) => {
+                for t in types {
+                    t.deserialize_prefix(reader, state)?;
                 }
+                Ok(())
             }
-            Type::Object => {
-                let _ = reader.try_get_i8()?;
+            Type::LowCardinality(_) => {
+                low_cardinality::LowCardinalityDeserializer::read_prefix_sync(self, reader, state)
             }
-            Type::Variant(_) => {
-                variant::VariantDeserializer::read_prefix_sync(self, reader)?;
-            }
+            Type::Object => object::ObjectDeserializer::read_prefix_sync(self, reader, state),
+            Type::Variant(_) => variant::VariantDeserializer::read_prefix_sync(self, reader, state),
             Type::Dynamic { .. } => {
-                dynamic::DynamicDeserializer::read_prefix_sync(
-                    self,
-                    reader,
-                    &mut DeserializerState::default(),
-                )?;
+                dynamic::DynamicDeserializer::read_prefix_sync(self, reader, state)
             }
-            Type::JSON { .. } => {
-                json::JsonDeserializer::read_prefix_sync(
-                    self,
-                    reader,
-                    &mut DeserializerState::default(),
-                )?;
-            }
-            _ => {}
+            Type::JSON { .. } => json::JsonDeserializer::read_prefix_sync(self, reader, state),
+            _ => Ok(()), // Primitive types have no prefix
         }
-        Ok(())
     }
+
 }
 
 // ---

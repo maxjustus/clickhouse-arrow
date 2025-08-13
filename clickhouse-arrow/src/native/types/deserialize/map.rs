@@ -1,6 +1,6 @@
 use tokio::io::AsyncReadExt;
 
-use super::{ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
+use super::{Deserializer, DeserializerState, Type};
 use crate::io::{ClickHouseBytesRead, ClickHouseRead};
 use crate::native::protocol::MAX_STRING_SIZE;
 use crate::native::values::Value;

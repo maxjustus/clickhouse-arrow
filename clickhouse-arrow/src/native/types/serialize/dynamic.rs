@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use tokio::io::AsyncWriteExt;
 use tracing::trace;
 
+use super::utils::{check_complex_type_server_version, write_discriminator_async, write_discriminator_sync};
 use crate::Result;
 use crate::formats::{DynamicState, SerializerState, TypeSpecificState};
 use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
@@ -11,39 +12,6 @@ use crate::native::types::{Type, Value};
 
 const DYNAMIC_VERSION: u64 = 3; // Always use v3 (flattened format)
 
-/// Macro to write discriminator based on size
-macro_rules! write_discriminator {
-    (async $writer:expr, $disc:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => {
-                debug_assert!($disc <= 255);
-                $writer.write_u8(u8::try_from($disc).unwrap()).await?
-            }
-            256..=65535 => {
-                debug_assert!($disc <= 65535);
-                $writer.write_u16_le(u16::try_from($disc).unwrap()).await?
-            }
-            65536..=4_294_967_295_usize => {
-                $writer.write_u32_le(u32::try_from($disc).unwrap()).await?
-            }
-            _ => $writer.write_u64_le($disc).await?,
-        }
-    };
-    (sync $writer:expr, $disc:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => {
-                debug_assert!($disc <= 255);
-                $writer.put_u8(u8::try_from($disc).unwrap())
-            }
-            256..=65535 => {
-                debug_assert!($disc <= 65535);
-                $writer.put_u16_le(u16::try_from($disc).unwrap())
-            }
-            65536..=4_294_967_295_usize => $writer.put_u32_le(u32::try_from($disc).unwrap()),
-            _ => $writer.put_u64_le($disc),
-        }
-    };
-}
 
 /// Handles serialization of Dynamic types
 /// Dynamic is internally represented as a Variant with different serialization versions
@@ -52,14 +20,7 @@ pub(crate) struct DynamicSerializer;
 impl DynamicSerializer {
     /// Check if server supports Dynamic v3
     fn check_server_version(state: &SerializerState) -> Result<()> {
-        if let Some((major, minor, _)) = state.server_version
-            && (major < 25 || (major == 25 && minor < 6))
-        {
-            return Err(crate::Error::SerializeError(format!(
-                "Dynamic type requires ClickHouse server version >= 25.6, got {major}.{minor}"
-            )));
-        }
-        Ok(())
+        check_complex_type_server_version(state, "Dynamic")
     }
 
     /// Get Dynamic serialization version - always v3
@@ -207,7 +168,7 @@ impl DynamicSerializer {
 
         // Write discriminators
         for &disc in &discriminators {
-            write_discriminator!(async writer, disc, total_types);
+            write_discriminator_async(writer, disc, total_types).await?;
         }
 
         // Write column data for each type
@@ -249,7 +210,7 @@ impl DynamicSerializer {
 
         // Write discriminators
         for &disc in &discriminators {
-            write_discriminator!(sync writer, disc, total_types);
+            write_discriminator_sync(writer, disc, total_types);
         }
 
         // Write column data for each type
@@ -490,12 +451,12 @@ mod tests {
     }
 
     // Helper function to write discriminator in an async context with proper error handling
-    async fn write_discriminator_async(
+    async fn write_discriminator_async_test(
         buffer: &mut Vec<u8>,
         disc: u64,
         total_types: usize,
     ) -> Result<()> {
-        write_discriminator!(async buffer, disc, total_types);
+        write_discriminator_async(buffer, disc, total_types).await?;
         Ok(())
     }
 
@@ -507,7 +468,7 @@ mod tests {
                 println!("Testing scenario: {}", stringify!($name));
                 // Test sync discriminator
                 let mut sync_buffer = Vec::new();
-                write_discriminator!(sync &mut sync_buffer, 0, $total_types);
+                write_discriminator_sync(&mut sync_buffer, 0, $total_types);
                 assert_eq!(
                     sync_buffer.len(),
                     $expected_bytes,
@@ -516,7 +477,7 @@ mod tests {
 
                 // Test async discriminator
                 let mut async_buffer = Vec::new();
-                write_discriminator_async(&mut async_buffer, 0, $total_types).await.unwrap();
+                write_discriminator_async_test(&mut async_buffer, 0, $total_types).await.unwrap();
                 assert_eq!(
                     async_buffer.len(),
                     $expected_bytes,
@@ -536,8 +497,8 @@ mod tests {
                 sync_buffer.clear();
                 async_buffer.clear();
 
-                write_discriminator!(sync &mut sync_buffer, max_disc, $total_types);
-                write_discriminator_async(&mut async_buffer, max_disc, $total_types).await.unwrap();
+                write_discriminator_sync(&mut sync_buffer, max_disc, $total_types);
+                write_discriminator_async_test(&mut async_buffer, max_disc, $total_types).await.unwrap();
 
                 assert_eq!(
                     sync_buffer.len(),
@@ -746,12 +707,12 @@ mod tests {
 
         // Test sync
         let mut sync_buffer = Vec::new();
-        write_discriminator!(sync &mut sync_buffer, 0, total_types);
+        write_discriminator_sync(&mut sync_buffer, 0, total_types);
         assert_eq!(sync_buffer.len(), 8, "Sync: Should use u64 for very large total_types");
 
         // Test async
         let mut async_buffer = Vec::new();
-        write_discriminator_async(&mut async_buffer, 0, total_types).await.unwrap();
+        write_discriminator_async_test(&mut async_buffer, 0, total_types).await.unwrap();
         assert_eq!(async_buffer.len(), 8, "Async: Should use u64 for very large total_types");
 
         assert_eq!(sync_buffer, async_buffer, "Sync and async u64 discriminators should match");

@@ -5,7 +5,6 @@ use chrono_tz::Tz;
 use uuid::Uuid;
 
 use super::Type;
-use super::deserialize::ClickHouseNativeDeserializer;
 use super::serialize::ClickHouseNativeSerializer;
 use crate::formats::{DeserializerState, SerializerState};
 use crate::{
@@ -969,9 +968,8 @@ fn roundtrip_sized_enum_types_sync() {
 }
 
 #[test]
-fn test_json_deserialize_prefix_sync_integration() {
-    // This test ensures that JSON types properly call their sync prefix deserializer
-    // in the main dispatch logic in deserialize.rs
+fn test_json_sync_prefix_deserializer() {
+    // Test that JSON types properly call their sync prefix deserializer
     use std::io::Cursor;
 
     let json_type = Type::JSON {
@@ -991,8 +989,36 @@ fn test_json_deserialize_prefix_sync_integration() {
     buffer.extend_from_slice(&[0u8]); // varint 0
 
     let mut reader = Cursor::new(buffer);
+    let mut state = DeserializerState::default();
 
     // This should call json::JsonDeserializer::read_prefix_sync via the dispatcher
-    let result = json_type.deserialize_prefix(&mut reader);
-    assert!(result.is_ok(), "JSON deserialize_prefix_sync should succeed through dispatcher");
+    let result = json_type.deserialize_prefix(&mut reader, &mut state);
+    assert!(result.is_ok(), "JSON deserialize_prefix should succeed");
+}
+
+#[test]
+fn test_dynamic_sync_prefix_deserializer() {
+    // Test that Dynamic types properly call their sync prefix deserializer
+    use std::io::Cursor;
+
+    let dynamic_type = Type::Dynamic { max_types: None };
+
+    // Create a minimal valid Dynamic prefix buffer
+    let mut buffer = Vec::new();
+
+    // Write DYNAMIC_SERIALIZATION_VERSION_3 = 3 (current version)
+    buffer.extend_from_slice(&3u64.to_le_bytes());
+
+    // Write variant count (0 variants for simplicity)
+    buffer.extend_from_slice(&[0u8]); // varint 0
+
+    let mut reader = Cursor::new(buffer);
+    let mut state = DeserializerState::default();
+
+    // This should call dynamic::DynamicDeserializer::read_prefix_sync via the dispatcher
+    let result = dynamic_type.deserialize_prefix(&mut reader, &mut state);
+    if let Err(e) = &result {
+        eprintln!("Dynamic prefix deserialize failed: {e:?}");
+    }
+    assert!(result.is_ok(), "Dynamic deserialize_prefix should succeed");
 }

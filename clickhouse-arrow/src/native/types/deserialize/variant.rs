@@ -4,7 +4,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::Result;
 use crate::io::{ClickHouseBytesRead, ClickHouseRead};
-use crate::native::types::deserialize::{ClickHouseNativeDeserializer, DeserializerState};
+use crate::native::types::deserialize::DeserializerState;
 use crate::native::types::{Type, Value};
 
 const NULL_DISCRIMINATOR: u8 = 0xFF;
@@ -220,13 +220,14 @@ impl VariantDeserializer {
     pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
         type_: &Type,
         reader: &mut R,
+        state: &mut DeserializerState,
     ) -> Result<()> {
         let version = reader.get_u64_le();
         check_version!(version);
 
         // Read prefixes for nested types
         for inner_type in type_.unwrap_variant()? {
-            inner_type.deserialize_prefix(reader)?;
+            inner_type.deserialize_prefix(reader, state)?;
         }
 
         Ok(())
@@ -247,7 +248,6 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
-    use crate::native::types::deserialize::ClickHouseNativeDeserializer;
 
     // Macro for variant value assertions
     macro_rules! assert_variant {
@@ -290,7 +290,7 @@ mod tests {
                 // Test sync path
                 let mut sync_reader = Cursor::new(test_data.clone());
                 let mut sync_state = DeserializerState::default();
-                variant_type.deserialize_prefix(&mut sync_reader).unwrap();
+                variant_type.deserialize_prefix(&mut sync_reader, &mut sync_state).unwrap();
                 let sync_values = VariantDeserializer::read_sync(
                     &variant_type,
                     &mut sync_reader,
@@ -451,8 +451,8 @@ mod tests {
             0, // 42
         ]);
         let mut reader = Cursor::new(data);
-        let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader).unwrap();
+        let mut state: DeserializerState = DeserializerState::default();
+        variant_type.deserialize_prefix(&mut reader, &mut state).unwrap();
         let values =
             VariantDeserializer::read_sync(&variant_type, &mut reader, 3, &mut state).unwrap();
         assert_eq!(values.len(), 3);
@@ -478,8 +478,8 @@ mod tests {
     fn test_variant_multitype_discriminator_order() {
         let (variant_type, data) = create_multitype_test_data();
         let mut reader = Cursor::new(data);
-        let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader).unwrap();
+        let mut state: DeserializerState = DeserializerState::default();
+        variant_type.deserialize_prefix(&mut reader, &mut state).unwrap();
         let values =
             VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
         assert_eq!(values.len(), 5);
@@ -494,8 +494,8 @@ mod tests {
     fn test_variant_multitype_array_handling() {
         let (variant_type, data) = create_multitype_test_data();
         let mut reader = Cursor::new(data);
-        let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader).unwrap();
+        let mut state: DeserializerState = DeserializerState::default();
+        variant_type.deserialize_prefix(&mut reader, &mut state).unwrap();
         let values =
             VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
 
@@ -515,8 +515,8 @@ mod tests {
     fn test_variant_multitype_datetime_handling() {
         let (variant_type, data) = create_multitype_test_data();
         let mut reader = Cursor::new(data);
-        let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader).unwrap();
+        let mut state: DeserializerState = DeserializerState::default();
+        variant_type.deserialize_prefix(&mut reader, &mut state).unwrap();
         let values =
             VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
 

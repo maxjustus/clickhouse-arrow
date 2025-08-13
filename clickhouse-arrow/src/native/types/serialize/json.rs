@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use tokio::io::AsyncWriteExt;
 
+use super::utils::{check_complex_type_server_version, write_discriminator_async, write_discriminator_sync};
 use super::{Serializer, SerializerState, Type};
 use crate::formats::{JsonState, TypeSpecificState};
 use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
@@ -148,49 +149,11 @@ impl JsonData {
     }
 }
 
-/// Macro to write discriminator based on size
-macro_rules! write_discriminator {
-    (async $writer:expr, $disc:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => {
-                debug_assert!($disc <= 255);
-                $writer.write_u8(u8::try_from($disc).unwrap()).await?
-            }
-            256..=65535 => {
-                debug_assert!($disc <= 65535);
-                $writer.write_u16_le(u16::try_from($disc).unwrap()).await?
-            }
-            65536..=4_294_967_295 => $writer.write_u32_le(u32::try_from($disc).unwrap()).await?,
-            _ => $writer.write_u64_le($disc).await?,
-        }
-    };
-    (sync $writer:expr, $disc:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => {
-                debug_assert!($disc <= 255);
-                $writer.put_u8(u8::try_from($disc).unwrap())
-            }
-            256..=65535 => {
-                debug_assert!($disc <= 65535);
-                $writer.put_u16_le(u16::try_from($disc).unwrap())
-            }
-            65536..=4_294_967_295 => $writer.put_u32_le(u32::try_from($disc).unwrap()),
-            _ => $writer.put_u64_le($disc),
-        }
-    };
-}
 
 impl JsonSerializer {
     /// Check if server supports JSON v3
     fn check_server_version(state: &SerializerState) -> Result<()> {
-        if let Some((major, minor, _)) = state.server_version
-            && (major < 25 || (major == 25 && minor < 6))
-        {
-            return Err(Error::SerializeError(format!(
-                "JSON type requires ClickHouse server version >= 25.6, got {major}.{minor}"
-            )));
-        }
-        Ok(())
+        check_complex_type_server_version(state, "JSON")
     }
 
     /// Get the `ClickHouse` type name for a Value
@@ -311,9 +274,9 @@ impl JsonSerializer {
             let type_name = Self::get_value_type_name(value);
             if matches!(value, Value::Null) {
                 // NULL discriminator is total_types
-                write_discriminator!(async writer, total_types, total_types);
+                write_discriminator_async(writer, total_types, total_types as usize).await?;
             } else if let Some(&disc) = type_to_discriminator.get(&type_name) {
-                write_discriminator!(async writer, u64::from(disc), total_types);
+                write_discriminator_async(writer, u64::from(disc), total_types as usize).await?;
             }
         }
         Ok(())
@@ -330,9 +293,9 @@ impl JsonSerializer {
             let type_name = Self::get_value_type_name(value);
             if matches!(value, Value::Null) {
                 // NULL discriminator is total_types
-                write_discriminator!(sync writer, total_types, total_types);
+                write_discriminator_sync(writer, total_types, total_types as usize);
             } else if let Some(&disc) = type_to_discriminator.get(&type_name) {
-                write_discriminator!(sync writer, u64::from(disc), total_types);
+                write_discriminator_sync(writer, u64::from(disc), total_types as usize);
             }
         }
     }
@@ -694,7 +657,6 @@ mod tests {
 
     use super::*;
     use crate::formats::{DeserializerState, SerializerState};
-    use crate::native::types::deserialize::ClickHouseNativeDeserializer;
     use crate::native::types::serialize::ClickHouseNativeSerializer;
 
     /// Helper function to test JSON serialization roundtrip with standard assertions

@@ -1,4 +1,4 @@
-use super::{ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
+use super::{Deserializer, DeserializerState, Type};
 use crate::io::{ClickHouseBytesRead, ClickHouseRead};
 use crate::{Point, Result, Value};
 
