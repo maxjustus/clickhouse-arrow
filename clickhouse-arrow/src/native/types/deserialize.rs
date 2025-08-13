@@ -170,6 +170,13 @@ impl ClickHouseNativeDeserializer for Type {
                     &mut DeserializerState::default(),
                 )?;
             }
+            Type::JSON { .. } => {
+                json::JsonDeserializer::read_prefix_sync(
+                    self,
+                    reader,
+                    &mut DeserializerState::default(),
+                )?;
+            }
             _ => {}
         }
         Ok(())

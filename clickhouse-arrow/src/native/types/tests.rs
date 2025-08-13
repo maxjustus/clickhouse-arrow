@@ -967,3 +967,32 @@ fn roundtrip_sized_enum_types_sync() {
         assert_eq!(values, result.unwrap());
     }
 }
+
+#[test]
+fn test_json_deserialize_prefix_sync_integration() {
+    // This test ensures that JSON types properly call their sync prefix deserializer
+    // in the main dispatch logic in deserialize.rs
+    use std::io::Cursor;
+
+    let json_type = Type::JSON {
+        max_dynamic_paths: None,
+        max_dynamic_types: None,
+        typed_paths:       Vec::default(),
+        skip_paths:        Vec::default(),
+    };
+
+    // Create a minimal valid JSON prefix buffer
+    let mut buffer = Vec::new();
+
+    // Write JSON_OBJECT_VERSION_3 = 3
+    buffer.extend_from_slice(&3u64.to_le_bytes());
+
+    // Write total_paths (0 paths for simplicity)
+    buffer.extend_from_slice(&[0u8]); // varint 0
+
+    let mut reader = Cursor::new(buffer);
+
+    // This should call json::JsonDeserializer::read_prefix_sync via the dispatcher
+    let result = json_type.deserialize_prefix(&mut reader);
+    assert!(result.is_ok(), "JSON deserialize_prefix_sync should succeed through dispatcher");
+}

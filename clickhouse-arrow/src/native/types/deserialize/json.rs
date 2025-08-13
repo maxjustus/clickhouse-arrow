@@ -363,6 +363,70 @@ impl Deserializer for JsonDeserializer {
         Self::read_json_internal_sync(reader, rows, state)
     }
 }
+
+impl JsonDeserializer {
+    pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
+        _type_: &Type,
+        reader: &mut R,
+        state: &mut DeserializerState,
+    ) -> Result<()> {
+        let version = reader.get_u64_le();
+        if version != JSON_OBJECT_VERSION_3 {
+            return Err(Error::DeserializeError(format!(
+                "JSON type requires version 3, got version {version}. Please use ClickHouse \
+                 server >= 25.6"
+            )));
+        }
+
+        // V3 format: just total_paths
+        let total_paths = reader.try_get_var_uint()?;
+
+        // Read path names
+        let mut path_names = Vec::with_capacity(total_paths.try_into().unwrap_or(usize::MAX));
+        for _ in 0..total_paths {
+            let path_bytes = reader.try_get_string()?;
+            let path_name = String::from_utf8(path_bytes.to_vec())
+                .map_err(|e| Error::DeserializeError(format!("Invalid UTF-8 in path: {e}")))?;
+            path_names.push(path_name);
+        }
+
+        // Read Dynamic headers for each path
+        let mut dynamic_data = Vec::with_capacity(path_names.len());
+        for path_name in &path_names {
+            // Read Dynamic version
+            let dyn_version = reader.get_u64_le();
+            if dyn_version != 3 {
+                return Err(Error::DeserializeError(format!(
+                    "Expected Dynamic v3 for path '{path_name}', got {dyn_version}"
+                )));
+            }
+
+            // Read types
+            let total_types = reader.try_get_var_uint()?;
+            let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
+            for _ in 0..total_types {
+                types.push(Self::parse_type_entry(reader.try_get_string()?.to_vec())?);
+            }
+
+            // Read prefixes for nested types
+            for (_, typ) in &types {
+                typ.deserialize_prefix(reader)?;
+            }
+
+            dynamic_data.push((total_types, types));
+        }
+
+        // Store metadata in state
+        state.type_specific = TypeSpecificState::Json(JsonStateData {
+            version:      Some(version),
+            paths:        path_names,
+            path_columns: None,
+            rows:         None,
+            dynamic_data: Some(dynamic_data),
+        });
+        Ok(())
+    }
+}
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -571,4 +635,98 @@ mod tests {
             Value::Tuple(vec![Value::String(b"b".to_vec()), Value::Int32(2)]),
         ]) => serde_json::json!([["a", 1], ["b", 2]]),
     );
+
+    #[test]
+    fn test_json_read_prefix_sync() {
+        use std::io::Cursor;
+
+        use super::*;
+        use crate::formats::{DeserializerState, TypeSpecificState};
+
+        // Test data matching the async version
+        let mut buffer = Vec::new();
+
+        // Write JSON_OBJECT_VERSION_3
+        buffer.extend_from_slice(&JSON_OBJECT_VERSION_3.to_le_bytes());
+
+        // Write total_paths (1 path)
+        buffer.extend_from_slice(&[1u8]); // varint 1
+
+        // Write path name "user.name"
+        let path_name = b"user.name";
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            buffer.extend_from_slice(&[path_name.len() as u8]); // varint length
+        }
+        buffer.extend_from_slice(path_name);
+
+        // Write Dynamic version (3)
+        buffer.extend_from_slice(&3u64.to_le_bytes());
+
+        // Write total_types (1 type)
+        buffer.extend_from_slice(&[1u8]); // varint 1
+
+        // Write type name "String"
+        let type_name = b"String";
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            buffer.extend_from_slice(&[type_name.len() as u8]); // varint length
+        }
+        buffer.extend_from_slice(type_name);
+
+        let mut reader = Cursor::new(buffer);
+        let mut state = DeserializerState::default();
+        let json_type = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       Vec::default(),
+            skip_paths:        Vec::default(),
+        };
+
+        // Test the sync prefix reading
+        let result = JsonDeserializer::read_prefix_sync(&json_type, &mut reader, &mut state);
+        assert!(result.is_ok(), "read_prefix_sync should succeed");
+
+        // Validate state was properly set
+        match &state.type_specific {
+            TypeSpecificState::Json(json_state) => {
+                assert_eq!(json_state.version, Some(JSON_OBJECT_VERSION_3));
+                assert_eq!(json_state.paths, vec!["user.name"]);
+                assert!(json_state.dynamic_data.is_some());
+                let dynamic_data = json_state.dynamic_data.as_ref().unwrap();
+                assert_eq!(dynamic_data.len(), 1);
+                assert_eq!(dynamic_data[0].0, 1); // total_types
+                assert_eq!(dynamic_data[0].1.len(), 1); // types vec
+                assert_eq!(dynamic_data[0].1[0].0, "String"); // type name
+            }
+            _ => panic!("Expected Json state"),
+        }
+    }
+
+    #[test]
+    fn test_json_read_prefix_sync_invalid_version() {
+        use std::io::Cursor;
+
+        use super::*;
+        use crate::formats::DeserializerState;
+
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&2u64.to_le_bytes()); // Invalid version
+
+        let mut reader = Cursor::new(buffer);
+        let mut state = DeserializerState::default();
+        let json_type = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       Vec::default(),
+            skip_paths:        Vec::default(),
+        };
+
+        let result = JsonDeserializer::read_prefix_sync(&json_type, &mut reader, &mut state);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires version 3"));
+    }
+
+    // Note: JSON sync roundtrip testing is handled by the integration test
+    // in src/native/types/tests.rs (roundtrip_complex_types_sync)
 }
