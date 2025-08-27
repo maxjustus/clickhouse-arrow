@@ -383,8 +383,103 @@ impl JsonData {
                 Ok(Value::Decimal128(*scale, scaled as i128))
             }
 
-            // Array handling - pass through
-            (v @ Value::Array(_), Type::Array(_)) => Ok(v),
+            // Array handling - recursively convert elements
+            (Value::Array(elements), Type::Array(target_elem_type)) => {
+                let converted_elements: Result<Vec<Value>> = elements
+                    .into_iter()
+                    .map(|elem| Self::convert_to_type(elem, target_elem_type))
+                    .collect();
+                Ok(Value::Array(converted_elements?))
+            }
+
+            // Tuple handling - convert each element to its corresponding type
+            (Value::Tuple(elements), Type::Tuple(target_types)) => {
+                if elements.len() != target_types.len() {
+                    return Err(Error::SerializeError(format!(
+                        "Tuple length mismatch: got {} elements, expected {}",
+                        elements.len(),
+                        target_types.len()
+                    )));
+                }
+                let converted_elements: Result<Vec<Value>> = elements
+                    .into_iter()
+                    .zip(target_types.iter())
+                    .map(|(elem, target_type)| Self::convert_to_type(elem, target_type))
+                    .collect();
+                Ok(Value::Tuple(converted_elements?))
+            }
+
+            // Array to Tuple conversion - by position
+            (Value::Array(elements), Type::Tuple(target_types)) => {
+                if elements.len() != target_types.len() {
+                    return Err(Error::SerializeError(format!(
+                        "Cannot convert Array to Tuple: length mismatch ({} != {})",
+                        elements.len(),
+                        target_types.len()
+                    )));
+                }
+                let converted_elements: Result<Vec<Value>> = elements
+                    .into_iter()
+                    .zip(target_types.iter())
+                    .map(|(elem, target_type)| Self::convert_to_type(elem, target_type))
+                    .collect();
+                Ok(Value::Tuple(converted_elements?))
+            }
+
+            // Map handling - convert keys and values recursively
+            (Value::Map(keys, values), Type::Map(target_key_type, target_value_type)) => {
+                if keys.len() != values.len() {
+                    return Err(Error::SerializeError(format!(
+                        "Map keys and values length mismatch: {} != {}",
+                        keys.len(),
+                        values.len()
+                    )));
+                }
+                let converted_keys: Result<Vec<Value>> = keys
+                    .into_iter()
+                    .map(|key| Self::convert_to_type(key, target_key_type))
+                    .collect();
+                let converted_values: Result<Vec<Value>> = values
+                    .into_iter()
+                    .map(|value| Self::convert_to_type(value, target_value_type))
+                    .collect();
+                Ok(Value::Map(converted_keys?, converted_values?))
+            }
+
+            // Array of Tuple(K,V) or Array of Array(2) to Map conversion
+            (Value::Array(elements), Type::Map(target_key_type, target_value_type)) => {
+                let mut keys = Vec::with_capacity(elements.len());
+                let mut values = Vec::with_capacity(elements.len());
+
+                for elem in elements {
+                    match elem {
+                        // Handle Tuple(K,V)
+                        Value::Tuple(pair) if pair.len() == 2 => {
+                            let mut pair_iter = pair.into_iter();
+                            let key = pair_iter.next().unwrap();
+                            let value = pair_iter.next().unwrap();
+                            keys.push(Self::convert_to_type(key, target_key_type)?);
+                            values.push(Self::convert_to_type(value, target_value_type)?);
+                        }
+                        // Handle Array[K,V] (JSON arrays become Array not Tuple)
+                        Value::Array(pair) if pair.len() == 2 => {
+                            let mut pair_iter = pair.into_iter();
+                            let key = pair_iter.next().unwrap();
+                            let value = pair_iter.next().unwrap();
+                            keys.push(Self::convert_to_type(key, target_key_type)?);
+                            values.push(Self::convert_to_type(value, target_value_type)?);
+                        }
+                        _ => {
+                            return Err(Error::SerializeError(
+                                "Cannot convert Array to Map: elements must be Tuple(K,V) or \
+                                 Array[K,V]"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+                Ok(Value::Map(keys, values))
+            }
 
             // Handle Nullable types by recursing
             (value, Type::Nullable(inner)) => Self::convert_to_type(value, inner),
@@ -1699,6 +1794,158 @@ mod tests {
         assert_eq!(parsed["str_neg"], -456);
         assert_eq!(parsed["digit_u8_1"], 1);
         assert_eq!(parsed["digit_u8_0"], 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_collection_type_conversions() -> Result<()> {
+        // Test Array element conversions with wrapping
+        let values = vec![
+            Value::String(br#"{"int_array": [256, 512, -1], "nested_array": [[1, 2], [3, 4]], "tuple_data": [100, 3.14, "hello"], "map_data": [["key1", 10], ["key2", 20]]}"#.to_vec()),
+        ];
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![
+                // Array with element conversion (256 wraps to 0 as UInt8)
+                ("int_array".to_string(), Box::new(Type::Array(Box::new(Type::UInt8)))),
+                // Nested array
+                (
+                    "nested_array".to_string(),
+                    Box::new(Type::Array(Box::new(Type::Array(Box::new(Type::Int32))))),
+                ),
+                // Array to Tuple conversion
+                (
+                    "tuple_data".to_string(),
+                    Box::new(Type::Tuple(vec![Type::UInt32, Type::Float32, Type::String])),
+                ),
+                // Array of tuples to Map
+                (
+                    "map_data".to_string(),
+                    Box::new(Type::Map(Box::new(Type::String), Box::new(Type::Int16))),
+                ),
+            ],
+            skip_paths:        vec![],
+        };
+
+        // Serialize
+        let mut output = vec![];
+        let mut ser_state = SerializerState::default();
+        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
+        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
+
+        // Deserialize and verify
+        let mut input = output.as_slice();
+        let mut de_state = DeserializerState::default();
+        type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
+        let result_values = type_.deserialize_column(&mut input, 1, &mut de_state).await?;
+
+        let result = match &result_values[0] {
+            Value::String(s) => {
+                String::from_utf8(s.clone()).map_err(|e| Error::SerializeError(e.to_string()))?
+            }
+            _ => return Err(Error::SerializeError("Expected String value".to_string())),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).map_err(|e| Error::SerializeError(e.to_string()))?;
+
+        // Check Array element conversions with wrapping
+        assert_eq!(parsed["int_array"][0], 0); // 256 wraps to 0 as UInt8
+        assert_eq!(parsed["int_array"][1], 0); // 512 wraps to 0 as UInt8 
+        assert_eq!(parsed["int_array"][2], 255); // -1 wraps to 255 as UInt8
+
+        // Check nested array
+        assert_eq!(parsed["nested_array"][0][0], 1);
+        assert_eq!(parsed["nested_array"][1][1], 4);
+
+        // Check tuple (from array conversion)
+        assert_eq!(parsed["tuple_data"][0], 100);
+        // Float32 has limited precision, check within tolerance
+        assert!((parsed["tuple_data"][1].as_f64().unwrap() - 3.14).abs() < 0.01);
+        assert_eq!(parsed["tuple_data"][2], "hello");
+
+        // Check map (from array of tuples)
+        assert_eq!(parsed["map_data"]["key1"], 10);
+        assert_eq!(parsed["map_data"]["key2"], 20);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_nested_collection_conversions() -> Result<()> {
+        // Test deeply nested collection conversions
+        let values = vec![
+            Value::String(br#"{"array_of_tuples": [[1, "a"], [2, "b"], [3, "c"]], "tuple_of_arrays": [[1, 2, 3], [4.5, 6.7]], "nullable_array": [1, null, 3]}"#.to_vec()),
+        ];
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![
+                // Array of Tuples with type conversion
+                (
+                    "array_of_tuples".to_string(),
+                    Box::new(Type::Array(Box::new(Type::Tuple(vec![Type::UInt16, Type::String])))),
+                ),
+                // Tuple of Arrays
+                (
+                    "tuple_of_arrays".to_string(),
+                    Box::new(Type::Tuple(vec![
+                        Type::Array(Box::new(Type::Int32)),
+                        Type::Array(Box::new(Type::Float32)),
+                    ])),
+                ),
+                // Array with nullable elements
+                (
+                    "nullable_array".to_string(),
+                    Box::new(Type::Array(Box::new(Type::Nullable(Box::new(Type::UInt32))))),
+                ),
+            ],
+            skip_paths:        vec![],
+        };
+
+        // Serialize
+        let mut output = vec![];
+        let mut ser_state = SerializerState::default();
+        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
+        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
+
+        // Deserialize
+        let mut input = output.as_slice();
+        let mut de_state = DeserializerState::default();
+        type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
+        let result_values = type_.deserialize_column(&mut input, 1, &mut de_state).await?;
+
+        let result = match &result_values[0] {
+            Value::String(s) => {
+                String::from_utf8(s.clone()).map_err(|e| Error::SerializeError(e.to_string()))?
+            }
+            _ => return Err(Error::SerializeError("Expected String value".to_string())),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).map_err(|e| Error::SerializeError(e.to_string()))?;
+
+        // Check array of tuples
+        assert_eq!(parsed["array_of_tuples"][0][0], 1);
+        assert_eq!(parsed["array_of_tuples"][0][1], "a");
+        assert_eq!(parsed["array_of_tuples"][2][0], 3);
+        assert_eq!(parsed["array_of_tuples"][2][1], "c");
+
+        // Check tuple of arrays
+        assert_eq!(parsed["tuple_of_arrays"][0][0], 1);
+        assert_eq!(parsed["tuple_of_arrays"][0][2], 3);
+        // Float32 has limited precision, check within tolerance
+        assert!((parsed["tuple_of_arrays"][1][0].as_f64().unwrap() - 4.5).abs() < 0.01);
+        assert!((parsed["tuple_of_arrays"][1][1].as_f64().unwrap() - 6.7).abs() < 0.01);
+
+        // Check nullable array
+        assert_eq!(parsed["nullable_array"][0], 1);
+        assert_eq!(parsed["nullable_array"][1], serde_json::Value::Null);
+        assert_eq!(parsed["nullable_array"][2], 3);
 
         Ok(())
     }

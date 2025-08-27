@@ -388,17 +388,17 @@ impl Deserializer for JsonDeserializer {
 
         // Store metadata in state
         state.type_specific = TypeSpecificState::Json(JsonStateData {
-            version:              Some(version),
-            dynamic_paths:        path_names.clone(),
+            version: Some(version),
+            dynamic_paths: path_names.clone(),
             typed_paths,
             dynamic_path_columns: None,
-            typed_path_columns:   None,
-            rows:                 None,
-            dynamic_data:         Some(dynamic_data),
-            path_dynamic_states:  BTreeMap::new(),
+            typed_path_columns: None,
+            rows: None,
+            dynamic_data: Some(dynamic_data),
+            path_dynamic_states: BTreeMap::new(),
             // Deprecated fields
-            paths:                path_names,
-            path_columns:         None,
+            paths: path_names,
+            path_columns: None,
         });
         Ok(())
     }
@@ -486,17 +486,17 @@ impl JsonDeserializer {
 
         // Store metadata in state
         state.type_specific = TypeSpecificState::Json(JsonStateData {
-            version:              Some(version),
-            dynamic_paths:        path_names.clone(),
+            version: Some(version),
+            dynamic_paths: path_names.clone(),
             typed_paths,
             dynamic_path_columns: None,
-            typed_path_columns:   None,
-            rows:                 None,
-            dynamic_data:         Some(dynamic_data),
-            path_dynamic_states:  BTreeMap::new(),
+            typed_path_columns: None,
+            rows: None,
+            dynamic_data: Some(dynamic_data),
+            path_dynamic_states: BTreeMap::new(),
             // Deprecated fields
-            paths:                path_names,
-            path_columns:         None,
+            paths: path_names,
+            path_columns: None,
         });
         Ok(())
     }
