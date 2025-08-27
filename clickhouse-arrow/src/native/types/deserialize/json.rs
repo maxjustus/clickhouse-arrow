@@ -22,14 +22,19 @@ impl JsonDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (version, path_names, dynamic_data) =
+        let (version, typed_paths, path_names, dynamic_data) =
             if let TypeSpecificState::Json(json_state) = &state.type_specific {
                 let version = json_state.version.ok_or_else(|| {
                     Error::DeserializeError(
                         "JSON version not set. read_prefix must be called first".to_string(),
                     )
                 })?;
-                (version, json_state.paths.clone(), json_state.dynamic_data.clone())
+                (
+                    version,
+                    json_state.typed_paths.clone(),
+                    json_state.dynamic_paths.clone(),
+                    json_state.dynamic_data.clone(),
+                )
             } else {
                 return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
             };
@@ -42,6 +47,16 @@ impl JsonDeserializer {
 
                 // Read values for each path
                 let mut path_values = HashMap::new();
+
+                // First read typed path columns (part of v3 format)
+                for (path_name, type_) in &typed_paths {
+                    // Read prefix for this typed column with a fresh state to avoid conflicts
+                    let mut typed_state = DeserializerState::default();
+                    type_.deserialize_prefix_async(reader, &mut typed_state).await?;
+                    let values = type_.deserialize_column(reader, rows, &mut typed_state).await?;
+                    let old = path_values.insert(path_name.clone(), values);
+                    debug_assert!(old.is_none());
+                }
 
                 for (path_idx, path_name) in path_names.iter().enumerate() {
                     let (total_types, types) = &dynamic_data[path_idx];
@@ -58,7 +73,7 @@ impl JsonDeserializer {
 
                     // Read column data
                     let mut columns = HashMap::new();
-                    for (idx, (_, typ)) in types.iter().enumerate() {
+                    for (idx, (type_name, typ)) in types.iter().enumerate() {
                         let type_idx = idx as u64;
                         if let Some(&count) = row_count_by_type.get(&type_idx)
                             && count > 0
@@ -81,7 +96,13 @@ impl JsonDeserializer {
                     debug_assert!(old.is_none());
                 }
 
-                Self::build_json_objects(&path_names, &path_values, rows)
+                // Build JSON objects with all paths (typed and dynamic)
+                let all_paths: Vec<String> = typed_paths
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .chain(path_names.iter().cloned())
+                    .collect();
+                Self::build_json_objects(&all_paths, &path_values, rows)
             }
             _ => Err(Error::DeserializeError(format!(
                 "JSON type requires version 3, got version {version}. Please use ClickHouse \
@@ -96,14 +117,19 @@ impl JsonDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (version, path_names, dynamic_data) =
+        let (version, typed_paths, path_names, dynamic_data) =
             if let TypeSpecificState::Json(json_state) = &state.type_specific {
                 let version = json_state.version.ok_or_else(|| {
                     Error::DeserializeError(
                         "JSON version not set. read_prefix must be called first".to_string(),
                     )
                 })?;
-                (version, json_state.paths.clone(), json_state.dynamic_data.clone())
+                (
+                    version,
+                    json_state.typed_paths.clone(),
+                    json_state.dynamic_paths.clone(),
+                    json_state.dynamic_data.clone(),
+                )
             } else {
                 return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
             };
@@ -116,6 +142,16 @@ impl JsonDeserializer {
 
                 // Read values for each path
                 let mut path_values = HashMap::new();
+
+                // First read typed path columns (part of v3 format)
+                for (path_name, type_) in &typed_paths {
+                    // Read prefix for this typed column with a fresh state to avoid conflicts
+                    let mut typed_state = DeserializerState::default();
+                    type_.deserialize_prefix(reader)?;
+                    let values = type_.deserialize_column_sync(reader, rows, &mut typed_state)?;
+                    let old = path_values.insert(path_name.clone(), values);
+                    debug_assert!(old.is_none());
+                }
 
                 for (path_idx, path_name) in path_names.iter().enumerate() {
                     let (total_types, types) = &dynamic_data[path_idx];
@@ -155,7 +191,13 @@ impl JsonDeserializer {
                     debug_assert!(old.is_none());
                 }
 
-                Self::build_json_objects(&path_names, &path_values, rows)
+                // Build JSON objects with all paths (typed and dynamic)
+                let all_paths: Vec<String> = typed_paths
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .chain(path_names.iter().cloned())
+                    .collect();
+                Self::build_json_objects(&all_paths, &path_values, rows)
             }
             _ => Err(Error::DeserializeError(format!(
                 "JSON type requires version 3, got version {version}. Please use ClickHouse \
@@ -283,7 +325,7 @@ impl JsonDeserializer {
 
 impl Deserializer for JsonDeserializer {
     async fn read_prefix<R: ClickHouseRead>(
-        _type_: &Type,
+        type_: &Type,
         reader: &mut R,
         state: &mut DeserializerState,
     ) -> Result<()> {
@@ -296,7 +338,17 @@ impl Deserializer for JsonDeserializer {
             )));
         }
 
-        // V3 format: just total_paths
+        // In v3 format, typed paths are NOT in ObjectStructure
+        // They are implicit from the schema passed to the deserializer
+        let typed_paths = match type_ {
+            Type::JSON { typed_paths, .. } => typed_paths
+                .iter()
+                .map(|(name, boxed_type)| (name.clone(), *boxed_type.clone()))
+                .collect(),
+            _ => vec![],
+        };
+
+        // Read dynamic paths from ObjectStructure (V3 format)
         let total_paths = reader.read_var_uint().await?;
 
         // Read path names
@@ -336,12 +388,17 @@ impl Deserializer for JsonDeserializer {
 
         // Store metadata in state
         state.type_specific = TypeSpecificState::Json(JsonStateData {
-            version:             Some(version),
-            paths:               path_names,
-            path_columns:        None,
-            rows:                None,
-            dynamic_data:        Some(dynamic_data),
-            path_dynamic_states: BTreeMap::new(),
+            version:              Some(version),
+            dynamic_paths:        path_names.clone(),
+            typed_paths,
+            dynamic_path_columns: None,
+            typed_path_columns:   None,
+            rows:                 None,
+            dynamic_data:         Some(dynamic_data),
+            path_dynamic_states:  BTreeMap::new(),
+            // Deprecated fields
+            paths:                path_names,
+            path_columns:         None,
         });
         Ok(())
     }
@@ -367,7 +424,7 @@ impl Deserializer for JsonDeserializer {
 
 impl JsonDeserializer {
     pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
-        _type_: &Type,
+        type_: &Type,
         reader: &mut R,
         state: &mut DeserializerState,
     ) -> Result<()> {
@@ -379,7 +436,17 @@ impl JsonDeserializer {
             )));
         }
 
-        // V3 format: just total_paths
+        // In v3 format, typed paths are NOT in ObjectStructure
+        // They are implicit from the schema passed to the deserializer
+        let typed_paths = match type_ {
+            Type::JSON { typed_paths, .. } => typed_paths
+                .iter()
+                .map(|(name, boxed_type)| (name.clone(), *boxed_type.clone()))
+                .collect(),
+            _ => vec![],
+        };
+
+        // Read dynamic paths from ObjectStructure (V3 format)
         let total_paths = reader.try_get_var_uint()?;
 
         // Read path names
@@ -419,12 +486,17 @@ impl JsonDeserializer {
 
         // Store metadata in state
         state.type_specific = TypeSpecificState::Json(JsonStateData {
-            version:             Some(version),
-            paths:               path_names,
-            path_columns:        None,
-            rows:                None,
-            dynamic_data:        Some(dynamic_data),
-            path_dynamic_states: BTreeMap::new(),
+            version:              Some(version),
+            dynamic_paths:        path_names.clone(),
+            typed_paths,
+            dynamic_path_columns: None,
+            typed_path_columns:   None,
+            rows:                 None,
+            dynamic_data:         Some(dynamic_data),
+            path_dynamic_states:  BTreeMap::new(),
+            // Deprecated fields
+            paths:                path_names,
+            path_columns:         None,
         });
         Ok(())
     }
@@ -693,7 +765,7 @@ mod tests {
         match &state.type_specific {
             TypeSpecificState::Json(json_state) => {
                 assert_eq!(json_state.version, Some(JSON_OBJECT_VERSION_3));
-                assert_eq!(json_state.paths, vec!["user.name"]);
+                assert_eq!(json_state.dynamic_paths, vec!["user.name"]);
                 assert!(json_state.dynamic_data.is_some());
                 let dynamic_data = json_state.dynamic_data.as_ref().unwrap();
                 assert_eq!(dynamic_data.len(), 1);

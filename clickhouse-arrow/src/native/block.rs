@@ -213,7 +213,7 @@ impl ProtocolData<Self, ()> for Block {
                 state.type_specific = if matches!(col_type, Type::Dynamic { .. }) {
                     DynamicSerializer::analyze_values(&values)
                 } else if matches!(col_type, Type::JSON { .. }) {
-                    JsonSerializer::analyze_values(&values)?
+                    JsonSerializer::analyze_values(&values, &col_type)?
                 } else {
                     TypeSpecificState::None
                 };
@@ -276,7 +276,7 @@ impl ProtocolData<Self, ()> for Block {
                 state.type_specific = if matches!(col_type, Type::Dynamic { .. }) {
                     DynamicSerializer::analyze_values(&values)
                 } else if matches!(col_type, Type::JSON { .. }) {
-                    JsonSerializer::analyze_values(&values)?
+                    JsonSerializer::analyze_values(&values, &col_type)?
                 } else {
                     TypeSpecificState::None
                 };

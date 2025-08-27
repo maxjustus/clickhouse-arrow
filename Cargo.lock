@@ -856,6 +856,7 @@ dependencies = [
  "parking_lot",
  "paste",
  "pin-project",
+ "regex",
  "rust_decimal",
  "rustc-hash 2.1.1",
  "rustc_version",
