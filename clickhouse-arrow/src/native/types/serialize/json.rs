@@ -6,6 +6,7 @@ use super::{Serializer, SerializerState, Type};
 use crate::formats::{JsonState, TypeSpecificState};
 use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
 use crate::{Error, Result, Value};
+use crate::write_discriminator;
 
 type JsonPathData = (Vec<String>, HashMap<String, Vec<(usize, Value)>>, HashMap<String, u8>);
 
@@ -148,38 +149,6 @@ impl JsonData {
     }
 }
 
-/// Macro to write discriminator based on size
-macro_rules! write_discriminator {
-    (async $writer:expr, $disc:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => {
-                debug_assert!($disc <= 255);
-                $writer.write_u8(u8::try_from($disc).unwrap()).await?
-            }
-            256..=65535 => {
-                debug_assert!($disc <= 65535);
-                $writer.write_u16_le(u16::try_from($disc).unwrap()).await?
-            }
-            65536..=4_294_967_295 => $writer.write_u32_le(u32::try_from($disc).unwrap()).await?,
-            _ => $writer.write_u64_le($disc).await?,
-        }
-    };
-    (sync $writer:expr, $disc:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => {
-                debug_assert!($disc <= 255);
-                $writer.put_u8(u8::try_from($disc).unwrap())
-            }
-            256..=65535 => {
-                debug_assert!($disc <= 65535);
-                $writer.put_u16_le(u16::try_from($disc).unwrap())
-            }
-            65536..=4_294_967_295 => $writer.put_u32_le(u32::try_from($disc).unwrap()),
-            _ => $writer.put_u64_le($disc),
-        }
-    };
-}
-
 impl JsonSerializer {
     /// Check if server supports JSON v3
     fn check_server_version(state: &SerializerState) -> Result<()> {
@@ -193,26 +162,6 @@ impl JsonSerializer {
         Ok(())
     }
 
-    /// Get the `ClickHouse` type name for a Value
-    fn get_value_type_name(value: &Value) -> String {
-        match value {
-            Value::Int8(_) => "Int8".to_string(),
-            Value::Int16(_) => "Int16".to_string(),
-            Value::Int32(_) => "Int32".to_string(),
-            Value::Int64(_) => "Int64".to_string(),
-            Value::Int128(_) => "Int128".to_string(),
-            Value::Int256(_) => "Int256".to_string(),
-            Value::UInt8(_) => "UInt8".to_string(),
-            Value::UInt16(_) => "UInt16".to_string(),
-            Value::UInt32(_) => "UInt32".to_string(),
-            Value::UInt64(_) => "UInt64".to_string(),
-            Value::UInt128(_) => "UInt128".to_string(),
-            Value::UInt256(_) => "UInt256".to_string(),
-            Value::Float32(_) => "Float32".to_string(),
-            Value::Float64(_) => "Float64".to_string(),
-            _ => "String".to_string(), // Nulls, strings, and complex types use String
-        }
-    }
 
     /// Build type map from column values
     fn build_type_map(column_values: &[Value]) -> (Vec<String>, HashMap<String, Vec<Value>>) {
@@ -220,7 +169,7 @@ impl JsonSerializer {
 
         for value in column_values {
             if !matches!(value, Value::Null) {
-                let type_name = Self::get_value_type_name(value);
+                let type_name = value.guess_type().to_string();
                 type_map.entry(type_name).or_default().push(value.clone());
             }
         }
@@ -278,7 +227,7 @@ impl JsonSerializer {
 
         for (idx, value) in column_values.iter().enumerate() {
             if !matches!(value, Value::Null) {
-                let type_name = Self::get_value_type_name(value);
+                let type_name = value.guess_type().to_string();
                 type_map.entry(type_name).or_default().push((idx, value.clone()));
             }
         }
@@ -308,12 +257,12 @@ impl JsonSerializer {
         writer: &mut W,
     ) -> Result<()> {
         for value in column_values {
-            let type_name = Self::get_value_type_name(value);
+            let type_name = value.guess_type().to_string();
             if matches!(value, Value::Null) {
                 // NULL discriminator is total_types
-                write_discriminator!(async writer, total_types, total_types);
+                write_discriminator!(async writer, total_types, total_types as usize);
             } else if let Some(&disc) = type_to_discriminator.get(&type_name) {
-                write_discriminator!(async writer, u64::from(disc), total_types);
+                write_discriminator!(async writer, u64::from(disc), total_types as usize);
             }
         }
         Ok(())
@@ -327,12 +276,12 @@ impl JsonSerializer {
         writer: &mut W,
     ) {
         for value in column_values {
-            let type_name = Self::get_value_type_name(value);
+            let type_name = value.guess_type().to_string();
             if matches!(value, Value::Null) {
                 // NULL discriminator is total_types
-                write_discriminator!(sync writer, total_types, total_types);
+                write_discriminator!(sync writer, total_types, total_types as usize);
             } else if let Some(&disc) = type_to_discriminator.get(&type_name) {
-                write_discriminator!(sync writer, u64::from(disc), total_types);
+                write_discriminator!(sync writer, u64::from(disc), total_types as usize);
             }
         }
     }

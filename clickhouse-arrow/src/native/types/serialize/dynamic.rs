@@ -8,42 +8,9 @@ use crate::formats::{DynamicState, SerializerState, TypeSpecificState};
 use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
 use crate::native::types::serialize::ClickHouseNativeSerializer;
 use crate::native::types::{Type, Value};
+use crate::write_discriminator;
 
 const DYNAMIC_VERSION: u64 = 3; // Always use v3 (flattened format)
-
-/// Macro to write discriminator based on size
-macro_rules! write_discriminator {
-    (async $writer:expr, $disc:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => {
-                debug_assert!($disc <= 255);
-                $writer.write_u8(u8::try_from($disc).unwrap()).await?
-            }
-            256..=65535 => {
-                debug_assert!($disc <= 65535);
-                $writer.write_u16_le(u16::try_from($disc).unwrap()).await?
-            }
-            65536..=4_294_967_295_usize => {
-                $writer.write_u32_le(u32::try_from($disc).unwrap()).await?
-            }
-            _ => $writer.write_u64_le($disc).await?,
-        }
-    };
-    (sync $writer:expr, $disc:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => {
-                debug_assert!($disc <= 255);
-                $writer.put_u8(u8::try_from($disc).unwrap())
-            }
-            256..=65535 => {
-                debug_assert!($disc <= 65535);
-                $writer.put_u16_le(u16::try_from($disc).unwrap())
-            }
-            65536..=4_294_967_295_usize => $writer.put_u32_le(u32::try_from($disc).unwrap()),
-            _ => $writer.put_u64_le($disc),
-        }
-    };
-}
 
 /// Handles serialization of Dynamic types
 /// Dynamic is internally represented as a Variant with different serialization versions

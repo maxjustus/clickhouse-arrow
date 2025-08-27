@@ -1,4 +1,5 @@
 pub(crate) mod array;
+pub(crate) mod discriminator;
 pub mod dynamic;
 pub(crate) mod geo;
 pub(crate) mod json;
