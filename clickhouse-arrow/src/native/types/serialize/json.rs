@@ -1,20 +1,17 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use tokio::io::AsyncWriteExt;
 
+use super::dynamic::DynamicSerializer;
 use super::{Serializer, SerializerState, Type};
 use crate::formats::{JsonState, TypeSpecificState};
 use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
 use crate::{Error, Result, Value};
-use crate::write_discriminator;
-
-type JsonPathData = (Vec<String>, HashMap<String, Vec<(usize, Value)>>, HashMap<String, u8>);
 
 pub(crate) struct JsonSerializer;
 
 // JSON serialization versions from ClickHouse
 const JSON_OBJECT_SERIALIZATION_VERSION: u64 = 3;
-const DYNAMIC_VERSION: u64 = 3;
 
 // JSON v3 object serialization is now supported via thread-local caching
 // The implementation follows the same pattern as Dynamic type serialization:
@@ -137,8 +134,15 @@ impl JsonData {
                 }
             }
             serde_json::Value::String(s) => Value::String(s.as_bytes().to_vec()),
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                // For complex types, serialize back to JSON string
+            serde_json::Value::Array(arr) => {
+                // Convert array elements recursively to preserve structure
+                let elements: Result<Vec<Value>> =
+                    arr.iter().map(Self::json_value_to_clickhouse_value).collect();
+                Value::Array(elements?)
+            }
+            serde_json::Value::Object(_) => {
+                // For objects at leaf positions, serialize back to JSON string
+                // (Objects should have been recursed through already)
                 let json_str = serde_json::to_string(json_value).map_err(|e| {
                     Error::SerializeError(format!("Failed to serialize JSON value: {e}"))
                 })?;
@@ -161,235 +165,6 @@ impl JsonSerializer {
         }
         Ok(())
     }
-
-
-    /// Build type map from column values
-    fn build_type_map(column_values: &[Value]) -> (Vec<String>, HashMap<String, Vec<Value>>) {
-        let mut type_map: HashMap<String, Vec<Value>> = HashMap::new();
-
-        for value in column_values {
-            if !matches!(value, Value::Null) {
-                let type_name = value.guess_type().to_string();
-                type_map.entry(type_name).or_default().push(value.clone());
-            }
-        }
-
-        // Type names (sorted for consistency)
-        let mut type_names: Vec<String> = type_map.keys().cloned().collect();
-        type_names.sort();
-
-        (type_names, type_map)
-    }
-
-    /// Write Dynamic column header for a column with given values (async)
-    async fn write_dynamic_header_for_column_async<W: ClickHouseWrite>(
-        column_values: &[Value],
-        writer: &mut W,
-    ) -> Result<()> {
-        let (type_names, type_map) = Self::build_type_map(column_values);
-
-        // Write Dynamic header for this path
-        writer.write_u64_le(DYNAMIC_VERSION).await?;
-        writer.write_var_uint(type_map.len() as u64).await?;
-
-        for type_name in &type_names {
-            writer.write_string(type_name.as_bytes().to_vec()).await?;
-        }
-
-        // Basic types don't need prefix serialization in Dynamic v3 format
-        // Only complex types that implement CustomSerialization need prefixes
-        Ok(())
-    }
-
-    /// Write Dynamic column header for a column with given values (sync)
-    fn write_dynamic_header_for_column_sync<W: ClickHouseBytesWrite>(
-        column_values: &[Value],
-        writer: &mut W,
-    ) -> Result<()> {
-        let (type_names, type_map) = Self::build_type_map(column_values);
-
-        // Write Dynamic header for this path
-        writer.put_u64_le(DYNAMIC_VERSION);
-        writer.put_var_uint(type_map.len() as u64)?;
-
-        for type_name in &type_names {
-            writer.put_string(type_name.as_bytes())?;
-        }
-
-        // Basic types don't need prefix serialization in Dynamic v3 format
-        // Only complex types that implement CustomSerialization need prefixes
-        Ok(())
-    }
-
-    /// Group values by type and build discriminator mapping
-    fn group_values_by_type(column_values: &[Value]) -> JsonPathData {
-        let mut type_map: HashMap<String, Vec<(usize, Value)>> = HashMap::new();
-
-        for (idx, value) in column_values.iter().enumerate() {
-            if !matches!(value, Value::Null) {
-                let type_name = value.guess_type().to_string();
-                type_map.entry(type_name).or_default().push((idx, value.clone()));
-            }
-        }
-
-        // Sort type names alphabetically to match prefix phase ordering
-        let mut type_names: Vec<String> = type_map.keys().cloned().collect();
-        type_names.sort();
-
-        // Create discriminator mapping based on alphabetical order
-        let type_to_discriminator: HashMap<String, u8> = type_names
-            .iter()
-            .enumerate()
-            .map(|(idx, name)| {
-                debug_assert!(idx <= 255, "Too many types for u8 discriminator");
-                (name.clone(), u8::try_from(idx).unwrap())
-            })
-            .collect();
-
-        (type_names, type_map, type_to_discriminator)
-    }
-
-    /// Write discriminators for column values (async version)
-    async fn write_discriminators_internal_async<W: ClickHouseWrite>(
-        column_values: &[Value],
-        type_to_discriminator: &HashMap<String, u8>,
-        total_types: u64,
-        writer: &mut W,
-    ) -> Result<()> {
-        for value in column_values {
-            let type_name = value.guess_type().to_string();
-            if matches!(value, Value::Null) {
-                // NULL discriminator is total_types
-                write_discriminator!(async writer, total_types, total_types as usize);
-            } else if let Some(&disc) = type_to_discriminator.get(&type_name) {
-                write_discriminator!(async writer, u64::from(disc), total_types as usize);
-            }
-        }
-        Ok(())
-    }
-
-    /// Write discriminators for column values (sync version)
-    fn write_discriminators_internal_sync<W: ClickHouseBytesWrite>(
-        column_values: &[Value],
-        type_to_discriminator: &HashMap<String, u8>,
-        total_types: u64,
-        writer: &mut W,
-    ) {
-        for value in column_values {
-            let type_name = value.guess_type().to_string();
-            if matches!(value, Value::Null) {
-                // NULL discriminator is total_types
-                write_discriminator!(sync writer, total_types, total_types as usize);
-            } else if let Some(&disc) = type_to_discriminator.get(&type_name) {
-                write_discriminator!(sync writer, u64::from(disc), total_types as usize);
-            }
-        }
-    }
-
-    /// Write column data for typed values (async version)
-    async fn write_typed_columns_internal_async<W: ClickHouseWrite>(
-        type_names: &[String],
-        type_map: &HashMap<String, Vec<(usize, Value)>>,
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        for type_name in type_names {
-            if let Some(values_with_idx) = type_map.get(type_name)
-                && !values_with_idx.is_empty()
-            {
-                let typ: Type = type_name.parse().map_err(|_| {
-                    Error::SerializeError(format!("Invalid type name: {type_name}"))
-                })?;
-
-                let values: Vec<Value> = values_with_idx.iter().map(|(_, v)| v.clone()).collect();
-
-                // Special handling to avoid recursion - JSON type should not appear here
-                if matches!(typ, Type::JSON { .. }) {
-                    return Err(Error::SerializeError(
-                        "JSON type cannot be nested within JSON paths".to_string(),
-                    ));
-                }
-
-                typ.serialize_column(values, writer, state).await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Write column data for typed values (sync version)
-    fn write_typed_columns_internal_sync<W: ClickHouseBytesWrite>(
-        type_names: &[String],
-        type_map: &HashMap<String, Vec<(usize, Value)>>,
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        for type_name in type_names {
-            if let Some(values_with_idx) = type_map.get(type_name)
-                && !values_with_idx.is_empty()
-            {
-                let typ: Type = type_name.parse().map_err(|_| {
-                    Error::SerializeError(format!("Invalid type name: {type_name}"))
-                })?;
-
-                let values: Vec<Value> = values_with_idx.iter().map(|(_, v)| v.clone()).collect();
-
-                // Special handling to avoid recursion - JSON type should not appear here
-                if matches!(typ, Type::JSON { .. }) {
-                    return Err(Error::SerializeError(
-                        "JSON type cannot be nested within JSON paths".to_string(),
-                    ));
-                }
-
-                typ.serialize_column_sync(values, writer, state)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Write Dynamic column data (discriminators + column data) - async version
-    async fn write_dynamic_column_data_internal_async<W: ClickHouseWrite>(
-        column_values: &[Value],
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        let (type_names, type_map, type_to_discriminator) =
-            Self::group_values_by_type(column_values);
-        let total_types = type_names.len() as u64;
-
-        // Write discriminators for each row
-        Self::write_discriminators_internal_async(
-            column_values,
-            &type_to_discriminator,
-            total_types,
-            writer,
-        )
-        .await?;
-
-        // Write column data for each type (in alphabetical order)
-        Self::write_typed_columns_internal_async(&type_names, &type_map, writer, state).await
-    }
-
-    /// Write Dynamic column data (discriminators + column data) - sync version
-    fn write_dynamic_column_data_internal_sync<W: ClickHouseBytesWrite>(
-        column_values: &[Value],
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        let (type_names, type_map, type_to_discriminator) =
-            Self::group_values_by_type(column_values);
-        let total_types = type_names.len() as u64;
-
-        // Write discriminators for each row
-        Self::write_discriminators_internal_sync(
-            column_values,
-            &type_to_discriminator,
-            total_types,
-            writer,
-        );
-
-        // Write column data for each type (in alphabetical order)
-        Self::write_typed_columns_internal_sync(&type_names, &type_map, writer, state)
-    }
 }
 
 impl JsonSerializer {
@@ -403,11 +178,12 @@ impl JsonSerializer {
         paths.sort(); // Ensure consistent ordering
 
         let state = JsonState {
-            version:      None, // Will be set properly in write_prefix
-            paths:        paths.clone(),
-            path_columns: Some(json_data.path_columns),
-            rows:         Some(json_data.rows),
-            dynamic_data: None,
+            version:             None, // Will be set properly in write_prefix
+            paths:               paths.clone(),
+            path_columns:        Some(json_data.path_columns),
+            rows:                Some(json_data.rows),
+            dynamic_data:        None,
+            path_dynamic_states: Default::default(), // Will be filled in write_prefix
         };
 
         Ok(TypeSpecificState::Json(state))
@@ -481,14 +257,32 @@ impl JsonSerializer {
         // Retrieve metadata from state
         if let TypeSpecificState::Json(json_state) = &state.type_specific {
             // Write paths header
-            Self::write_paths_header_sync(&json_state.paths, version, writer)?;
+            let paths = json_state.paths.clone();
+            let path_columns = json_state.path_columns.clone();
+            Self::write_paths_header_sync(&paths, version, writer)?;
 
-            // Write Dynamic column headers for each path
-            if let Some(path_columns) = &json_state.path_columns {
-                for path in &json_state.paths {
-                    if let Some(column_values) = path_columns.get(path) {
-                        Self::write_dynamic_header_for_column_sync(column_values, writer)?;
+            // Write Dynamic column headers for each path and store states
+            if let Some(path_columns) = path_columns {
+                // Create a map to store Dynamic states
+                let mut path_dynamic_states = BTreeMap::new();
+
+                for path in paths {
+                    if let Some(column_values) = path_columns.get(&path) {
+                        let dynamic_state = DynamicSerializer::write_dynamic_header_sync(
+                            column_values,
+                            writer,
+                            state,
+                        )?;
+                        // Store the Dynamic state for this path
+                        if let TypeSpecificState::Dynamic(dyn_state) = dynamic_state {
+                            drop(path_dynamic_states.insert(path, dyn_state));
+                        }
                     }
+                }
+
+                // Now update the state with all the dynamic states
+                if let TypeSpecificState::Json(json_state_mut) = &mut state.type_specific {
+                    json_state_mut.path_dynamic_states = path_dynamic_states;
                 }
             }
         } else {
@@ -523,14 +317,33 @@ impl Serializer for JsonSerializer {
         // Retrieve metadata from state
         if let TypeSpecificState::Json(json_state) = &state.type_specific {
             // Write paths header
-            Self::write_paths_header_async(&json_state.paths, version, writer).await?;
+            let paths = json_state.paths.clone();
+            let path_columns = json_state.path_columns.clone();
+            Self::write_paths_header_async(&paths, version, writer).await?;
 
-            // Write Dynamic column headers for each path
-            if let Some(path_columns) = &json_state.path_columns {
-                for path in &json_state.paths {
-                    if let Some(column_values) = path_columns.get(path) {
-                        Self::write_dynamic_header_for_column_async(column_values, writer).await?;
+            // Write Dynamic column headers for each path and store states
+            if let Some(path_columns) = path_columns {
+                // Create a map to store Dynamic states
+                let mut path_dynamic_states = BTreeMap::new();
+
+                for path in paths {
+                    if let Some(column_values) = path_columns.get(&path) {
+                        let dynamic_state = DynamicSerializer::write_dynamic_header_async(
+                            column_values,
+                            writer,
+                            state,
+                        )
+                        .await?;
+                        // Store the Dynamic state for this path
+                        if let TypeSpecificState::Dynamic(dyn_state) = dynamic_state {
+                            drop(path_dynamic_states.insert(path, dyn_state));
+                        }
                     }
+                }
+
+                // Now update the state with all the dynamic states
+                if let TypeSpecificState::Json(json_state_mut) = &mut state.type_specific {
+                    json_state_mut.path_dynamic_states = path_dynamic_states;
                 }
             }
         } else {
@@ -573,10 +386,30 @@ impl Serializer for JsonSerializer {
             };
 
         // Write data for each path (using Dynamic column format)
+        let path_dynamic_states = if let TypeSpecificState::Json(json_state) = &state.type_specific
+        {
+            json_state.path_dynamic_states.clone()
+        } else {
+            Default::default()
+        };
+
         for path in &paths {
             if let Some(column_values) = path_columns.get(path) {
-                Self::write_dynamic_column_data_internal_async(column_values, writer, state)
+                if let Some(dynamic_state) = path_dynamic_states.get(path) {
+                    // Use the stored Dynamic state for this path
+                    DynamicSerializer::write_dynamic_data_async(
+                        column_values,
+                        writer,
+                        state,
+                        TypeSpecificState::Dynamic(dynamic_state.clone()),
+                    )
                     .await?;
+                } else {
+                    return Err(Error::SerializeError(format!(
+                        "Dynamic state not found for path: {}",
+                        path
+                    )));
+                }
             }
         }
 
@@ -619,9 +452,29 @@ impl Serializer for JsonSerializer {
             };
 
         // Write data for each path (using Dynamic column format)
+        let path_dynamic_states = if let TypeSpecificState::Json(json_state) = &state.type_specific
+        {
+            json_state.path_dynamic_states.clone()
+        } else {
+            Default::default()
+        };
+
         for path in &paths {
             if let Some(column_values) = path_columns.get(path) {
-                Self::write_dynamic_column_data_internal_sync(column_values, writer, state)?;
+                if let Some(dynamic_state) = path_dynamic_states.get(path) {
+                    // Use the stored Dynamic state for this path
+                    DynamicSerializer::write_dynamic_data_sync(
+                        column_values,
+                        writer,
+                        state,
+                        TypeSpecificState::Dynamic(dynamic_state.clone()),
+                    )?;
+                } else {
+                    return Err(Error::SerializeError(format!(
+                        "Dynamic state not found for path: {}",
+                        path
+                    )));
+                }
             }
         }
 

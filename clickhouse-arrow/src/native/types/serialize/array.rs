@@ -24,8 +24,9 @@ fn wrap_heterogeneous_elements(elements: &[Value], variant_types: &[Type]) -> Re
 
             if let Some(&discriminator) = type_map.get(&type_string) {
                 // Wrap in Variant with correct discriminator
-                let disc_u8 = u8::try_from(discriminator)
-                    .map_err(|_| Error::SerializeError(format!("Discriminator {discriminator} too large for u8")))?;
+                let disc_u8 = u8::try_from(discriminator).map_err(|_| {
+                    Error::SerializeError(format!("Discriminator {discriminator} too large for u8"))
+                })?;
                 wrapped.push(Value::Variant(disc_u8, Box::new(element.clone())));
             } else {
                 return Err(Error::SerializeError(format!(

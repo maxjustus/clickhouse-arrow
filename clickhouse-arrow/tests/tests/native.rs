@@ -65,6 +65,20 @@ pub async fn test_json_round_trip(ch: Arc<ClickHouseContainer>) {
         .expect("JSON round trip failed");
 }
 
+/// Tests JSON with arrays round-trip serialization.
+///
+/// # Panics
+/// Panics if the JSON array round trip test fails.
+pub async fn test_json_arrays(ch: Arc<ClickHouseContainer>) {
+    let harness = NativeRoundtripTestHarness::new(&ch).with_v3_format();
+    let block = generate_json_array_test_block();
+
+    harness
+        .run_native_roundtrip_test("test_json_arrays", &block)
+        .await
+        .expect("JSON array round trip failed");
+}
+
 /// Tests mixed dynamic and JSON type round-trip serialization.
 ///
 /// # Panics
@@ -91,4 +105,18 @@ pub async fn test_evil_heterogeneous_dynamic(ch: Arc<ClickHouseContainer>) {
         .run_native_roundtrip_test("test_evil_heterogeneous_dynamic", &block)
         .await
         .expect("Evil heterogeneous dynamic round trip failed");
+}
+
+/// Tests evil heterogeneous arrays in JSON type round-trip serialization.
+///
+/// # Panics
+/// Panics if the evil heterogeneous JSON round trip test fails.
+pub async fn test_evil_heterogeneous_json(ch: Arc<ClickHouseContainer>) {
+    let harness = NativeRoundtripTestHarness::new(&ch).with_v3_format();
+    let block = generate_evil_heterogeneous_json_test_block();
+
+    harness
+        .run_native_roundtrip_test("test_evil_heterogeneous_json", &block)
+        .await
+        .expect("Evil heterogeneous JSON round trip failed");
 }

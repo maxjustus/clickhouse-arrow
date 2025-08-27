@@ -21,6 +21,10 @@ e2e_test!(e2e_native_dynamic, tests::native::test_dynamic_round_trip, TRACING_DI
 #[cfg(feature = "derive")]
 e2e_test!(e2e_native_json, tests::native::test_json_round_trip, TRACING_DIRECTIVES, None);
 
+// Test JSON with arrays e2e
+#[cfg(feature = "derive")]
+e2e_test!(e2e_native_json_arrays, tests::native::test_json_arrays, TRACING_DIRECTIVES, None);
+
 // Test mixed Dynamic and JSON e2e
 #[cfg(feature = "derive")]
 e2e_test!(
@@ -35,6 +39,15 @@ e2e_test!(
 e2e_test!(
     e2e_native_evil_heterogeneous,
     tests::native::test_evil_heterogeneous_dynamic,
+    TRACING_DIRECTIVES,
+    None
+);
+
+// Test evil heterogeneous arrays in JSON e2e
+#[cfg(feature = "derive")]
+e2e_test!(
+    e2e_native_evil_heterogeneous_json,
+    tests::native::test_evil_heterogeneous_json,
     TRACING_DIRECTIVES,
     None
 );

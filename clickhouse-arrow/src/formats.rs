@@ -126,11 +126,13 @@ pub struct DynamicState {
 /// Metadata for JSON type
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JsonState {
-    pub version:      Option<u64>,
-    pub paths:        Vec<String>,
-    pub path_columns: Option<BTreeMap<String, Vec<Value>>>,
-    pub rows:         Option<usize>,
-    pub dynamic_data: Option<DynamicTypeData>,
+    pub version:             Option<u64>,
+    pub paths:               Vec<String>,
+    pub path_columns:        Option<BTreeMap<String, Vec<Value>>>,
+    pub rows:                Option<usize>,
+    pub dynamic_data:        Option<DynamicTypeData>,
+    /// Dynamic states for each path (filled during write_prefix)
+    pub path_dynamic_states: BTreeMap<String, DynamicState>,
 }
 
 /// Enum to hold type-specific state

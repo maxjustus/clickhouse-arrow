@@ -550,6 +550,33 @@ pub fn generate_json_test_block() -> Block {
     }
 }
 
+pub fn generate_json_array_test_block() -> Block {
+    let rows = vec![
+        // Homogeneous array of integers
+        Value::String(br#"{"numbers": [1, 2, 3, 4, 5]}"#.to_vec()),
+        // Heterogeneous array with mixed types
+        Value::String(br#"{"mixed": [1, "hello", 3.14, null, true]}"#.to_vec()),
+        // Nested arrays
+        Value::String(br#"{"nested": [[1, 2], [3, 4], [5, 6]]}"#.to_vec()),
+        // Empty arrays
+        Value::String(br#"{"empty": []}"#.to_vec()),
+        // Arrays with nulls
+        Value::String(br#"{"nullable": [1, null, 3, null, 5]}"#.to_vec()),
+    ];
+
+    Block {
+        info:         BlockInfo::default(),
+        rows:         rows.len() as u64,
+        column_types: vec![("json_col".to_string(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        })],
+        column_data:  rows,
+    }
+}
+
 pub fn generate_mixed_dynamic_json_test_block() -> Block {
     // Use data from both Dynamic and JSON test blocks
     let dynamic_data = vec![
@@ -582,6 +609,68 @@ pub fn generate_mixed_dynamic_json_test_block() -> Block {
             }),
         ],
         column_data:  mixed_data,
+    }
+}
+
+pub fn generate_evil_heterogeneous_json_test_block() -> Block {
+    // The ultimate evil JSON: deeply nested with heterogeneous arrays at multiple levels
+    let rows = vec![
+        // Row 1: Top-level heterogeneous array with nested objects
+        Value::String(
+            br#"{"evil": [1, "text", null, [true, 3.14, {"nested": "object", "level": 2}]]}"#
+                .to_vec(),
+        ),
+
+        // Row 2: Deeply nested mixed types (3+ levels)
+        Value::String(
+            br#"{"data": {"arr": [1, [2, "three", [4.0, null, {"key": [5, "six", true]}]]]}}"#
+                .to_vec(),
+        ),
+
+        // Row 3: Arrays of objects with wildly varying schemas
+        Value::String(
+            br#"{"users": [{"name": "Alice", "age": 30}, {"id": 1, "active": false}, {"tags": ["a", "b", 123]}], "count": 3}"#
+                .to_vec(),
+        ),
+
+        // Row 4: Sparse paths - completely different structure from other rows
+        Value::String(
+            br#"{"other": {"path": {"unique": [1, "mixed", null, [[[7, "deep"]]]]}}}"#
+                .to_vec(),
+        ),
+
+        // Row 5: Multiple paths with heterogeneous arrays at each
+        Value::String(
+            br#"{"a": [1, "two", 3.0], "b": [[4, 5], ["six", 7.0], null], "c": {"d": [true, null, 8.9, "end"]}}"#
+                .to_vec(),
+        ),
+
+        // Row 6: Arrays containing arrays of mixed objects
+        Value::String(
+            br#"{"matrix": [[{"x": 1}, {"y": "two"}], [{"z": [3, "four"]}, 5], "flat"]}"#
+                .to_vec(),
+        ),
+
+        // Row 7: Null value to ensure it doesn't break
+        Value::Null,
+
+        // Row 8: Empty object and arrays mixed
+        Value::String(
+            br#"{"empty": [], "mixed": [[], {}, null, [1, {}]], "end": {}}"#
+                .to_vec(),
+        ),
+    ];
+
+    Block {
+        info:         BlockInfo::default(),
+        rows:         rows.len() as u64,
+        column_types: vec![("evil_json_col".to_string(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_paths:        vec![],
+        })],
+        column_data:  rows,
     }
 }
 

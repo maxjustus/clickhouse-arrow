@@ -3,12 +3,11 @@ use std::collections::HashMap;
 use tokio::io::AsyncWriteExt;
 use tracing::trace;
 
-use crate::Result;
 use crate::formats::{DynamicState, SerializerState, TypeSpecificState};
 use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
 use crate::native::types::serialize::ClickHouseNativeSerializer;
 use crate::native::types::{Type, Value};
-use crate::write_discriminator;
+use crate::{Result, write_discriminator};
 
 const DYNAMIC_VERSION: u64 = 3; // Always use v3 (flattened format)
 
@@ -18,6 +17,101 @@ const DYNAMIC_VERSION: u64 = 3; // Always use v3 (flattened format)
 pub struct DynamicSerializer;
 
 impl DynamicSerializer {
+    /// Write a Dynamic column header only (used by JSON in prefix phase)
+    pub(crate) async fn write_dynamic_header_async<W: ClickHouseWrite>(
+        values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<TypeSpecificState> {
+        // Analyze values and create Dynamic state
+        let analyzed_state = Self::analyze_values(values);
+
+        // Write Dynamic v3 header
+        writer.write_u64_le(DYNAMIC_VERSION).await?;
+
+        if let TypeSpecificState::Dynamic(ref dynamic_state) = analyzed_state {
+            // Write type count and names
+            writer.write_var_uint(dynamic_state.total_types).await?;
+            for type_name in &dynamic_state.type_names {
+                writer.write_string(type_name).await?;
+            }
+
+            // Write nested type prefixes
+            for type_name in &dynamic_state.type_names {
+                let (_, typ) = &dynamic_state.type_map[type_name];
+                typ.serialize_prefix_async(writer, state).await?;
+            }
+        }
+
+        Ok(analyzed_state)
+    }
+
+    /// Write Dynamic column header only - sync version
+    pub(crate) fn write_dynamic_header_sync<W: ClickHouseBytesWrite>(
+        values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<TypeSpecificState> {
+        // Analyze values and create Dynamic state
+        let analyzed_state = Self::analyze_values(values);
+
+        // Write Dynamic v3 header
+        writer.put_u64_le(DYNAMIC_VERSION);
+
+        if let TypeSpecificState::Dynamic(ref dynamic_state) = analyzed_state {
+            // Write type count and names
+            writer.put_var_uint(dynamic_state.total_types)?;
+            for type_name in &dynamic_state.type_names {
+                writer.put_string(type_name.as_bytes())?;
+            }
+
+            // Write nested type prefixes
+            for type_name in &dynamic_state.type_names {
+                let (_, typ) = &dynamic_state.type_map[type_name];
+                typ.serialize_prefix(writer, state);
+            }
+        }
+
+        Ok(analyzed_state)
+    }
+
+    /// Write Dynamic column data only (used by JSON in write phase)
+    pub(crate) async fn write_dynamic_data_async<W: ClickHouseWrite>(
+        values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+        dynamic_state: TypeSpecificState,
+    ) -> Result<()> {
+        // Temporarily swap state to use provided Dynamic state
+        let original_state = std::mem::replace(&mut state.type_specific, dynamic_state);
+
+        // Write the actual data
+        Self::write_internal_async(&Type::Dynamic { max_types: None }, values, writer, state)
+            .await?;
+
+        // Restore original state
+        state.type_specific = original_state;
+        Ok(())
+    }
+
+    /// Write Dynamic column data only - sync version
+    pub(crate) fn write_dynamic_data_sync<W: ClickHouseBytesWrite>(
+        values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+        dynamic_state: TypeSpecificState,
+    ) -> Result<()> {
+        // Temporarily swap state to use provided Dynamic state
+        let original_state = std::mem::replace(&mut state.type_specific, dynamic_state);
+
+        // Write the actual data
+        Self::write_internal_sync(&Type::Dynamic { max_types: None }, values, writer, state)?;
+
+        // Restore original state
+        state.type_specific = original_state;
+        Ok(())
+    }
+
     /// Check if server supports Dynamic v3
     fn check_server_version(state: &SerializerState) -> Result<()> {
         if let Some((major, minor, _)) = state.server_version
@@ -139,7 +233,7 @@ impl DynamicSerializer {
     }
 
     /// Write complete Dynamic data (async version)
-    async fn write_internal_async<W: ClickHouseWrite>(
+    pub(crate) async fn write_internal_async<W: ClickHouseWrite>(
         _: &Type,
         values: &[Value],
         writer: &mut W,
@@ -174,7 +268,7 @@ impl DynamicSerializer {
     }
 
     /// Write complete Dynamic data (sync version)
-    fn write_internal_sync<W: ClickHouseBytesWrite>(
+    pub(crate) fn write_internal_sync<W: ClickHouseBytesWrite>(
         _: &Type,
         values: &[Value],
         writer: &mut W,

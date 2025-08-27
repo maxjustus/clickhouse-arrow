@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use tokio::io::AsyncReadExt;
 
@@ -336,11 +336,12 @@ impl Deserializer for JsonDeserializer {
 
         // Store metadata in state
         state.type_specific = TypeSpecificState::Json(JsonStateData {
-            version:      Some(version),
-            paths:        path_names,
-            path_columns: None,
-            rows:         None,
-            dynamic_data: Some(dynamic_data),
+            version:             Some(version),
+            paths:               path_names,
+            path_columns:        None,
+            rows:                None,
+            dynamic_data:        Some(dynamic_data),
+            path_dynamic_states: BTreeMap::new(),
         });
         Ok(())
     }
@@ -418,11 +419,12 @@ impl JsonDeserializer {
 
         // Store metadata in state
         state.type_specific = TypeSpecificState::Json(JsonStateData {
-            version:      Some(version),
-            paths:        path_names,
-            path_columns: None,
-            rows:         None,
-            dynamic_data: Some(dynamic_data),
+            version:             Some(version),
+            paths:               path_names,
+            path_columns:        None,
+            rows:                None,
+            dynamic_data:        Some(dynamic_data),
+            path_dynamic_states: BTreeMap::new(),
         });
         Ok(())
     }
