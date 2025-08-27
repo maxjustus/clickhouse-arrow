@@ -566,14 +566,73 @@ impl Value {
             Value::Enum8(_, i) => Type::Enum8(vec![(String::new(), *i)]),
             Value::Enum16(_, i) => Type::Enum16(vec![(String::new(), *i)]),
             Value::Array(x) => {
-                Type::Array(Box::new(x.first().map_or(Type::String, Value::guess_type)))
+                if x.is_empty() {
+                    return Type::Array(Box::new(Type::String)); // Default for empty arrays
+                }
+
+                // Check if all elements have the same type
+                let mut types = Vec::new();
+                for value in x {
+                    let value_type = value.guess_type();
+                    // Check if this type is already in our list
+                    if !types.iter().any(|t| t == &value_type) {
+                        types.push(value_type);
+                    }
+                }
+
+                if types.len() == 1 {
+                    // Homogeneous array - all elements have the same type
+                    Type::Array(Box::new(types.into_iter().next().unwrap()))
+                } else {
+                    // Heterogeneous array - wrap in Variant
+                    // Sort types for consistent ordering
+                    types.sort_by_key(|t| t.to_string());
+                    Type::Array(Box::new(Type::Variant(types)))
+                }
             }
             Value::Tuple(values) => Type::Tuple(values.iter().map(Value::guess_type).collect()),
             Value::Null => Type::Nullable(Box::new(Type::String)),
-            Value::Map(k, v) => Type::Map(
-                Box::new(k.first().map_or(Type::String, Value::guess_type)),
-                Box::new(v.first().map_or(Type::String, Value::guess_type)),
-            ),
+            Value::Map(k, v) => {
+                // For keys - check if heterogeneous
+                let key_type = if k.is_empty() {
+                    Type::String
+                } else {
+                    let mut key_types = Vec::new();
+                    for key in k {
+                        let kt = key.guess_type();
+                        if !key_types.iter().any(|t| t == &kt) {
+                            key_types.push(kt);
+                        }
+                    }
+                    if key_types.len() == 1 {
+                        key_types.into_iter().next().unwrap()
+                    } else {
+                        key_types.sort_by_key(|t| t.to_string());
+                        Type::Variant(key_types)
+                    }
+                };
+
+                // For values - check if heterogeneous
+                let value_type = if v.is_empty() {
+                    Type::String
+                } else {
+                    let mut value_types = Vec::new();
+                    for val in v {
+                        let vt = val.guess_type();
+                        if !value_types.iter().any(|t| t == &vt) {
+                            value_types.push(vt);
+                        }
+                    }
+                    if value_types.len() == 1 {
+                        value_types.into_iter().next().unwrap()
+                    } else {
+                        value_types.sort_by_key(|t| t.to_string());
+                        Type::Variant(value_types)
+                    }
+                };
+
+                Type::Map(Box::new(key_type), Box::new(value_type))
+            }
             Value::Variant(_, val) => {
                 // For Variant, we can only guess a single-type variant based on the value
                 Type::Variant(vec![val.guess_type()])

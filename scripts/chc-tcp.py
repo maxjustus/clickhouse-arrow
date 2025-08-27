@@ -159,7 +159,7 @@ class ClickHouseProtocolParser:
         return integers
 
 class ClickHouseTCPCapture:
-    def __init__(self, clickhouse_host='localhost', clickhouse_port=9000, proxy_port=9001, output_format='construct', verbose=False, pcap_file=None):
+    def __init__(self, clickhouse_host='127.0.0.1', clickhouse_port=9000, proxy_port=9001, output_format='construct', verbose=False, pcap_file=None):
         self.clickhouse_host = clickhouse_host
         self.clickhouse_port = clickhouse_port
         self.proxy_port = proxy_port
@@ -286,11 +286,11 @@ class ClickHouseTCPCapture:
     def start_proxy(self):
         proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         proxy_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        proxy_socket.bind(('localhost', self.proxy_port))
+        proxy_socket.bind(('127.0.0.1', self.proxy_port))
         proxy_socket.listen(5)
         
         if self.verbose:
-            print(f"TCP proxy listening on localhost:{self.proxy_port}", file=sys.stderr)
+            print(f"TCP proxy listening on 127.0.0.1:{self.proxy_port}", file=sys.stderr)
             print(f"Forwarding to {self.clickhouse_host}:{self.clickhouse_port}", file=sys.stderr)
         
         try:
@@ -320,7 +320,7 @@ class ClickHouseTCPCapture:
         # Run ClickHouse client connecting to our proxy
         cmd = [
             'clickhouse', 'client',
-            '--host', 'localhost',
+            '--host', '127.0.0.1',
             '--port', str(self.proxy_port),
             '--compression=false',
             '--format=JSONEachRow',
@@ -375,7 +375,7 @@ def main():
     )
     
     parser.add_argument('query', help='SQL query to execute')
-    parser.add_argument('--host', default='localhost', help='ClickHouse server host (default: localhost)')
+    parser.add_argument('--host', default='127.0.0.1', help='ClickHouse server host (default: 127.0.0.1)')
     parser.add_argument('--port', type=int, default=9000, help='ClickHouse server port (default: 9000)')
     parser.add_argument('--format', choices=['compact', 'hex'],
                         help='Output format: hex (hex dump, default) or compact (JSON). When --pcap is specified, compact becomes the default.')

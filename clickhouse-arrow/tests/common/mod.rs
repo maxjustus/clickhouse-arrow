@@ -1,5 +1,6 @@
 pub mod arrow_helpers;
 pub mod constants;
+pub mod dynamic_nested_tests;
 pub mod native_helpers;
 pub mod test_helpers;
 pub mod version_compat;
