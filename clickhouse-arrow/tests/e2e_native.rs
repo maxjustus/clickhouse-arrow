@@ -29,3 +29,12 @@ e2e_test!(
     TRACING_DIRECTIVES,
     None
 );
+
+// Test evil heterogeneous arrays in Dynamic e2e
+#[cfg(feature = "derive")]
+e2e_test!(
+    e2e_native_evil_heterogeneous,
+    tests::native::test_evil_heterogeneous_dynamic,
+    TRACING_DIRECTIVES,
+    None
+);

@@ -2,7 +2,7 @@ pub(crate) mod deserialize;
 pub mod geo;
 pub(crate) mod low_cardinality;
 pub mod map;
-pub(crate) mod serialize;
+pub mod serialize;
 #[cfg(test)]
 mod tests;
 
@@ -377,7 +377,7 @@ impl Display for Type {
             Type::Date => write!(f, "Date"),
             Type::Date32 => write!(f, "Date32"),
             Type::DateTime(tz) => write!(f, "DateTime('{tz}')"),
-            Type::DateTime64(precision, tz) => write!(f, "DateTime64({precision},'{tz}')"),
+            Type::DateTime64(precision, tz) => write!(f, "DateTime64({precision}, '{tz}')"),
             Type::Ipv4 => write!(f, "IPv4"),
             Type::Ipv6 => write!(f, "IPv6"),
             Type::Point => write!(f, "Point"),
@@ -391,10 +391,10 @@ impl Display for Type {
             Type::Tuple(items) => write!(
                 f,
                 "Tuple({})",
-                items.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")
+                items.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
             ),
             Type::Nullable(inner) => write!(f, "Nullable({inner})"),
-            Type::Map(key, value) => write!(f, "Map({key},{value})"),
+            Type::Map(key, value) => write!(f, "Map({key}, {value})"),
             Type::Variant(items) => write!(
                 f,
                 "Variant({})",

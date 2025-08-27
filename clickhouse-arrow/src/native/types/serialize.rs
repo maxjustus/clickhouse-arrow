@@ -1,5 +1,5 @@
 pub(crate) mod array;
-pub(crate) mod dynamic;
+pub mod dynamic;
 pub(crate) mod geo;
 pub(crate) mod json;
 pub(crate) mod low_cardinality;

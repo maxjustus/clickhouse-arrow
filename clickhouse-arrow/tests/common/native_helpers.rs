@@ -585,6 +585,59 @@ pub fn generate_mixed_dynamic_json_test_block() -> Block {
     }
 }
 
+pub fn generate_evil_heterogeneous_dynamic_test_block() -> Block {
+    // The ultimate evil: deeply nested with heterogeneous arrays at multiple levels
+    let rows = vec![
+        // The evil case: heterogeneous array at top level
+        Value::Array(vec![
+            Value::Int32(42),
+            Value::String(b"mixed".to_vec()),
+            Value::Float64(3.14),
+        ]),
+        // Even more evil: nested heterogeneous arrays
+        Value::Array(vec![
+            Value::Int32(1),
+            Value::String(b"level1".to_vec()),
+            Value::Array(vec![
+                Value::Float64(2.71),
+                Value::String(b"level2".to_vec()),
+                Value::Null,
+                Value::Array(vec![
+                    Value::Int8(99),
+                    Value::UInt64(100),
+                    Value::String(b"level3".to_vec()),
+                ]),
+            ]),
+        ]),
+        // Heterogeneous inside tuple
+        Value::Tuple(vec![
+            Value::String(b"normal".to_vec()),
+            Value::Array(vec![
+                Value::Int32(1),
+                Value::String(b"mixed_in_tuple".to_vec()),
+                Value::Float32(1.5),
+            ]),
+        ]),
+        // Heterogeneous as map values
+        Value::Map(vec![Value::String(b"chaos".to_vec())], vec![Value::Array(vec![
+            Value::Int32(1),
+            Value::String(b"mixed_in_map".to_vec()),
+            Value::Tuple(vec![Value::Int8(1), Value::Float64(2.0)]),
+        ])]),
+        // NULL value to verify it doesn't break anything
+        Value::Null,
+    ];
+
+    Block {
+        info:         BlockInfo::default(),
+        rows:         rows.len() as u64,
+        column_types: vec![("evil_heterogeneous_dynamic".to_string(), Type::Dynamic {
+            max_types: None,
+        })],
+        column_data:  rows,
+    }
+}
+
 /// Higher-level test harness for native roundtrip tests
 pub struct NativeRoundtripTestHarness<'a> {
     pub container:   &'a clickhouse_arrow::test_utils::ClickHouseContainer,

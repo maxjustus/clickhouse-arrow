@@ -90,7 +90,7 @@ pub fn generate_heterogeneous_dynamic_test_block() -> Block {
     }
 }
 
-/// Generate test cases for max_types validation with nested types
+/// Generate test cases for `max_types` validation with nested types
 pub fn generate_max_types_test_block() -> Block {
     // This should trigger max_types validation when max_types is set low
     let rows = vec![
@@ -126,6 +126,9 @@ mod tests {
 
     #[test]
     fn test_homogeneous_nested_type_detection() {
+        use clickhouse_arrow::formats::TypeSpecificState;
+        use clickhouse_arrow::native::types::serialize::dynamic::DynamicSerializer;
+
         let block = generate_nested_dynamic_test_block();
 
         // Analyze the values to build type registry
@@ -147,7 +150,7 @@ mod tests {
 
             println!("Detected {} unique types:", type_names.len());
             for (i, type_name) in type_names.iter().enumerate() {
-                println!("  {}: {}", i, type_name);
+                println!("  {i}: {type_name}");
             }
         } else {
             panic!("Expected Dynamic state");
@@ -182,11 +185,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // This test currently fails - heterogeneous arrays not supported yet
     fn test_heterogeneous_array_detection() {
+        use clickhouse_arrow::formats::TypeSpecificState;
+        use clickhouse_arrow::native::types::serialize::dynamic::DynamicSerializer;
+
         let block = generate_heterogeneous_dynamic_test_block();
 
-        // This should NOT panic when heterogeneous support is implemented
         let state = DynamicSerializer::analyze_values(&block.column_data);
 
         if let TypeSpecificState::Dynamic(dynamic_state) = state {
@@ -197,7 +201,7 @@ mod tests {
 
             println!("Heterogeneous types detected:");
             for type_name in type_names {
-                println!("  {}", type_name);
+                println!("  {type_name}");
             }
         } else {
             panic!("Expected Dynamic state");
@@ -205,7 +209,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // This test currently fails - heterogeneous arrays break guess_type()
     fn test_evil_deeply_nested_heterogeneous() {
         // The ultimate evil: deeply nested with heterogeneous arrays at multiple levels
         let evil = Value::Array(vec![
@@ -230,7 +233,7 @@ mod tests {
         let guessed = evil.guess_type();
         let type_string = guessed.to_string();
 
-        println!("Evil nested type: {}", type_string);
+        println!("Evil nested type: {type_string}");
         assert!(
             type_string.contains("Variant"),
             "Should detect and wrap heterogeneous arrays in Variant"
@@ -239,8 +242,8 @@ mod tests {
 
     #[test]
     fn test_current_heterogeneous_limitation() {
-        // This test documents the CURRENT behavior with heterogeneous arrays
-        // guess_type() only looks at the first element, which is incorrect
+        // This test verifies that heterogeneous arrays are correctly detected
+        // and wrapped in Variant types
 
         let mixed_array = Value::Array(vec![
             Value::Int32(1),
@@ -250,13 +253,16 @@ mod tests {
 
         let guessed = mixed_array.guess_type();
 
-        // Current incorrect behavior: only detects first element type
-        assert_eq!(guessed.to_string(), "Array(Int32)");
-        // This is WRONG - it should be Array(Variant(Int32, String, Float64))
+        // Correct behavior: detects all element types and wraps in Variant
+        assert_eq!(guessed.to_string(), "Array(Variant(Float64, Int32, String))");
+        // Types are sorted alphabetically in the Variant
     }
 
     #[test]
     fn test_type_registry_sorting() {
+        use clickhouse_arrow::formats::TypeSpecificState;
+        use clickhouse_arrow::native::types::serialize::dynamic::DynamicSerializer;
+
         let rows = vec![
             Value::String(b"z".to_vec()),
             Value::Int32(1),

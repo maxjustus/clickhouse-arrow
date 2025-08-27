@@ -47,122 +47,10 @@ macro_rules! write_discriminator {
 
 /// Handles serialization of Dynamic types
 /// Dynamic is internally represented as a Variant with different serialization versions
-pub(crate) struct DynamicSerializer;
+#[derive(Copy, Clone)]
+pub struct DynamicSerializer;
 
 impl DynamicSerializer {
-    /// Transform heterogeneous arrays to use Variant wrapping
-    fn transform_heterogeneous_values(values: &[Value]) -> Vec<Value> {
-        values.iter().map(|v| Self::transform_value(v)).collect()
-    }
-
-    /// Recursively transform a single value to wrap heterogeneous arrays in Variant
-    fn transform_value(value: &Value) -> Value {
-        match value {
-            Value::Array(elements) if !elements.is_empty() => {
-                // Check if array is heterogeneous
-                let mut types = Vec::new();
-                let mut type_indices = HashMap::new();
-
-                for elem in elements {
-                    let elem_type = elem.guess_type();
-                    if !types.iter().any(|t| t == &elem_type) {
-                        let idx = types.len();
-                        types.push(elem_type.clone());
-                        let _ = type_indices.insert(elem_type.to_string(), idx);
-                    }
-                }
-
-                if types.len() > 1 {
-                    // Heterogeneous - wrap each element in Variant
-                    let variant_elements = elements
-                        .iter()
-                        .map(|elem| {
-                            let elem_type = elem.guess_type();
-                            let discriminator = type_indices[&elem_type.to_string()] as u8;
-                            // Recursively transform the inner value too
-                            Value::Variant(discriminator, Box::new(Self::transform_value(elem)))
-                        })
-                        .collect();
-                    Value::Array(variant_elements)
-                } else {
-                    // Homogeneous - just recursively transform elements
-                    let transformed = elements.iter().map(|e| Self::transform_value(e)).collect();
-                    Value::Array(transformed)
-                }
-            }
-            Value::Tuple(elements) => {
-                // Recursively transform tuple elements
-                Value::Tuple(elements.iter().map(|e| Self::transform_value(e)).collect())
-            }
-            Value::Map(keys, values) => {
-                // Check if keys are heterogeneous
-                let transformed_keys = if !keys.is_empty() {
-                    let mut key_types = Vec::new();
-                    let mut key_type_indices = HashMap::new();
-
-                    for key in keys {
-                        let key_type = key.guess_type();
-                        if !key_types.iter().any(|t| t == &key_type) {
-                            let idx = key_types.len();
-                            key_types.push(key_type.clone());
-                            let _ = key_type_indices.insert(key_type.to_string(), idx);
-                        }
-                    }
-
-                    if key_types.len() > 1 {
-                        // Heterogeneous keys - wrap in Variant
-                        keys.iter()
-                            .map(|key| {
-                                let key_type = key.guess_type();
-                                let discriminator = key_type_indices[&key_type.to_string()] as u8;
-                                Value::Variant(discriminator, Box::new(Self::transform_value(key)))
-                            })
-                            .collect()
-                    } else {
-                        keys.iter().map(|k| Self::transform_value(k)).collect()
-                    }
-                } else {
-                    vec![]
-                };
-
-                // Check if values are heterogeneous
-                let transformed_values = if !values.is_empty() {
-                    let mut value_types = Vec::new();
-                    let mut value_type_indices = HashMap::new();
-
-                    for val in values {
-                        let val_type = val.guess_type();
-                        if !value_types.iter().any(|t| t == &val_type) {
-                            let idx = value_types.len();
-                            value_types.push(val_type.clone());
-                            let _ = value_type_indices.insert(val_type.to_string(), idx);
-                        }
-                    }
-
-                    if value_types.len() > 1 {
-                        // Heterogeneous values - wrap in Variant
-                        values
-                            .iter()
-                            .map(|val| {
-                                let val_type = val.guess_type();
-                                let discriminator = value_type_indices[&val_type.to_string()] as u8;
-                                Value::Variant(discriminator, Box::new(Self::transform_value(val)))
-                            })
-                            .collect()
-                    } else {
-                        values.iter().map(|v| Self::transform_value(v)).collect()
-                    }
-                } else {
-                    vec![]
-                };
-
-                Value::Map(transformed_keys, transformed_values)
-            }
-            // For other types, return as-is
-            _ => value.clone(),
-        }
-    }
-
     /// Check if server supports Dynamic v3
     fn check_server_version(state: &SerializerState) -> Result<()> {
         if let Some((major, minor, _)) = state.server_version
@@ -225,10 +113,7 @@ impl DynamicSerializer {
         let mut discriminators = Vec::with_capacity(values.len());
         let mut rows_by_type: HashMap<usize, Vec<Value>> = HashMap::new();
 
-        // First transform values to handle heterogeneous arrays
-        let transformed_values = Self::transform_heterogeneous_values(values);
-
-        for value in transformed_values.iter() {
+        for value in values {
             if matches!(value, Value::Null) {
                 // NULL discriminator is total_types in v3
                 discriminators.push(total_types as u64);
@@ -404,7 +289,7 @@ impl DynamicSerializer {
     }
 
     /// Analyze values and return type metadata for use in `write_prefix`
-    pub(crate) fn analyze_values(values: &[Value]) -> TypeSpecificState {
+    pub fn analyze_values(values: &[Value]) -> TypeSpecificState {
         let (type_names, type_map, total_types) = Self::build_type_registry(values);
         let state = DynamicState {
             version: None, // Will be set during write_prefix
@@ -871,11 +756,13 @@ mod tests {
         if let TypeSpecificState::Dynamic(dynamic_state) = state {
             println!("Detected types:");
             for t in &dynamic_state.type_names {
-                println!("  - {}", t);
+                println!("  - {t}");
             }
             assert!(dynamic_state.type_names.contains(&"Array(Int32)".to_string()));
             assert!(dynamic_state.type_names.contains(&"Array(Array(String))".to_string()));
-            assert!(dynamic_state.type_names.contains(&"Tuple(String,Array(Float64))".to_string())); // No spaces in type string
+            assert!(
+                dynamic_state.type_names.contains(&"Tuple(String, Array(Float64))".to_string())
+            );
         } else {
             panic!("Expected Dynamic state");
         }
@@ -923,45 +810,13 @@ mod tests {
         if let TypeSpecificState::Dynamic(dynamic_state) = state {
             println!("Evil test - detected types:");
             for t in &dynamic_state.type_names {
-                println!("  - {}", t);
+                println!("  - {t}");
             }
             // When working, should detect Variant-wrapped types
             let has_variant = dynamic_state.type_names.iter().any(|t| t.contains("Variant"));
             assert!(has_variant, "Should detect heterogeneous arrays and wrap in Variant");
         } else {
             panic!("Expected Dynamic state");
-        }
-    }
-
-    #[test]
-    fn test_value_transformation() {
-        // Test that heterogeneous arrays are properly transformed to Variant
-        let original = Value::Array(vec![
-            Value::Int32(42),
-            Value::String(b"mixed".to_vec()),
-            Value::Float64(3.14),
-        ]);
-
-        let transformed = DynamicSerializer::transform_value(&original);
-
-        // Should be Array of Variants now
-        if let Value::Array(elements) = transformed {
-            assert_eq!(elements.len(), 3);
-
-            // Check first element is Variant(discriminator, Int32)
-            if let Value::Variant(_disc, inner) = &elements[0] {
-                assert!(matches!(**inner, Value::Int32(42)));
-                // Discriminator depends on type ordering
-            } else {
-                panic!("Expected Variant, got {:?}", elements[0]);
-            }
-
-            // Check all are Variants
-            for elem in elements {
-                assert!(matches!(elem, Value::Variant(_, _)), "All elements should be Variants");
-            }
-        } else {
-            panic!("Expected Array after transformation");
         }
     }
 
@@ -977,6 +832,6 @@ mod tests {
         let type_string = guessed.to_string();
 
         // Should detect and wrap heterogeneous arrays in Variant
-        assert!(type_string.contains("Variant"), "Expected Variant wrapper, got: {}", type_string);
+        assert!(type_string.contains("Variant"), "Expected Variant wrapper, got: {type_string}");
     }
 }

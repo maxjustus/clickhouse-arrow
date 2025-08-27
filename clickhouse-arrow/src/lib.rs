@@ -6,7 +6,7 @@ mod compression;
 mod constants;
 mod errors;
 mod flags;
-mod formats;
+pub mod formats;
 mod io;
 pub mod native;
 #[cfg(feature = "pool")]

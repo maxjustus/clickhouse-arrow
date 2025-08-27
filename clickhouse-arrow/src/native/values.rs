@@ -573,20 +573,28 @@ impl Value {
                 // Check if all elements have the same type
                 let mut types = Vec::new();
                 for value in x {
-                    let value_type = value.guess_type();
-                    // Check if this type is already in our list
-                    if !types.iter().any(|t| t == &value_type) {
-                        types.push(value_type);
+                    // Skip NULL values when building variant types
+                    // NULLs are handled specially in Variants and don't contribute to type
+                    // signatures
+                    if !matches!(value, Value::Null) {
+                        let value_type = value.guess_type();
+                        // Check if this type is already in our list
+                        if !types.iter().any(|t| t == &value_type) {
+                            types.push(value_type);
+                        }
                     }
                 }
 
-                if types.len() == 1 {
-                    // Homogeneous array - all elements have the same type
+                if types.is_empty() {
+                    // Array contains only NULLs - default to String array
+                    Type::Array(Box::new(Type::String))
+                } else if types.len() == 1 {
+                    // Homogeneous array - all non-NULL elements have the same type
                     Type::Array(Box::new(types.into_iter().next().unwrap()))
                 } else {
-                    // Heterogeneous array - wrap in Variant
+                    // Heterogeneous array - wrap non-NULL types in Variant
                     // Sort types for consistent ordering
-                    types.sort_by_key(|t| t.to_string());
+                    types.sort_by_key(ToString::to_string);
                     Type::Array(Box::new(Type::Variant(types)))
                 }
             }
@@ -599,15 +607,20 @@ impl Value {
                 } else {
                     let mut key_types = Vec::new();
                     for key in k {
-                        let kt = key.guess_type();
-                        if !key_types.iter().any(|t| t == &kt) {
-                            key_types.push(kt);
+                        // Skip NULL values when building variant types
+                        if !matches!(key, Value::Null) {
+                            let kt = key.guess_type();
+                            if !key_types.iter().any(|t| t == &kt) {
+                                key_types.push(kt);
+                            }
                         }
                     }
-                    if key_types.len() == 1 {
+                    if key_types.is_empty() {
+                        Type::String // Default if only NULLs
+                    } else if key_types.len() == 1 {
                         key_types.into_iter().next().unwrap()
                     } else {
-                        key_types.sort_by_key(|t| t.to_string());
+                        key_types.sort_by_key(ToString::to_string);
                         Type::Variant(key_types)
                     }
                 };
@@ -618,15 +631,20 @@ impl Value {
                 } else {
                     let mut value_types = Vec::new();
                     for val in v {
-                        let vt = val.guess_type();
-                        if !value_types.iter().any(|t| t == &vt) {
-                            value_types.push(vt);
+                        // Skip NULL values when building variant types
+                        if !matches!(val, Value::Null) {
+                            let vt = val.guess_type();
+                            if !value_types.iter().any(|t| t == &vt) {
+                                value_types.push(vt);
+                            }
                         }
                     }
-                    if value_types.len() == 1 {
+                    if value_types.is_empty() {
+                        Type::String // Default if only NULLs
+                    } else if value_types.len() == 1 {
                         value_types.into_iter().next().unwrap()
                     } else {
-                        value_types.sort_by_key(|t| t.to_string());
+                        value_types.sort_by_key(ToString::to_string);
                         Type::Variant(value_types)
                     }
                 };

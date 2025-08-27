@@ -115,27 +115,27 @@ pub(crate) type DynamicTypeData = Vec<(u64, Vec<(String, Type)>)>;
 
 /// Metadata for Dynamic type
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct DynamicState {
-    pub(crate) version:     Option<u64>,
-    pub(crate) total_types: u64,
-    pub(crate) type_names:  Vec<String>,
-    pub(crate) type_map:    HashMap<String, (usize, Type)>,
-    pub(crate) types:       Vec<(String, Type)>,
+pub struct DynamicState {
+    pub version:     Option<u64>,
+    pub total_types: u64,
+    pub type_names:  Vec<String>,
+    pub type_map:    HashMap<String, (usize, Type)>,
+    pub types:       Vec<(String, Type)>,
 }
 
 /// Metadata for JSON type
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct JsonState {
-    pub(crate) version:      Option<u64>,
-    pub(crate) paths:        Vec<String>,
-    pub(crate) path_columns: Option<BTreeMap<String, Vec<Value>>>,
-    pub(crate) rows:         Option<usize>,
-    pub(crate) dynamic_data: Option<DynamicTypeData>,
+pub struct JsonState {
+    pub version:      Option<u64>,
+    pub paths:        Vec<String>,
+    pub path_columns: Option<BTreeMap<String, Vec<Value>>>,
+    pub rows:         Option<usize>,
+    pub dynamic_data: Option<DynamicTypeData>,
 }
 
 /// Enum to hold type-specific state
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) enum TypeSpecificState {
+pub enum TypeSpecificState {
     #[default]
     None,
     Dynamic(DynamicState),
