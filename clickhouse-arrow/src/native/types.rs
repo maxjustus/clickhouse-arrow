@@ -169,6 +169,12 @@ impl Type {
         }
     }
 
+    /// Create a Variant type with alphabetically sorted inner types to match ClickHouse canonical ordering
+    pub fn variant(mut types: Vec<Type>) -> Type {
+        types.sort_by_key(ToString::to_string);
+        Type::Variant(types)
+    }
+
     pub fn unnull(&self) -> Option<&Type> {
         match self {
             Type::Nullable(x) => Some(&**x),

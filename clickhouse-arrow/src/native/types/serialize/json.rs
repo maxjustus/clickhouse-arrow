@@ -34,6 +34,14 @@ struct JsonData {
 }
 
 impl JsonData {
+    #[inline]
+    fn is_effectively_nullable(t: &Type) -> bool {
+        match t {
+            Type::Nullable(_) => true,
+            Type::LowCardinality(inner) => inner.is_nullable(),
+            _ => false,
+        }
+    }
     /// Parse JSON values into path-organized structure
     fn from_values(
         values: Vec<Value>,
@@ -44,9 +52,16 @@ impl JsonData {
         let mut typed_path_columns: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         let rows = values.len();
 
-        // Pre-populate typed path columns with nulls
-        for (path, _) in typed_paths {
-            drop(typed_path_columns.insert(path.clone(), vec![Value::Null; rows]));
+        // Pre-populate typed path columns; use default for non-nullable types
+        for (path, ty) in typed_paths {
+            // Prefill: Variant columns expect Variant values (use null discriminator),
+            // otherwise use Null for effectively-nullable types or the type default.
+            let fill = match ty {
+                Type::Variant(_) => Value::Variant(0xFF, Box::new(Value::Null)),
+                _ if Self::is_effectively_nullable(ty) => Value::Null,
+                _ => ty.default_value(),
+            };
+            drop(typed_path_columns.insert(path.clone(), vec![fill; rows]));
         }
 
         // Compile skip path patterns as regex
@@ -315,9 +330,18 @@ impl JsonData {
 
     /// Convert a value to a specific type if needed
     fn convert_to_type(value: Value, expected_type: &Type) -> Result<Value> {
+        // Handle Nulls according to target type semantics
+        if matches!(value, Value::Null) {
+            return Ok(match expected_type {
+                // Variant uses special null discriminator
+                Type::Variant(_) => Value::Variant(0xFF, Box::new(Value::Null)),
+                // Nullable and LC(Nullable) carry Null through
+                _ if Self::is_effectively_nullable(expected_type) => Value::Null,
+                // Non-nullable types get their default value
+                _ => expected_type.default_value(),
+            });
+        }
         match (value, expected_type) {
-            // Pass through nulls for any type
-            (Value::Null, _) => Ok(Value::Null),
 
             // If already the exact type, return as is
             (v @ Value::Int8(_), Type::Int8) => Ok(v),
@@ -610,7 +634,7 @@ impl JsonData {
                 Ok(Value::Map(keys, values))
             }
 
-            // Handle Nullable types by recursing
+            // Handle Nullable types by recursing (value is non-null here)
             (value, Type::Nullable(inner)) => Self::convert_to_type(value, inner),
 
             // Handle LowCardinality - just recurse to the inner type
@@ -723,7 +747,7 @@ impl JsonSerializer {
 
             // For now, we'll handle this in the write method where we can properly
             // build the state. Just store a placeholder.
-            typed_path_states.insert(path.clone(), SerializerState::default());
+            drop(typed_path_states.insert(path.clone(), SerializerState::default()));
         }
 
         let state = JsonState {
@@ -737,7 +761,9 @@ impl JsonSerializer {
             path_dynamic_states: Default::default(), // Will be filled in write_prefix
             typed_path_states,                       // Pre-built states for typed paths
             // Deprecated fields for compatibility
+            #[allow(deprecated)]
             paths: dynamic_paths,
+            #[allow(deprecated)]
             path_columns: None,
         };
 
@@ -813,14 +839,27 @@ impl JsonSerializer {
         if let TypeSpecificState::Json(json_state) = &state.type_specific {
             // In v3 format, ALL paths (typed + dynamic) are written to ObjectStructure
 
-            // Combine typed and dynamic paths for header
-            let typed_paths: Vec<String> =
+            // Only dynamic paths go in the flattened paths header
+            // Typed paths are NOT included because they have custom serializations
+            let _typed_paths: Vec<String> =
                 json_state.typed_paths.iter().map(|(name, _)| name.clone()).collect();
             let dynamic_paths = json_state.dynamic_paths.clone();
             let dynamic_columns = json_state.dynamic_path_columns.clone();
-            let mut all_paths = typed_paths.clone();
-            all_paths.extend(dynamic_paths.iter().cloned());
-            Self::write_paths_header_sync(&all_paths, version, writer)?;
+            Self::write_paths_header_sync(&dynamic_paths, version, writer)?;
+
+            // Write typed path prefixes using their nested serializers
+            // Sort typed paths by name to match ClickHouse's deterministic order
+            let mut typed_entries: Vec<(&String, &Type)> =
+                json_state.typed_paths.iter().map(|(n, t)| (n, t)).collect();
+            typed_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+            for (_path_name, path_type) in typed_entries {
+                let mut typed_prefix_state = SerializerState::default();
+                if let Some(version) = state.server_version {
+                    typed_prefix_state = typed_prefix_state.with_server_version(version);
+                }
+                path_type.serialize_prefix(writer, &mut typed_prefix_state);
+            }
 
             // Write Dynamic column headers for each dynamic path and store states
             if let Some(dynamic_columns) = dynamic_columns {
@@ -829,16 +868,12 @@ impl JsonSerializer {
 
                 for path in dynamic_paths {
                     if let Some(column_values) = dynamic_columns.get(&path) {
-                        // Set JSON context flag for Dynamic serialization
-                        let original_in_json_type = state.in_json_type;
-                        state.in_json_type = true;
+                        // Write Dynamic headers with normal Native context (no JSON suppression)
                         let dynamic_state = DynamicSerializer::write_dynamic_header_sync(
                             column_values,
                             writer,
                             state,
                         )?;
-                        // Restore original flag
-                        state.in_json_type = original_in_json_type;
                         // Store the Dynamic state for this path
                         if let TypeSpecificState::Dynamic(dyn_state) = dynamic_state {
                             drop(path_dynamic_states.insert(path, dyn_state));
@@ -882,36 +917,35 @@ impl Serializer for JsonSerializer {
 
         // Retrieve metadata from state
         if let TypeSpecificState::Json(json_state) = &state.type_specific {
-            // In v3 format, ALL paths (typed + dynamic) are written to ObjectStructure
+            // In FLATTENED (v3) format, the structure header includes ONLY the
+            // flattened dynamic paths. Typed paths are not listed here because
+            // they have custom serializations and their own prefixes.
 
-            // Combine typed and dynamic paths for header
             let typed_paths: Vec<String> =
                 json_state.typed_paths.iter().map(|(name, _)| name.clone()).collect();
             let dynamic_paths = json_state.dynamic_paths.clone();
             let dynamic_columns = json_state.dynamic_path_columns.clone();
-            let mut all_paths = typed_paths.clone();
-            all_paths.extend(dynamic_paths.iter().cloned());
-            Self::write_paths_header_async(&all_paths, version, writer).await?;
 
-            // Write typed path prefixes using their native serializers
-            for (path_name, path_type) in &json_state.typed_paths {
-                if typed_paths.contains(path_name) {
-                    // Use a fresh state for the prefix to avoid conflicts
-                    let mut typed_prefix_state = SerializerState::default();
-                    if let Some(version) = state.server_version {
-                        typed_prefix_state = typed_prefix_state.with_server_version(version);
-                    }
+            // Write only dynamic (flattened) paths to the structure header
+            Self::write_paths_header_async(&dynamic_paths, version, writer).await?;
 
-                    // Special handling for LowCardinality in JSON context
-                    if matches!(path_type, Type::LowCardinality(_)) {
-                        // For JSON LowCardinality, we don't write the version prefix
-                        // This is handled specially in our serialize_json_lowcardinality method
-                        // Skip prefix for LowCardinality
-                    } else {
-                        // Regular typed paths use their native prefix
-                        path_type.serialize_prefix_async(writer, &mut typed_prefix_state).await?;
-                    }
+            // Write typed path prefixes using their nested serializers
+            // Sort typed paths by name to match ClickHouse's deterministic order
+            let mut typed_entries: Vec<(&String, &Type)> =
+                json_state.typed_paths.iter().map(|(n, t)| (n, t)).collect();
+            typed_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+            for (_path_name, path_type) in typed_entries {
+                // Call each typed-path's nested serializer with a fresh SerializerState
+                // (only server_version copied). This mirrors ClickHouse prefix calls per
+                // substream and avoids carrying per-path TypeSpecificState across prefixes.
+                let mut typed_prefix_state = SerializerState::default();
+                if let Some(version) = state.server_version {
+                    typed_prefix_state = typed_prefix_state.with_server_version(version);
                 }
+
+                // Always write the native prefix for typed paths to match ClickHouse behavior.
+                path_type.serialize_prefix_async(writer, &mut typed_prefix_state).await?;
             }
 
             // Write Dynamic column headers for each dynamic path and store states
@@ -921,17 +955,13 @@ impl Serializer for JsonSerializer {
 
                 for path in dynamic_paths {
                     if let Some(column_values) = dynamic_columns.get(&path) {
-                        // Set JSON context flag for Dynamic serialization
-                        let original_in_json_type = state.in_json_type;
-                        state.in_json_type = true;
+                        // Write Dynamic headers with normal Native context (no JSON suppression)
                         let dynamic_state = DynamicSerializer::write_dynamic_header_async(
                             column_values,
                             writer,
                             state,
                         )
                         .await?;
-                        // Restore original flag
-                        state.in_json_type = original_in_json_type;
                         // Store the Dynamic state for this path
                         if let TypeSpecificState::Dynamic(dyn_state) = dynamic_state {
                             drop(path_dynamic_states.insert(path, dyn_state));
@@ -1004,13 +1034,7 @@ impl Serializer for JsonSerializer {
                 vec![Value::Null; rows]
             };
 
-            // Set JSON context flag for special handling of LowCardinality and Variant
-            // In JSON context, these types need different behavior:
-            // LowCardinality: No version prefix, always nullable, NEED_GLOBAL_DICTIONARY_BIT
-            // Variant: No version prefix (Object structure handles it)
-            if matches!(type_, Type::LowCardinality(_) | Type::Variant(_)) {
-                typed_state.in_json_type = true;
-            }
+            // LowCardinality no longer needs a JSON-context flag; behavior is type-driven.
 
             type_.serialize_column(column_values, writer, &mut typed_state).await?;
         }
@@ -1101,13 +1125,7 @@ impl Serializer for JsonSerializer {
                 vec![Value::Null; rows]
             };
 
-            // Set JSON context flag for special handling of LowCardinality and Variant
-            // In JSON context, these types need different behavior:
-            // LowCardinality: No version prefix, always nullable, NEED_GLOBAL_DICTIONARY_BIT
-            // Variant: No version prefix (Object structure handles it)
-            if matches!(type_, Type::LowCardinality(_) | Type::Variant(_)) {
-                typed_state.in_json_type = true;
-            }
+            // LowCardinality no longer needs a JSON-context flag; behavior is type-driven.
 
             // For typed paths in FLATTENED format, just call serialize_column_sync
             // which internally calls write_sync() that includes prefix/version and data
@@ -1448,6 +1466,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_json_typed_nonnullable_defaults() -> Result<()> {
+        // Typed path 'id' is non-nullable UInt32. Missing values should default to 0.
+        let values = vec![
+            Value::String(br#"{"name": "Alice"}"#.to_vec()),
+            Value::String(br#"{"name": "Bob", "id": 42}"#.to_vec()),
+            Value::String(br#"{"name": "Carol"}"#.to_vec()),
+        ];
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![("id".to_string(), Box::new(Type::UInt32))],
+            skip_paths:        vec![],
+        };
+
+        // Serialize
+        let mut output = vec![];
+        let mut ser_state = SerializerState::default();
+        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
+        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
+
+        // Deserialize
+        let mut cursor = Cursor::new(output);
+        let mut de_state = DeserializerState::default();
+        type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
+        let deserialized = type_.deserialize_column(&mut cursor, values.len(), &mut de_state).await?;
+
+        // Validate: rows missing 'id' should have id = 0 in JSON
+        for (i, v) in deserialized.iter().enumerate() {
+            if let Value::String(bytes) = v {
+                let obj: serde_json::Value = serde_json::from_slice(bytes)
+                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?;
+                let id = obj.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                match i {
+                    0 | 2 => assert_eq!(id, serde_json::Value::from(0u64)),
+                    1 => assert_eq!(id, serde_json::Value::from(42u64)),
+                    _ => unreachable!(),
+                }
+            } else {
+                panic!("Expected String JSON value");
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_typed_lowcard_nonnullable_defaults() -> Result<()> {
+        // Typed path 'status' is LowCardinality(String) non-nullable. Missing values should default to "".
+        let values = vec![
+            Value::String(br#"{"name": "Alice"}"#.to_vec()),
+            Value::String(br#"{"name": "Bob", "status": "ok"}"#.to_vec()),
+            Value::String(br#"{"name": "Carol"}"#.to_vec()),
+        ];
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![(
+                "status".to_string(),
+                Box::new(Type::LowCardinality(Box::new(Type::String))),
+            )],
+            skip_paths:        vec![],
+        };
+
+        // Serialize
+        let mut output = vec![];
+        let mut ser_state = SerializerState::default();
+        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
+        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
+
+        // Deserialize
+        let mut cursor = Cursor::new(output);
+        let mut de_state = DeserializerState::default();
+        type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
+        let deserialized = type_.deserialize_column(&mut cursor, values.len(), &mut de_state).await?;
+
+        // Validate: rows missing 'status' should have status = "" in JSON
+        for (i, v) in deserialized.iter().enumerate() {
+            if let Value::String(bytes) = v {
+                let obj: serde_json::Value = serde_json::from_slice(bytes)
+                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?;
+                let status = obj.get("status").cloned().unwrap_or(serde_json::Value::Null);
+                match i {
+                    0 | 2 => assert_eq!(status, serde_json::Value::from("")),
+                    1 => assert_eq!(status, serde_json::Value::from("ok")),
+                    _ => unreachable!(),
+                }
+            } else {
+                panic!("Expected String JSON value");
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_typed_variant_null_missing() -> Result<()> {
+        // Typed path 'value' is Variant(String, UInt64). Missing should map to Variant null (JSON null).
+        let values = vec![
+            Value::String(br#"{"name": "Alice"}"#.to_vec()),
+            Value::String(br#"{"name": "Bob", "value": "x"}"#.to_vec()),
+            Value::String(br#"{"name": "Carol", "value": 7}"#.to_vec()),
+        ];
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![(
+                "value".to_string(),
+                Box::new(Type::variant(vec![Type::String, Type::UInt64])),
+            )],
+            skip_paths:        vec![],
+        };
+
+        // Serialize
+        let mut output = vec![];
+        let mut ser_state = SerializerState::default();
+        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
+        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
+
+        // Deserialize
+        let mut cursor = Cursor::new(output);
+        let mut de_state = DeserializerState::default();
+        type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
+        let deserialized = type_.deserialize_column(&mut cursor, values.len(), &mut de_state).await?;
+
+        // Validate: missing 'value' => JSON null; others preserved
+        for (i, v) in deserialized.iter().enumerate() {
+            if let Value::String(bytes) = v {
+                let obj: serde_json::Value = serde_json::from_slice(bytes)
+                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?;
+                match i {
+                    0 => assert_eq!(obj.get("value"), Some(&serde_json::Value::Null)),
+                    1 => assert_eq!(obj.get("value"), Some(&serde_json::Value::from("x"))),
+                    2 => assert_eq!(obj.get("value"), Some(&serde_json::Value::from(7u64))),
+                    _ => unreachable!(),
+                }
+            } else {
+                panic!("Expected String JSON value");
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_json_with_skip_paths() -> Result<()> {
         // Test JSON with skip paths
         let values = vec![
@@ -1617,6 +1782,66 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_typed_paths_clickhouse_ordering() -> Result<()> {
+        // Test the exact scenario from ClickHouse hex dump:
+        // select map('a', ['b' || toString(number)])::JSON(a Array(Variant(String, Int64))) as z from system.numbers limit 5
+        // ClickHouse reorders to JSON(a Array(Variant(Int64, String))) so discriminators are:
+        // - Int64 → discriminator 0  
+        // - String → discriminator 1
+
+        let values = vec![
+            Value::String(br#"{"a": ["b0"]}"#.to_vec()),
+            Value::String(br#"{"a": ["b1"]}"#.to_vec()),
+            Value::String(br#"{"a": ["b2"]}"#.to_vec()),
+            Value::String(br#"{"a": ["b3"]}"#.to_vec()),
+            Value::String(br#"{"a": ["b4"]}"#.to_vec()),
+        ];
+
+        // Use the exact type from ClickHouse (which reordered String, Int64 → Int64, String)
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths: vec![(
+                "a".to_string(),
+                // This will be sorted alphabetically: Int64, String
+                Box::new(Type::Array(Box::new(Type::variant(vec![Type::String, Type::Int64])))),
+            )],
+            skip_paths: vec![],
+        };
+
+        // Analyze values
+        let state = JsonSerializer::analyze_values(&values, &type_)?;
+        
+        if let TypeSpecificState::Json(json_state) = &state {
+            println!("=== CLICKHOUSE ORDERING TEST ===");
+            
+            // Check that we have typed path "a"
+            assert_eq!(json_state.typed_paths.len(), 1);
+            assert!(json_state.typed_paths.iter().any(|(name, _)| name == "a"));
+
+            if let Some(typed_columns) = &json_state.typed_path_columns {
+                if let Some(a_column) = typed_columns.get("a") {
+                    println!("Column 'a' has {} values", a_column.len());
+                    
+                    // Check that string values like "b0" get discriminator 1 (String is alphabetically second)
+                    for (i, value) in a_column.iter().enumerate() {
+                        if let Value::Array(arr) = value {
+                            if let Some(Value::Variant(discriminator, inner_val)) = arr.first() {
+                                println!("Row {}: discriminator {}, value: {:?}", i, discriminator, inner_val);
+                                // String values should get discriminator 1 (Int64=0, String=1)  
+                                assert_eq!(*discriminator, 1, "String discriminator should be 1");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("✅ ClickHouse discriminator ordering test passed!");
         Ok(())
     }
 
@@ -2273,7 +2498,7 @@ mod tests {
             max_dynamic_types: None,
             typed_paths:       vec![(
                 "value".to_string(),
-                Box::new(Type::Variant(vec![Type::Int64, Type::Float64])),
+                Box::new(Type::variant(vec![Type::Int64, Type::Float64])),
             )],
             skip_paths:        vec![],
         };
@@ -2341,7 +2566,7 @@ mod tests {
             max_dynamic_types: None,
             typed_paths:       vec![(
                 "items".to_string(),
-                Box::new(Type::Array(Box::new(Type::Variant(vec![
+                Box::new(Type::Array(Box::new(Type::variant(vec![
                     Type::String,
                     Type::Int64,
                     Type::Float64,
@@ -2418,7 +2643,7 @@ mod tests {
             max_dynamic_types: None,
             typed_paths:       vec![(
                 "strict_int".to_string(),
-                Box::new(Type::Variant(vec![Type::UInt32, Type::Int32])), // Only numeric types
+                Box::new(Type::variant(vec![Type::UInt32, Type::Int32])), // Only numeric types
             )],
             skip_paths:        vec![],
         };

@@ -12,14 +12,9 @@ impl Serializer for LowCardinalitySerializer {
     async fn write_prefix<W: ClickHouseWrite>(
         _type_: &Type,
         writer: &mut W,
-        state: &mut SerializerState,
+        _state: &mut SerializerState,
     ) -> Result<()> {
-        // JSON typed paths don't write version prefix - the Object structure handles it
-        // This matches ClickHouse's FLATTENED format where typed paths use their native
-        // serialization
-        if !state.in_json_type {
-            writer.write_u64_le(LOW_CARDINALITY_VERSION).await?;
-        }
+        writer.write_u64_le(LOW_CARDINALITY_VERSION).await?;
         Ok(())
     }
 
@@ -42,11 +37,9 @@ impl Serializer for LowCardinalitySerializer {
             return Ok(());
         }
 
-        // In JSON context, LowCardinality is always nullable because JSON fields can be
-        // missing/null This matches ClickHouse behavior where JSON object fields are
-        // inherently nullable regardless of their declared type (e.g.
-        // LowCardinality(String) still needs null in dictionary)
-        let is_nullable = if state.in_json_type { true } else { inner_type.is_nullable() };
+        // Nullability is derived from the declared inner type.
+        // For LowCardinality(Nullable(T)), include Null in the dictionary; otherwise do not.
+        let is_nullable = inner_type.is_nullable();
         let inner_type = inner_type.strip_null();
 
         let mut keys: IndexSet<&Value> = IndexSet::new();
@@ -69,11 +62,7 @@ impl Serializer for LowCardinalitySerializer {
             flags |= TUINT8;
         }
         flags |= HAS_ADDITIONAL_KEYS_BIT;
-        // JSON context requires NEED_GLOBAL_DICTIONARY_BIT flag for ClickHouse compatibility
-        // This indicates the dictionary is shared across the object structure
-        if state.in_json_type {
-            flags |= NEED_GLOBAL_DICTIONARY_BIT;
-        }
+
         writer.write_u64_le(flags).await?;
 
         writer.write_u64_le(keys.len() as u64).await?;
@@ -120,11 +109,8 @@ impl Serializer for LowCardinalitySerializer {
             return Ok(());
         }
 
-        // In JSON context, LowCardinality is always nullable because JSON fields can be
-        // missing/null This matches ClickHouse behavior where JSON object fields are
-        // inherently nullable regardless of their declared type (e.g.
-        // LowCardinality(String) still needs null in dictionary)
-        let is_nullable = if state.in_json_type { true } else { inner_type.is_nullable() };
+        // Nullability is derived from the declared inner type.
+        let is_nullable = inner_type.is_nullable();
         let inner_type = inner_type.strip_null();
 
         let mut keys: IndexSet<&Value> = IndexSet::new();
@@ -147,11 +133,7 @@ impl Serializer for LowCardinalitySerializer {
             flags |= TUINT8;
         }
         flags |= HAS_ADDITIONAL_KEYS_BIT;
-        // JSON context requires NEED_GLOBAL_DICTIONARY_BIT flag for ClickHouse compatibility
-        // This indicates the dictionary is shared across the object structure
-        if state.in_json_type {
-            flags |= NEED_GLOBAL_DICTIONARY_BIT;
-        }
+        // Do NOT set NEED_GLOBAL_DICTIONARY_BIT in Native format (see comment above).
         writer.put_u64_le(flags);
 
         writer.put_u64_le(keys.len() as u64);
@@ -185,12 +167,9 @@ impl LowCardinalitySerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // JSON typed paths don't write version prefix - the Object structure handles it
-        // This matches ClickHouse's FLATTENED format where typed paths use their native
-        // serialization
-        if !state.in_json_type {
-            writer.put_u64_le(LOW_CARDINALITY_VERSION);
-        }
+        // Always write LC version in prefix (see async version comment).
+        let _ = state; // state is unused for prefix version
+        writer.put_u64_le(LOW_CARDINALITY_VERSION);
         Ok(())
     }
 }

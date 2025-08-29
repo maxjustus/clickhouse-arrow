@@ -597,7 +597,7 @@ pub fn generate_json_typed_paths_variant_test_block() -> Block {
             max_dynamic_types: None,
             typed_paths:       vec![(
                 "value".to_string(),
-                Box::new(Type::Variant(vec![Type::String, Type::Int64, Type::Float64])),
+                Box::new(Type::variant(vec![Type::String, Type::Int64, Type::Float64])),
             )],
             skip_paths:        vec![],
         })],

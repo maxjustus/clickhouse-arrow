@@ -6,3 +6,5 @@
 - deal with deprecated JSON fields - refactor to fully reuse Dynamic functionality and get rid of duplicative code
 - we should generate golden files from --format Variant queries to verify how we're serializing to match clickhouse
   or just run commands directly and diff?
+
+  is in_json_type name accurate enough? is it really via_typed_json_path or something?

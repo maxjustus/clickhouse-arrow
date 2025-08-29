@@ -904,6 +904,7 @@ version = "0.1.3"
 dependencies = [
  "anyhow",
  "atty",
+ "bytes",
  "clap",
  "clickhouse-arrow",
  "futures",

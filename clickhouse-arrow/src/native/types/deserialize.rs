@@ -612,6 +612,8 @@ impl FromStr for Type {
                             "Variant expects at least one type argument".to_string(),
                         ));
                     }
+                    // Preserve declared order for Variant inner types. Canonical ordering for
+                    // discriminators is handled at runtime by DiscriminatorMap.
                     let inner: Vec<Type> =
                         args.into_iter().map(Type::from_str).collect::<Result<_, _>>()?;
                     Type::Variant(inner)

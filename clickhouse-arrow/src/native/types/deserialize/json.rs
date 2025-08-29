@@ -49,15 +49,13 @@ impl JsonDeserializer {
                 // Read values for each path
                 let mut path_values = HashMap::new();
 
-                // First read typed path columns (part of v3 format)
-                for (path_name, type_) in &typed_paths {
-                    // Read prefix for this typed column with a fresh state to avoid conflicts
-                    let mut typed_state = DeserializerState::default();
-                    type_.deserialize_prefix_async(reader, &mut typed_state).await?;
-                    let values = type_.deserialize_column(reader, rows, &mut typed_state).await?;
-                    let old = path_values.insert(path_name.clone(), values);
-                    debug_assert!(old.is_none());
-                }
+        // Typed path prefixes were already read in read_prefix; now read their data
+        for (path_name, type_) in &typed_paths {
+            let mut typed_state = DeserializerState::default();
+            let values = type_.deserialize_column(reader, rows, &mut typed_state).await?;
+            let old = path_values.insert(path_name.clone(), values);
+            debug_assert!(old.is_none());
+        }
 
                 for (path_idx, path_name) in path_names.iter().enumerate() {
                     let (total_types, types) = &dynamic_data[path_idx];
@@ -144,15 +142,13 @@ impl JsonDeserializer {
                 // Read values for each path
                 let mut path_values = HashMap::new();
 
-                // First read typed path columns (part of v3 format)
-                for (path_name, type_) in &typed_paths {
-                    // Read prefix for this typed column with a fresh state to avoid conflicts
-                    let mut typed_state = DeserializerState::default();
-                    type_.deserialize_prefix(reader)?;
-                    let values = type_.deserialize_column_sync(reader, rows, &mut typed_state)?;
-                    let old = path_values.insert(path_name.clone(), values);
-                    debug_assert!(old.is_none());
-                }
+        // Typed path prefixes were already read in read_prefix; now read their data
+        for (path_name, type_) in &typed_paths {
+            let mut typed_state = DeserializerState::default();
+            let values = type_.deserialize_column_sync(reader, rows, &mut typed_state)?;
+            let old = path_values.insert(path_name.clone(), values);
+            debug_assert!(old.is_none());
+        }
 
                 for (path_idx, path_name) in path_names.iter().enumerate() {
                     let (total_types, types) = &dynamic_data[path_idx];
@@ -349,7 +345,7 @@ impl Deserializer for JsonDeserializer {
             _ => vec![],
         };
 
-        // Read ALL paths from ObjectStructure (V3 format includes both typed and dynamic)
+        // Read flattened (dynamic) paths from ObjectStructure (v3 FLATTENED)
         let total_paths = reader.read_var_uint().await?;
 
         // Read path names
@@ -361,7 +357,7 @@ impl Deserializer for JsonDeserializer {
             all_path_names.push(path_name);
         }
 
-        // Separate typed and dynamic paths
+        // Separate typed and dynamic paths (typed are not listed in FLATTENED header)
         let typed_path_names: std::collections::HashSet<String> =
             typed_paths.iter().map(|(name, _)| name.clone()).collect();
         let dynamic_path_names: Vec<String> = all_path_names
@@ -370,21 +366,9 @@ impl Deserializer for JsonDeserializer {
             .cloned()
             .collect();
 
-        // Read typed path prefixes using their native serializers
-        for (path_name, type_) in &typed_paths {
-            if all_path_names.contains(path_name) {
-                // Set JSON context flag for special handling of LowCardinality and Variant
-                // In JSON context, these types need different behavior (no version prefix)
-                if matches!(type_, Type::LowCardinality(_) | Type::Variant(_)) {
-                    state.in_json_type = true;
-                }
-
-                // This typed path has data, read its prefix
-                type_.deserialize_prefix_async(reader, state).await?;
-
-                // Reset the flag
-                state.in_json_type = false;
-            }
+        // Read typed path prefixes using their native serializers (always present)
+        for (_path_name, type_) in &typed_paths {
+            type_.deserialize_prefix_async(reader, state).await?;
         }
 
         // Read Dynamic headers for dynamic paths only
@@ -425,7 +409,9 @@ impl Deserializer for JsonDeserializer {
             path_dynamic_states: BTreeMap::new(),
             typed_path_states: BTreeMap::new(), // Not used in deserialization
             // Deprecated fields - leave as default
+            #[allow(deprecated)]
             paths: vec![],
+            #[allow(deprecated)]
             path_columns: None,
         });
         Ok(())
@@ -474,7 +460,7 @@ impl JsonDeserializer {
             _ => vec![],
         };
 
-        // Read ALL paths from ObjectStructure (V3 format includes both typed and dynamic)
+        // Read flattened (dynamic) paths from ObjectStructure (v3 FLATTENED)
         let total_paths = reader.try_get_var_uint()?;
 
         // Read path names
@@ -486,7 +472,7 @@ impl JsonDeserializer {
             all_path_names.push(path_name);
         }
 
-        // Separate typed and dynamic paths
+        // Separate typed and dynamic paths (typed are not listed in FLATTENED header)
         let typed_path_names: std::collections::HashSet<String> =
             typed_paths.iter().map(|(name, _)| name.clone()).collect();
         let dynamic_path_names: Vec<String> = all_path_names
@@ -495,12 +481,9 @@ impl JsonDeserializer {
             .cloned()
             .collect();
 
-        // Read typed path prefixes using their native serializers
-        for (path_name, type_) in &typed_paths {
-            if all_path_names.contains(path_name) {
-                // This typed path has data, read its prefix
-                type_.deserialize_prefix(reader)?;
-            }
+        // Read typed path prefixes using their native serializers (always present)
+        for (_path_name, type_) in &typed_paths {
+            type_.deserialize_prefix(reader)?;
         }
 
         // Read Dynamic headers for dynamic paths only
@@ -541,7 +524,9 @@ impl JsonDeserializer {
             path_dynamic_states: BTreeMap::new(),
             typed_path_states: BTreeMap::new(), // Not used in deserialization
             // Deprecated fields - leave as default
+            #[allow(deprecated)]
             paths: vec![],
+            #[allow(deprecated)]
             path_columns: None,
         });
         Ok(())

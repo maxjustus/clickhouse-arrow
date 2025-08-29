@@ -65,7 +65,6 @@ pub(crate) struct DeserializerState<T: Default = ()> {
     pub(crate) options:       Option<ArrowOptions>,
     pub(crate) deserializer:  T,
     pub(crate) type_specific: TypeSpecificState,
-    pub(crate) in_json_type:  bool,
 }
 
 impl<T: Default> DeserializerState<T> {
@@ -86,7 +85,6 @@ pub(crate) struct SerializerState<T: Default = ()> {
     pub(crate) serializer:     T,
     pub(crate) server_version: Option<(u64, u64, u64)>,
     pub(crate) type_specific:  TypeSpecificState,
-    pub(crate) in_json_type:   bool,
 }
 
 impl<T: Default> SerializerState<T> {

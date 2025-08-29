@@ -28,10 +28,8 @@ impl DynamicSerializer {
         // Analyze values and create Dynamic state
         let analyzed_state = Self::analyze_values(values);
 
-        // Write Dynamic FLATTENED header (skip version in JSON context)
-        if !state.in_json_type {
-            writer.write_u64_le(DYNAMIC_VERSION_FLATTENED).await?;
-        }
+        // Write Dynamic FLATTENED header version
+        writer.write_u64_le(DYNAMIC_VERSION_FLATTENED).await?;
 
         if let TypeSpecificState::Dynamic(ref dynamic_state) = analyzed_state {
             // Write type count and names
@@ -59,10 +57,8 @@ impl DynamicSerializer {
         // Analyze values and create Dynamic state
         let analyzed_state = Self::analyze_values(values);
 
-        // Write Dynamic FLATTENED header (skip version in JSON context)
-        if !state.in_json_type {
-            writer.put_u64_le(DYNAMIC_VERSION_FLATTENED);
-        }
+        // Write Dynamic FLATTENED header version
+        writer.put_u64_le(DYNAMIC_VERSION_FLATTENED);
 
         if let TypeSpecificState::Dynamic(ref dynamic_state) = analyzed_state {
             // Write type count and names
@@ -318,10 +314,8 @@ impl DynamicSerializer {
 
         let version = Self::get_version(state);
         trace!("Writing Dynamic prefix with version {}", version);
-        // Skip version in JSON context (FLATTENED format)
-        if !state.in_json_type {
-            writer.write_u64_le(version).await?;
-        }
+        // Always write version; JSON FLATTENED expects a per-path Dynamic header version.
+        writer.write_u64_le(version).await?;
 
         // Check if we have metadata from previous analysis
         if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
@@ -391,10 +385,8 @@ impl DynamicSerializer {
         Self::check_server_version(state)?;
 
         let version = Self::get_version(state);
-        // Skip version in JSON context (FLATTENED format)
-        if !state.in_json_type {
-            writer.put_u64_le(version);
-        }
+        // Always write version; JSON FLATTENED expects a per-path Dynamic header version.
+        writer.put_u64_le(version);
 
         // Check if we have metadata from previous analysis
         if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {

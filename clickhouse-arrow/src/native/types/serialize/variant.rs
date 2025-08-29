@@ -103,12 +103,10 @@ impl VariantSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // JSON typed paths don't write version prefix - the Object structure handles it
-        // This matches ClickHouse's FLATTENED format where typed paths use their native
-        // serialization
-        if !state.in_json_type {
-            writer.write_u64_le(VERSION).await?;
-        }
+        // Write version. JSON FLATTENED relies on nested serializer prefixes for typed paths.
+        // We call these with a fresh SerializerState (no type-specific state) to avoid
+        // state leakage across paths.
+        writer.write_u64_le(VERSION).await?;
 
         // Write prefixes for nested types
         for inner_type in type_.unwrap_variant()? {
@@ -122,12 +120,10 @@ impl VariantSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // JSON typed paths don't write version prefix - the Object structure handles it
-        // This matches ClickHouse's FLATTENED format where typed paths use their native
-        // serialization
-        if !state.in_json_type {
-            writer.put_u64_le(VERSION);
-        }
+        // Write version. JSON FLATTENED relies on nested serializer prefixes for typed paths.
+        // We call these with a fresh SerializerState (no type-specific state) to avoid
+        // state leakage across paths.
+        writer.put_u64_le(VERSION);
 
         // Write prefixes for nested types
         for inner_type in type_.unwrap_variant()? {
@@ -276,7 +272,7 @@ mod tests {
     // Use the macro to create sync/async test pairs
     variant_roundtrip_test!(
         test_variant_simple,
-        Type::Variant(vec![Type::String, Type::UInt64]),
+        Type::variant(vec![Type::String, Type::UInt64]),
         vec![
             variant!(0, Value::String(b"hello".to_vec())),
             variant!(1, Value::UInt64(42)),
@@ -286,7 +282,7 @@ mod tests {
 
     variant_roundtrip_test!(
         test_variant_with_nulls,
-        Type::Variant(vec![Type::String, Type::UInt64]),
+        Type::variant(vec![Type::String, Type::UInt64]),
         vec![
             variant!(0, Value::String(b"test".to_vec())),
             variant!(0xFF, Value::Null),
@@ -296,7 +292,7 @@ mod tests {
 
     variant_roundtrip_test!(
         test_variant_complex_types,
-        Type::Variant(vec![Type::Array(Box::new(Type::String)), Type::Date]),
+        Type::variant(vec![Type::Array(Box::new(Type::String)), Type::Date]),
         vec![
             variant!(
                 0,
@@ -311,7 +307,7 @@ mod tests {
     fn test_variant_homogeneous() {
         use bytes::Buf;
 
-        let variant_type = Type::Variant(vec![Type::String, Type::UInt64, Type::Float64]);
+        let variant_type = Type::variant(vec![Type::String, Type::UInt64, Type::Float64]);
         // All UInt64 (discriminator 2 after sorting)
         let values: Vec<_> =
             (100..=500).step_by(100).map(|v| variant!(2, Value::UInt64(v))).collect();
@@ -331,7 +327,7 @@ mod tests {
 
     variant_roundtrip_test!(
         test_variant_sparse,
-        Type::Variant(vec![
+        Type::variant(vec![
             Type::String,
             Type::UInt64,
             Type::Float64,
@@ -352,7 +348,7 @@ mod tests {
 
     variant_roundtrip_test!(
         test_variant_with_nested_types,
-        Type::Variant(vec![
+        Type::variant(vec![
             Type::String,
             Type::Array(Box::new(Type::Nullable(Box::new(Type::UInt64)))),
             Type::Tuple(vec![Type::String, Type::UInt64]),
@@ -369,7 +365,7 @@ mod tests {
 
     variant_roundtrip_test!(
         test_variant_empty,
-        Type::Variant(vec![Type::String, Type::UInt64]),
+        Type::variant(vec![Type::String, Type::UInt64]),
         vec![]
     );
 
@@ -377,7 +373,7 @@ mod tests {
     fn test_variant_all_nulls() {
         use bytes::Buf;
 
-        let variant_type = Type::Variant(vec![Type::String, Type::UInt64, Type::Date]);
+        let variant_type = Type::variant(vec![Type::String, Type::UInt64, Type::Date]);
         let values = vec![variant!(0xFF, Value::Null); 4];
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
@@ -412,7 +408,7 @@ mod tests {
 
     variant_roundtrip_test!(
         test_variant_async,
-        Type::Variant(vec![Type::String, Type::UInt64]),
+        Type::variant(vec![Type::String, Type::UInt64]),
         vec![variant!(1, Value::UInt64(999)), variant!(0, Value::String(b"async".to_vec()))]
     );
 }

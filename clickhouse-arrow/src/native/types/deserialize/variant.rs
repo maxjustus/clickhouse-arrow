@@ -197,13 +197,10 @@ impl VariantDeserializer {
         reader: &mut R,
         state: &mut DeserializerState,
     ) -> Result<()> {
-        // JSON typed paths don't read version prefix - the Object structure handles it
-        // This matches ClickHouse's FLATTENED format where typed paths use their native
-        // serialization
-        if !state.in_json_type {
-            let version = reader.read_u64_le().await?;
-            check_version!(version);
-        }
+        // Read version. Typed-path prefixes are read via the nested serializer using a fresh
+        // DeserializerState to avoid leaking per-path state.
+        let version = reader.read_u64_le().await?;
+        check_version!(version);
 
         // Read prefixes for nested types
         for inner_type in type_.unwrap_variant()? {
@@ -226,6 +223,7 @@ impl VariantDeserializer {
         type_: &Type,
         reader: &mut R,
     ) -> Result<()> {
+        // Always read version here; callers only skip if they explicitly mark JSON data context.
         let version = reader.get_u64_le();
         check_version!(version);
 
@@ -338,7 +336,7 @@ mod tests {
 
     // Helper function to create multitype test data programmatically
     fn create_multitype_test_data() -> (Type, Vec<u8>) {
-        let variant_type = Type::Variant(vec![
+        let variant_type = Type::variant(vec![
             Type::UInt64,
             Type::String,
             Type::Date,
@@ -408,7 +406,7 @@ mod tests {
     // Use the macro to create sync/async test pairs
     variant_deserialization_test!(
         test_variant_simple_deserialization,
-        Type::Variant(vec![Type::String, Type::UInt64]),
+        Type::variant(vec![Type::String, Type::UInt64]),
         &[0u8, 1u8, 0u8],
         &[3, b'y', b'e', b's', 3, b'y', b'e', b's', 2, 0, 0, 0, 0, 0, 0, 0],
         &[
@@ -420,7 +418,7 @@ mod tests {
 
     variant_deserialization_test!(
         test_variant_null_deserialization,
-        Type::Variant(vec![Type::String, Type::UInt64]),
+        Type::variant(vec![Type::String, Type::UInt64]),
         &[0u8, 0xFF, 1u8],
         &[5, b'h', b'e', b'l', b'l', b'o', 42, 0, 0, 0, 0, 0, 0, 0],
         &[(0, Value::String(b"hello".to_vec())), (0xFF, Value::Null), (1, Value::UInt64(42))]
@@ -429,7 +427,7 @@ mod tests {
     #[test]
     fn test_variant_complex_array_deserialization() {
         let variant_type =
-            Type::Variant(vec![Type::Array(Box::new(Type::String)), Type::UInt64, Type::Date]);
+            Type::variant(vec![Type::Array(Box::new(Type::String)), Type::UInt64, Type::Date]);
         let date_bytes = 19723u16.to_le_bytes();
         let data = create_test_data(&[0u8, 1u8, 2u8], &[
             2,
@@ -538,7 +536,7 @@ mod tests {
     // Use the macro for async tests too
     variant_deserialization_test!(
         test_variant_async_basic_deserialization,
-        Type::Variant(vec![Type::String, Type::UInt64]),
+        Type::variant(vec![Type::String, Type::UInt64]),
         &[1u8, 0u8],
         &[4, b't', b'e', b's', b't', 100, 0, 0, 0, 0, 0, 0, 0],
         &[(1, Value::UInt64(100)), (0, Value::String(b"test".to_vec()))]
@@ -546,7 +544,7 @@ mod tests {
 
     variant_deserialization_test!(
         test_variant_async_different_types,
-        Type::Variant(vec![Type::String, Type::UInt32]),
+        Type::variant(vec![Type::String, Type::UInt32]),
         &[0u8, 1u8],
         &[
             4, b't', b'e', b's', b't', // 'test'
