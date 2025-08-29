@@ -1,4 +1,5 @@
 mod client;
+mod tcp_dump;
 
 use std::collections::HashMap;
 
@@ -7,6 +8,7 @@ use clap::Parser;
 use client::ClickHouseClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tcp_dump::{DumpFormat, TcpDumpConfig};
 use tokio::io::{AsyncBufReadExt, BufReader as AsyncBufReader};
 
 #[derive(Parser, Debug)]
@@ -73,6 +75,22 @@ struct Args {
     /// Output format: json, pretty
     #[arg(long, default_value = "json")]
     format: String,
+
+    /// Enable TCP dump output to stdout
+    #[arg(long)]
+    tcp_dump: bool,
+
+    /// Write TCP dump to file instead of stdout
+    #[arg(long)]
+    tcp_dump_file: Option<String>,
+
+    /// TCP dump format: hex, binary, json, pcap
+    #[arg(long, default_value = "hex")]
+    tcp_dump_format: String,
+
+    /// Include verbose TCP dump analysis
+    #[arg(long)]
+    tcp_dump_verbose: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -150,6 +168,29 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Validate TCP dump format
+    let tcp_dump_format = match args.tcp_dump_format.as_str() {
+        "hex" => DumpFormat::Hex,
+        "binary" => DumpFormat::Binary,
+        "json" => DumpFormat::Json,
+        "pcap" => DumpFormat::Pcap,
+        _ => {
+            output_json(&JsonOutput::error(format!(
+                "Invalid TCP dump format: {}. Supported: hex, binary, json, pcap",
+                args.tcp_dump_format
+            )));
+            std::process::exit(1);
+        }
+    };
+
+    // Create TCP dump config
+    let tcp_dump_config = TcpDumpConfig {
+        enabled:   args.tcp_dump,
+        format:    tcp_dump_format,
+        file_path: args.tcp_dump_file,
+        verbose:   args.tcp_dump_verbose,
+    };
+
     // Initialize ClickHouse client
     let client = match ClickHouseClient::new(
         &args.host,
@@ -159,6 +200,7 @@ async fn main() -> Result<()> {
         &args.database,
         args.secure,
         &args.compression,
+        tcp_dump_config,
     )
     .await
     {

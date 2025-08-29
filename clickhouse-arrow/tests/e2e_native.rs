@@ -21,6 +21,15 @@ e2e_test!(e2e_native_dynamic, tests::native::test_dynamic_round_trip, TRACING_DI
 #[cfg(feature = "derive")]
 e2e_test!(e2e_native_json, tests::native::test_json_round_trip, TRACING_DIRECTIVES, None);
 
+// Test JSON with Variant typed paths e2e
+#[cfg(feature = "derive")]
+e2e_test!(
+    e2e_native_json_typed_paths_variant,
+    tests::native::test_json_typed_paths_variant,
+    TRACING_DIRECTIVES,
+    None
+);
+
 // Test JSON with arrays e2e
 #[cfg(feature = "derive")]
 e2e_test!(e2e_native_json_arrays, tests::native::test_json_arrays, TRACING_DIRECTIVES, None);

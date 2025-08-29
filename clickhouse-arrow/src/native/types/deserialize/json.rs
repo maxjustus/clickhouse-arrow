@@ -11,7 +11,8 @@ use crate::native::values::Value;
 use crate::{Error, Result};
 
 // JSON serialization versions
-const JSON_OBJECT_VERSION_3: u64 = 3;
+// Using FLATTENED format (version 3) for client compatibility
+const JSON_OBJECT_VERSION_FLATTENED: u64 = 3;
 
 pub(crate) struct JsonDeserializer;
 
@@ -40,7 +41,7 @@ impl JsonDeserializer {
             };
 
         match version {
-            JSON_OBJECT_VERSION_3 => {
+            JSON_OBJECT_VERSION_FLATTENED => {
                 let dynamic_data = dynamic_data.ok_or_else(|| {
                     Error::DeserializeError("JSON object data not set".to_string())
                 })?;
@@ -73,7 +74,7 @@ impl JsonDeserializer {
 
                     // Read column data
                     let mut columns = HashMap::new();
-                    for (idx, (type_name, typ)) in types.iter().enumerate() {
+                    for (idx, (_type_name, typ)) in types.iter().enumerate() {
                         let type_idx = idx as u64;
                         if let Some(&count) = row_count_by_type.get(&type_idx)
                             && count > 0
@@ -135,7 +136,7 @@ impl JsonDeserializer {
             };
 
         match version {
-            JSON_OBJECT_VERSION_3 => {
+            JSON_OBJECT_VERSION_FLATTENED => {
                 let dynamic_data = dynamic_data.ok_or_else(|| {
                     Error::DeserializeError("JSON object data not set".to_string())
                 })?;
@@ -331,10 +332,10 @@ impl Deserializer for JsonDeserializer {
     ) -> Result<()> {
         let version = reader.read_u64_le().await?;
 
-        if version != JSON_OBJECT_VERSION_3 {
+        if version != JSON_OBJECT_VERSION_FLATTENED {
             return Err(Error::DeserializeError(format!(
-                "JSON type requires version 3, got version {version}. Please use ClickHouse \
-                 server >= 25.6"
+                "JSON type requires FLATTENED format (version 3), got version {version}. Please \
+                 use ClickHouse server >= 25.6"
             )));
         }
 
@@ -348,21 +349,47 @@ impl Deserializer for JsonDeserializer {
             _ => vec![],
         };
 
-        // Read dynamic paths from ObjectStructure (V3 format)
+        // Read ALL paths from ObjectStructure (V3 format includes both typed and dynamic)
         let total_paths = reader.read_var_uint().await?;
 
         // Read path names
-        let mut path_names = Vec::with_capacity(total_paths.try_into().unwrap_or(usize::MAX));
+        let mut all_path_names = Vec::with_capacity(total_paths.try_into().unwrap_or(usize::MAX));
         for _ in 0..total_paths {
             let path_bytes = reader.read_string().await?;
             let path_name = String::from_utf8(path_bytes)
                 .map_err(|e| Error::DeserializeError(format!("Invalid UTF-8 in path: {e}")))?;
-            path_names.push(path_name);
+            all_path_names.push(path_name);
         }
 
-        // Read Dynamic headers for each path
-        let mut dynamic_data = Vec::with_capacity(path_names.len());
-        for path_name in &path_names {
+        // Separate typed and dynamic paths
+        let typed_path_names: std::collections::HashSet<String> =
+            typed_paths.iter().map(|(name, _)| name.clone()).collect();
+        let dynamic_path_names: Vec<String> = all_path_names
+            .iter()
+            .filter(|name| !typed_path_names.contains(*name))
+            .cloned()
+            .collect();
+
+        // Read typed path prefixes using their native serializers
+        for (path_name, type_) in &typed_paths {
+            if all_path_names.contains(path_name) {
+                // Set JSON context flag for special handling of LowCardinality and Variant
+                // In JSON context, these types need different behavior (no version prefix)
+                if matches!(type_, Type::LowCardinality(_) | Type::Variant(_)) {
+                    state.in_json_type = true;
+                }
+
+                // This typed path has data, read its prefix
+                type_.deserialize_prefix_async(reader, state).await?;
+
+                // Reset the flag
+                state.in_json_type = false;
+            }
+        }
+
+        // Read Dynamic headers for dynamic paths only
+        let mut dynamic_data = Vec::with_capacity(dynamic_path_names.len());
+        for path_name in &dynamic_path_names {
             // Read Dynamic version
             let dyn_version = reader.read_u64_le().await?;
             if dyn_version != 3 {
@@ -373,31 +400,32 @@ impl Deserializer for JsonDeserializer {
 
             // Read types
             let total_types = reader.read_var_uint().await?;
-            let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
+            let mut type_list = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
             for _ in 0..total_types {
-                types.push(Self::parse_type_entry(reader.read_string().await?)?);
+                type_list.push(Self::parse_type_entry(reader.read_string().await?)?);
             }
 
             // Read prefixes
-            for (_, typ) in &types {
+            for (_, typ) in &type_list {
                 typ.deserialize_prefix_async(reader, state).await?;
             }
 
-            dynamic_data.push((total_types, types));
+            dynamic_data.push((total_types, type_list));
         }
 
         // Store metadata in state
         state.type_specific = TypeSpecificState::Json(JsonStateData {
             version: Some(version),
-            dynamic_paths: path_names.clone(),
+            dynamic_paths: dynamic_path_names.clone(),
             typed_paths,
             dynamic_path_columns: None,
             typed_path_columns: None,
             rows: None,
             dynamic_data: Some(dynamic_data),
             path_dynamic_states: BTreeMap::new(),
-            // Deprecated fields
-            paths: path_names,
+            typed_path_states: BTreeMap::new(), // Not used in deserialization
+            // Deprecated fields - leave as default
+            paths: vec![],
             path_columns: None,
         });
         Ok(())
@@ -429,10 +457,10 @@ impl JsonDeserializer {
         state: &mut DeserializerState,
     ) -> Result<()> {
         let version = reader.get_u64_le();
-        if version != JSON_OBJECT_VERSION_3 {
+        if version != JSON_OBJECT_VERSION_FLATTENED {
             return Err(Error::DeserializeError(format!(
-                "JSON type requires version 3, got version {version}. Please use ClickHouse \
-                 server >= 25.6"
+                "JSON type requires FLATTENED format (version 3), got version {version}. Please \
+                 use ClickHouse server >= 25.6"
             )));
         }
 
@@ -446,21 +474,38 @@ impl JsonDeserializer {
             _ => vec![],
         };
 
-        // Read dynamic paths from ObjectStructure (V3 format)
+        // Read ALL paths from ObjectStructure (V3 format includes both typed and dynamic)
         let total_paths = reader.try_get_var_uint()?;
 
         // Read path names
-        let mut path_names = Vec::with_capacity(total_paths.try_into().unwrap_or(usize::MAX));
+        let mut all_path_names = Vec::with_capacity(total_paths.try_into().unwrap_or(usize::MAX));
         for _ in 0..total_paths {
             let path_bytes = reader.try_get_string()?;
             let path_name = String::from_utf8(path_bytes.to_vec())
                 .map_err(|e| Error::DeserializeError(format!("Invalid UTF-8 in path: {e}")))?;
-            path_names.push(path_name);
+            all_path_names.push(path_name);
         }
 
-        // Read Dynamic headers for each path
-        let mut dynamic_data = Vec::with_capacity(path_names.len());
-        for path_name in &path_names {
+        // Separate typed and dynamic paths
+        let typed_path_names: std::collections::HashSet<String> =
+            typed_paths.iter().map(|(name, _)| name.clone()).collect();
+        let dynamic_path_names: Vec<String> = all_path_names
+            .iter()
+            .filter(|name| !typed_path_names.contains(*name))
+            .cloned()
+            .collect();
+
+        // Read typed path prefixes using their native serializers
+        for (path_name, type_) in &typed_paths {
+            if all_path_names.contains(path_name) {
+                // This typed path has data, read its prefix
+                type_.deserialize_prefix(reader)?;
+            }
+        }
+
+        // Read Dynamic headers for dynamic paths only
+        let mut dynamic_data = Vec::with_capacity(dynamic_path_names.len());
+        for path_name in &dynamic_path_names {
             // Read Dynamic version
             let dyn_version = reader.get_u64_le();
             if dyn_version != 3 {
@@ -471,31 +516,32 @@ impl JsonDeserializer {
 
             // Read types
             let total_types = reader.try_get_var_uint()?;
-            let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
+            let mut type_list = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
             for _ in 0..total_types {
-                types.push(Self::parse_type_entry(reader.try_get_string()?.to_vec())?);
+                type_list.push(Self::parse_type_entry(reader.try_get_string()?.to_vec())?);
             }
 
             // Read prefixes for nested types
-            for (_, typ) in &types {
+            for (_, typ) in &type_list {
                 typ.deserialize_prefix(reader)?;
             }
 
-            dynamic_data.push((total_types, types));
+            dynamic_data.push((total_types, type_list));
         }
 
         // Store metadata in state
         state.type_specific = TypeSpecificState::Json(JsonStateData {
             version: Some(version),
-            dynamic_paths: path_names.clone(),
+            dynamic_paths: dynamic_path_names.clone(),
             typed_paths,
             dynamic_path_columns: None,
             typed_path_columns: None,
             rows: None,
             dynamic_data: Some(dynamic_data),
             path_dynamic_states: BTreeMap::new(),
-            // Deprecated fields
-            paths: path_names,
+            typed_path_states: BTreeMap::new(), // Not used in deserialization
+            // Deprecated fields - leave as default
+            paths: vec![],
             path_columns: None,
         });
         Ok(())
@@ -720,8 +766,8 @@ mod tests {
         // Test data matching the async version
         let mut buffer = Vec::new();
 
-        // Write JSON_OBJECT_VERSION_3
-        buffer.extend_from_slice(&JSON_OBJECT_VERSION_3.to_le_bytes());
+        // Write JSON_OBJECT_VERSION_FLATTENED
+        buffer.extend_from_slice(&JSON_OBJECT_VERSION_FLATTENED.to_le_bytes());
 
         // Write total_paths (1 path)
         buffer.extend_from_slice(&[1u8]); // varint 1
@@ -764,7 +810,7 @@ mod tests {
         // Validate state was properly set
         match &state.type_specific {
             TypeSpecificState::Json(json_state) => {
-                assert_eq!(json_state.version, Some(JSON_OBJECT_VERSION_3));
+                assert_eq!(json_state.version, Some(JSON_OBJECT_VERSION_FLATTENED));
                 assert_eq!(json_state.dynamic_paths, vec!["user.name"]);
                 assert!(json_state.dynamic_data.is_some());
                 let dynamic_data = json_state.dynamic_data.as_ref().unwrap();
@@ -798,7 +844,7 @@ mod tests {
 
         let result = JsonDeserializer::read_prefix_sync(&json_type, &mut reader, &mut state);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires version 3"));
+        assert!(result.unwrap_err().to_string().contains("version 3"));
     }
 
     // Note: JSON sync roundtrip testing is handled by the integration test

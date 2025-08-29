@@ -65,6 +65,7 @@ pub(crate) struct DeserializerState<T: Default = ()> {
     pub(crate) options:       Option<ArrowOptions>,
     pub(crate) deserializer:  T,
     pub(crate) type_specific: TypeSpecificState,
+    pub(crate) in_json_type:  bool,
 }
 
 impl<T: Default> DeserializerState<T> {
@@ -85,6 +86,7 @@ pub(crate) struct SerializerState<T: Default = ()> {
     pub(crate) serializer:     T,
     pub(crate) server_version: Option<(u64, u64, u64)>,
     pub(crate) type_specific:  TypeSpecificState,
+    pub(crate) in_json_type:   bool,
 }
 
 impl<T: Default> SerializerState<T> {
@@ -126,19 +128,21 @@ pub struct DynamicState {
 /// Metadata for JSON type
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JsonState {
-    pub version:              Option<u64>,
+    pub version:                  Option<u64>,
     /// Dynamic paths that will use Dynamic serialization
-    pub dynamic_paths:        Vec<String>,
+    pub dynamic_paths:            Vec<String>,
     /// Typed paths with their declared types
-    pub typed_paths:          Vec<(String, Type)>,
+    pub typed_paths:              Vec<(String, Type)>,
     /// Column data for dynamic paths
-    pub dynamic_path_columns: Option<BTreeMap<String, Vec<Value>>>,
+    pub dynamic_path_columns:     Option<BTreeMap<String, Vec<Value>>>,
     /// Column data for typed paths (path -> values)
-    pub typed_path_columns:   Option<BTreeMap<String, Vec<Value>>>,
-    pub rows:                 Option<usize>,
-    pub dynamic_data:         Option<DynamicTypeData>,
-    /// Dynamic states for each dynamic path (filled during write_prefix)
-    pub path_dynamic_states:  BTreeMap<String, DynamicState>,
+    pub typed_path_columns:       Option<BTreeMap<String, Vec<Value>>>,
+    pub rows:                     Option<usize>,
+    pub dynamic_data:             Option<DynamicTypeData>,
+    /// Dynamic states for each dynamic path (filled during `write_prefix`)
+    pub path_dynamic_states:      BTreeMap<String, DynamicState>,
+    /// Serialization states for each typed path (filled during `analyze_values`)
+    pub(crate) typed_path_states: BTreeMap<String, SerializerState>,
 
     // Deprecated - kept for compatibility during migration
     #[deprecated(note = "Use dynamic_paths instead")]

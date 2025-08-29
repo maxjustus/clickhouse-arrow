@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)]
 use std::collections::HashMap;
 
 use tokio::io::AsyncWriteExt;
@@ -9,7 +10,8 @@ use crate::native::types::serialize::ClickHouseNativeSerializer;
 use crate::native::types::{Type, Value};
 use crate::{Result, write_discriminator};
 
-const DYNAMIC_VERSION: u64 = 3; // Always use v3 (flattened format)
+// Using FLATTENED format (version 3) for client compatibility
+const DYNAMIC_VERSION_FLATTENED: u64 = 3;
 
 /// Handles serialization of Dynamic types
 /// Dynamic is internally represented as a Variant with different serialization versions
@@ -26,8 +28,10 @@ impl DynamicSerializer {
         // Analyze values and create Dynamic state
         let analyzed_state = Self::analyze_values(values);
 
-        // Write Dynamic v3 header
-        writer.write_u64_le(DYNAMIC_VERSION).await?;
+        // Write Dynamic FLATTENED header (skip version in JSON context)
+        if !state.in_json_type {
+            writer.write_u64_le(DYNAMIC_VERSION_FLATTENED).await?;
+        }
 
         if let TypeSpecificState::Dynamic(ref dynamic_state) = analyzed_state {
             // Write type count and names
@@ -55,8 +59,10 @@ impl DynamicSerializer {
         // Analyze values and create Dynamic state
         let analyzed_state = Self::analyze_values(values);
 
-        // Write Dynamic v3 header
-        writer.put_u64_le(DYNAMIC_VERSION);
+        // Write Dynamic FLATTENED header (skip version in JSON context)
+        if !state.in_json_type {
+            writer.put_u64_le(DYNAMIC_VERSION_FLATTENED);
+        }
 
         if let TypeSpecificState::Dynamic(ref dynamic_state) = analyzed_state {
             // Write type count and names
@@ -124,8 +130,8 @@ impl DynamicSerializer {
         Ok(())
     }
 
-    /// Get Dynamic serialization version - always v3
-    fn get_version(_state: &SerializerState) -> u64 { DYNAMIC_VERSION }
+    /// Get Dynamic serialization version - always FLATTENED
+    fn get_version(_state: &SerializerState) -> u64 { DYNAMIC_VERSION_FLATTENED }
 
     /// Build type registry from values
     fn build_type_registry(
@@ -312,7 +318,10 @@ impl DynamicSerializer {
 
         let version = Self::get_version(state);
         trace!("Writing Dynamic prefix with version {}", version);
-        writer.write_u64_le(version).await?;
+        // Skip version in JSON context (FLATTENED format)
+        if !state.in_json_type {
+            writer.write_u64_le(version).await?;
+        }
 
         // Check if we have metadata from previous analysis
         if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
@@ -382,7 +391,10 @@ impl DynamicSerializer {
         Self::check_server_version(state)?;
 
         let version = Self::get_version(state);
-        writer.put_u64_le(version);
+        // Skip version in JSON context (FLATTENED format)
+        if !state.in_json_type {
+            writer.put_u64_le(version);
+        }
 
         // Check if we have metadata from previous analysis
         if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
@@ -631,7 +643,7 @@ mod tests {
 
                 // Verify version and type count
                 let mut reader = &sync_buffer[..];
-                assert_eq!(reader.get_u64_le(), DYNAMIC_VERSION);
+                assert_eq!(reader.get_u64_le(), DYNAMIC_VERSION_FLATTENED);
                 assert_eq!(reader.try_get_var_uint().unwrap(), $expected_type_count);
             }
         };
@@ -700,8 +712,8 @@ mod tests {
     fn test_dynamic_v3_prefix_format() {
         let mut buffer = Vec::new();
 
-        // Write v3 serialization version and type data
-        buffer.put_u64_le(DYNAMIC_VERSION);
+        // Write FLATTENED serialization version and type data
+        buffer.put_u64_le(DYNAMIC_VERSION_FLATTENED);
         buffer.put_var_uint(3).unwrap();
 
         // Write type names in alphabetical order
@@ -713,7 +725,7 @@ mod tests {
         // Verify round-trip deserialization
         let mut reader = &buffer[..];
         let version = reader.get_u64_le();
-        assert_eq!(version, DYNAMIC_VERSION);
+        assert_eq!(version, DYNAMIC_VERSION_FLATTENED);
         let total_types = reader.try_get_var_uint().unwrap();
         assert_eq!(total_types, 3);
         for expected in &type_names {

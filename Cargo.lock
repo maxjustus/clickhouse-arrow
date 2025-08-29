@@ -907,6 +907,7 @@ dependencies = [
  "clap",
  "clickhouse-arrow",
  "futures",
+ "hex",
  "serde",
  "serde_json",
  "tokio",

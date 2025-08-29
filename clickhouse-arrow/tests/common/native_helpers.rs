@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)]
 use chrono::NaiveDate;
 use chrono_tz::Tz;
 use clickhouse_arrow::native::block::Block;
@@ -571,6 +572,33 @@ pub fn generate_json_array_test_block() -> Block {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
+            skip_paths:        vec![],
+        })],
+        column_data:  rows,
+    }
+}
+
+pub fn generate_json_typed_paths_variant_test_block() -> Block {
+    let rows = vec![
+        // JSON with Variant typed paths - only values that match the Variant types
+        Value::String(br#"{"status": "active", "value": 42}"#.to_vec()),
+        Value::String(br#"{"status": "inactive", "value": 123}"#.to_vec()),
+        Value::String(br#"{"status": "pending", "value": 3.14}"#.to_vec()),
+        // Test with string values in Variant - use simple strings that can match String type
+        Value::String(br#"{"status": "completed", "value": "hello"}"#.to_vec()),
+        Value::String(br#"{"status": "failed", "value": "world"}"#.to_vec()),
+    ];
+
+    Block {
+        info:         BlockInfo::default(),
+        rows:         rows.len() as u64,
+        column_types: vec![("json_col".to_string(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![(
+                "value".to_string(),
+                Box::new(Type::Variant(vec![Type::String, Type::Int64, Type::Float64])),
+            )],
             skip_paths:        vec![],
         })],
         column_data:  rows,

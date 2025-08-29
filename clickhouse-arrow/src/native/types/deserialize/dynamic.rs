@@ -8,7 +8,8 @@ use crate::io::{ClickHouseBytesRead, ClickHouseRead};
 use crate::native::types::deserialize::{ClickHouseNativeDeserializer, read_discriminator};
 use crate::native::types::{Type, Value};
 
-const DYNAMIC_VERSION_V3: u64 = 3;
+// Using FLATTENED format (version 3) for client compatibility
+const DYNAMIC_VERSION_FLATTENED: u64 = 3;
 
 /// Handles deserialization of Dynamic types
 pub(crate) struct DynamicDeserializer;
@@ -80,7 +81,7 @@ impl DynamicDeserializer {
         let (version, total_types, types) =
             if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
                 (
-                    dynamic_state.version.unwrap_or(DYNAMIC_VERSION_V3),
+                    dynamic_state.version.unwrap_or(DYNAMIC_VERSION_FLATTENED),
                     dynamic_state.total_types,
                     dynamic_state.types.clone(),
                 )
@@ -90,7 +91,7 @@ impl DynamicDeserializer {
                 ));
             };
 
-        if version != DYNAMIC_VERSION_V3 {
+        if version != DYNAMIC_VERSION_FLATTENED {
             return Err(crate::Error::DeserializeError(format!(
                 "Dynamic type requires version 3, got version {version}. Please use ClickHouse \
                  server >= 25.6"
@@ -132,7 +133,7 @@ impl DynamicDeserializer {
         let (version, total_types, types) =
             if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
                 (
-                    dynamic_state.version.unwrap_or(DYNAMIC_VERSION_V3),
+                    dynamic_state.version.unwrap_or(DYNAMIC_VERSION_FLATTENED),
                     dynamic_state.total_types,
                     dynamic_state.types.clone(),
                 )
@@ -142,7 +143,7 @@ impl DynamicDeserializer {
                 ));
             };
 
-        if version != DYNAMIC_VERSION_V3 {
+        if version != DYNAMIC_VERSION_FLATTENED {
             return Err(crate::Error::DeserializeError(format!(
                 "Dynamic type requires version 3, got version {version}. Please use ClickHouse \
                  server >= 25.6"
@@ -181,7 +182,7 @@ impl DynamicDeserializer {
     ) -> Result<()> {
         let version = reader.read_u64_le().await?;
 
-        if version != DYNAMIC_VERSION_V3 {
+        if version != DYNAMIC_VERSION_FLATTENED {
             return Err(crate::Error::DeserializeError(format!(
                 "Dynamic type requires version 3, got version {version}. Please use ClickHouse \
                  server >= 25.6"
@@ -209,7 +210,7 @@ impl DynamicDeserializer {
         }
 
         state.type_specific = TypeSpecificState::Dynamic(DynamicState {
-            version: Some(DYNAMIC_VERSION_V3),
+            version: Some(DYNAMIC_VERSION_FLATTENED),
             total_types,
             type_names,
             type_map,
@@ -236,7 +237,7 @@ impl DynamicDeserializer {
     ) -> Result<()> {
         let version = reader.get_u64_le();
 
-        if version != DYNAMIC_VERSION_V3 {
+        if version != DYNAMIC_VERSION_FLATTENED {
             return Err(crate::Error::DeserializeError(format!(
                 "Dynamic type requires version 3, got version {version}. Please use ClickHouse \
                  server >= 25.6"
@@ -264,7 +265,7 @@ impl DynamicDeserializer {
         }
 
         state.type_specific = TypeSpecificState::Dynamic(DynamicState {
-            version: Some(DYNAMIC_VERSION_V3),
+            version: Some(DYNAMIC_VERSION_FLATTENED),
             total_types,
             type_names,
             type_map,

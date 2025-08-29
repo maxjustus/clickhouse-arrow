@@ -6,9 +6,9 @@
 /// - 256..=65535 types: u16
 /// - 65536..=4294967295 types: u32
 /// - More: u64
-
-/// Macro to write discriminator based on total types count
-/// Automatically selects the appropriate size (u8/u16/u32/u64)
+///
+/// Macro to write discriminator based on total types count.
+/// Automatically selects the appropriate size (u8/u16/u32/u64).
 #[macro_export]
 macro_rules! write_discriminator {
     (async $writer:expr, $disc:expr, $total_types:expr) => {{

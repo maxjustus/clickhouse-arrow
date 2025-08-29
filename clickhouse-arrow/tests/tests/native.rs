@@ -120,3 +120,17 @@ pub async fn test_evil_heterogeneous_json(ch: Arc<ClickHouseContainer>) {
         .await
         .expect("Evil heterogeneous JSON round trip failed");
 }
+
+/// Tests JSON with Variant typed paths round-trip serialization.
+///
+/// # Panics
+/// Panics if the JSON Variant typed paths round trip test fails.
+pub async fn test_json_typed_paths_variant(ch: Arc<ClickHouseContainer>) {
+    let harness = NativeRoundtripTestHarness::new(&ch).with_v3_format();
+    let block = generate_json_typed_paths_variant_test_block();
+
+    harness
+        .run_native_roundtrip_test("test_json_typed_paths_variant", &block)
+        .await
+        .expect("JSON Variant typed paths round trip failed");
+}

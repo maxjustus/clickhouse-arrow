@@ -7,9 +7,12 @@ use clickhouse_arrow::{
 use futures::StreamExt;
 use serde_json::Value;
 
+use crate::tcp_dump::TcpDumpConfig;
+
 /// ClickHouse client wrapper for testing the native format implementation
 pub struct ClickHouseClient {
-    client: Client<NativeFormat>,
+    client:          Client<NativeFormat>,
+    tcp_dump_config: TcpDumpConfig,
 }
 
 impl ClickHouseClient {
@@ -22,7 +25,15 @@ impl ClickHouseClient {
         database: &str,
         secure: bool,
         compression: &str,
+        tcp_dump_config: TcpDumpConfig,
     ) -> Result<Self> {
+        // TCP dump configuration warning
+        if tcp_dump_config.enabled {
+            eprintln!("WARNING: TCP dump support requires deep integration with clickhouse-arrow.");
+            eprintln!("Current implementation captures application-level data only.");
+            eprintln!("For complete raw TCP capture, use the Python script: ./scripts/chc-tcp.py");
+        }
+
         let endpoint =
             if secure { format!("https://{host}:{port}") } else { format!("{host}:{port}") };
 
@@ -42,7 +53,7 @@ impl ClickHouseClient {
 
         let client = builder.build_native().await.context("Failed to build ClickHouse client")?;
 
-        Ok(Self { client })
+        Ok(Self { client, tcp_dump_config })
     }
 
     /// Execute a query and return results as JSON
@@ -53,6 +64,11 @@ impl ClickHouseClient {
         _params: HashMap<String, Value>,
     ) -> Result<Vec<Value>> {
         tracing::debug!("Executing query: {}", query);
+
+        // Log query at application level if TCP dump is enabled
+        if self.tcp_dump_config.enabled {
+            self.log_application_data("QUERY", query.as_bytes());
+        }
 
         let mut stream = self
             .client
@@ -65,6 +81,13 @@ impl ClickHouseClient {
             let block = block_result.context("Failed to read block")?;
 
             let json_result = block_to_json(block)?;
+
+            // Log response data at application level if TCP dump is enabled
+            if self.tcp_dump_config.enabled {
+                let response_data = serde_json::to_vec(&json_result)
+                    .unwrap_or_else(|_| b"<failed to serialize>".to_vec());
+                self.log_application_data("RESPONSE", &response_data);
+            }
 
             results.push(json_result);
         }
@@ -141,6 +164,72 @@ impl ClickHouseClient {
         }
 
         Ok(Value::Null)
+    }
+
+    /// Log application-level data for TCP dump
+    fn log_application_data(&self, direction: &str, data: &[u8]) {
+        use crate::tcp_dump::DumpFormat;
+
+        match self.tcp_dump_config.format {
+            DumpFormat::Hex => {
+                println!();
+                println!("=== APPLICATION LEVEL {} ({} bytes) ===", direction, data.len());
+
+                // Print hex dump with ASCII sidebar
+                for (i, chunk) in data.chunks(16).enumerate() {
+                    print!("{:08x}  ", i * 16);
+
+                    // Print hex bytes
+                    for (j, byte) in chunk.iter().enumerate() {
+                        if j == 8 {
+                            print!(" ");
+                        }
+                        print!("{:02x} ", byte);
+                    }
+
+                    // Pad if chunk is less than 16 bytes
+                    if chunk.len() < 16 {
+                        for j in chunk.len()..16 {
+                            if j == 8 {
+                                print!(" ");
+                            }
+                            print!("   ");
+                        }
+                    }
+
+                    print!(" |");
+
+                    // Print ASCII representation
+                    for &byte in chunk {
+                        if byte >= 32 && byte <= 126 {
+                            print!("{}", byte as char);
+                        } else {
+                            print!(".");
+                        }
+                    }
+
+                    println!("|");
+                }
+            }
+            DumpFormat::Json => {
+                let json_data = serde_json::json!({
+                    "level": "application",
+                    "direction": direction,
+                    "size": data.len(),
+                    "data_hex": hex::encode(data),
+                    "data_utf8": String::from_utf8_lossy(data)
+                });
+                println!("{}", serde_json::to_string(&json_data).unwrap());
+            }
+            DumpFormat::Binary => {
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(data);
+            }
+            DumpFormat::Pcap => {
+                // PCAP format not implemented for application level
+                eprintln!("PCAP format not supported for application-level data");
+            }
+        }
     }
 }
 

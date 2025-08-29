@@ -17,6 +17,7 @@ futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 atty = "0.2"
+hex = "0.4"
 
 [features]
 default = []

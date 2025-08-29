@@ -197,8 +197,13 @@ impl VariantDeserializer {
         reader: &mut R,
         state: &mut DeserializerState,
     ) -> Result<()> {
-        let version = reader.read_u64_le().await?;
-        check_version!(version);
+        // JSON typed paths don't read version prefix - the Object structure handles it
+        // This matches ClickHouse's FLATTENED format where typed paths use their native
+        // serialization
+        if !state.in_json_type {
+            let version = reader.read_u64_le().await?;
+            check_version!(version);
+        }
 
         // Read prefixes for nested types
         for inner_type in type_.unwrap_variant()? {

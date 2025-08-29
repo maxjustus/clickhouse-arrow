@@ -103,7 +103,12 @@ impl VariantSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        writer.write_u64_le(VERSION).await?;
+        // JSON typed paths don't write version prefix - the Object structure handles it
+        // This matches ClickHouse's FLATTENED format where typed paths use their native
+        // serialization
+        if !state.in_json_type {
+            writer.write_u64_le(VERSION).await?;
+        }
 
         // Write prefixes for nested types
         for inner_type in type_.unwrap_variant()? {
@@ -117,7 +122,12 @@ impl VariantSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        writer.put_u64_le(VERSION);
+        // JSON typed paths don't write version prefix - the Object structure handles it
+        // This matches ClickHouse's FLATTENED format where typed paths use their native
+        // serialization
+        if !state.in_json_type {
+            writer.put_u64_le(VERSION);
+        }
 
         // Write prefixes for nested types
         for inner_type in type_.unwrap_variant()? {

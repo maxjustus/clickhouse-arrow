@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)]
 use clickhouse_arrow::native::block::Block;
 use clickhouse_arrow::native::block_info::BlockInfo;
 use clickhouse_arrow::prelude::*;
