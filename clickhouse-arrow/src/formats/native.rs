@@ -7,6 +7,7 @@ use crate::client::connection::ClientMetadata;
 use crate::compression::{compress_data_sync, decompress_data_async};
 use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::block::Block;
+// Already imported as `super::DeserializerState`
 use crate::native::protocol::CompressionMethod;
 use crate::prelude::*;
 
@@ -51,6 +52,7 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
         revision: u64,
         metadata: ClientMetadata,
     ) -> Result<()> {
+        // No-op: avoid noisy header logs in normal operation
         if let CompressionMethod::None = metadata.compression {
             data.write_async(writer, revision, header, Some(metadata))
                 .instrument(trace_span!("serialize_block"))
@@ -63,6 +65,8 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
 
             data.write(&mut buffer, revision, header, Some(metadata))
                 .inspect_err(|error| error!(?error, {ATT_QID} = %qid, "(block:compressed)"))?;
+
+            // Remove heavy debug bytes dump in normal operation
 
             compress_data_sync(writer, buffer.freeze(), metadata.compression)
                 .instrument(trace_span!("compress_block"))

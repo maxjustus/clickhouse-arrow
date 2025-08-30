@@ -60,3 +60,28 @@ e2e_test!(
     TRACING_DIRECTIVES,
     None
 );
+
+// InsertInto (streaming) e2e tests
+#[cfg(feature = "derive")]
+e2e_test!(
+    e2e_insert_into_nonjson_multi,
+    tests::native::test_insert_into_nonjson_multi,
+    TRACING_DIRECTIVES,
+    None
+);
+
+#[cfg(feature = "derive")]
+e2e_test!(
+    e2e_insert_into_mixed_json,
+    tests::native::test_insert_into_mixed_json,
+    TRACING_DIRECTIVES,
+    None
+);
+
+#[cfg(feature = "derive")]
+e2e_test!(
+    e2e_json_minimal_insert_into,
+    tests::native::test_json_minimal_insert_into,
+    TRACING_DIRECTIVES,
+    None
+);

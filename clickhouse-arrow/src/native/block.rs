@@ -180,6 +180,7 @@ impl ProtocolData<Self, ()> for Block {
 
         writer.write_var_uint(columns as u64).await?;
         writer.write_var_uint(self.rows).await?;
+        tracing::trace!(columns, rows=%self.rows, "block.write_async: dims");
 
         for (name, col_type) in self.column_types {
             let mut values = Vec::with_capacity(rows);
@@ -194,8 +195,10 @@ impl ProtocolData<Self, ()> for Block {
             }
 
             // EncodeStart
+            let ty_str = col_type.to_string();
+            tracing::trace!(col=%name, ty=%ty_str, "block.write_async: column header");
             writer.write_string(&name).await?;
-            writer.write_string(col_type.to_string()).await?;
+            writer.write_string(ty_str).await?;
 
             if self.rows > 0 {
                 if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
@@ -243,6 +246,7 @@ impl ProtocolData<Self, ()> for Block {
 
         writer.put_var_uint(columns as u64)?;
         writer.put_var_uint(self.rows)?;
+        tracing::trace!(columns, rows=%self.rows, "block.write: dims");
 
         for (name, col_type) in self.column_types {
             let mut values = Vec::with_capacity(rows);
@@ -257,8 +261,10 @@ impl ProtocolData<Self, ()> for Block {
             }
 
             // EncodeStart
+            let ty_str = col_type.to_string();
+            tracing::trace!(col=%name, ty=%ty_str, "block.write: column header");
             writer.put_string(&name)?;
-            writer.put_string(col_type.to_string())?;
+            writer.put_string(ty_str)?;
 
             if self.rows > 0 {
                 if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {

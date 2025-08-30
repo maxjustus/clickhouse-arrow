@@ -921,7 +921,7 @@ impl Serializer for JsonSerializer {
             // flattened dynamic paths. Typed paths are not listed here because
             // they have custom serializations and their own prefixes.
 
-            let typed_paths: Vec<String> =
+            let _typed_paths: Vec<String> =
                 json_state.typed_paths.iter().map(|(name, _)| name.clone()).collect();
             let dynamic_paths = json_state.dynamic_paths.clone();
             let dynamic_columns = json_state.dynamic_path_columns.clone();

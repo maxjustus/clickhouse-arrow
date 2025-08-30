@@ -283,6 +283,7 @@ impl<T: ClientFormat> InternalConn<T> {
             }
             // Inserts
             Operation::Insert { data, response } => {
+                tracing::trace!("send_insert: inserting single block");
                 let insert = InsertState::Data(data);
                 let header = self.executing.as_ref().and_then(|e| e.header.as_deref());
                 let result = self.send_insert(writer, insert, header, qid).await;
