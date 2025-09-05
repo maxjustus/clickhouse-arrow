@@ -42,6 +42,7 @@ impl JsonData {
             _ => false,
         }
     }
+
     /// Parse JSON values into path-organized structure
     fn from_values(
         values: Vec<Value>,
@@ -342,7 +343,6 @@ impl JsonData {
             });
         }
         match (value, expected_type) {
-
             // If already the exact type, return as is
             (v @ Value::Int8(_), Type::Int8) => Ok(v),
             (v @ Value::Int16(_), Type::Int16) => Ok(v),
@@ -1492,7 +1492,8 @@ mod tests {
         let mut cursor = Cursor::new(output);
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
-        let deserialized = type_.deserialize_column(&mut cursor, values.len(), &mut de_state).await?;
+        let deserialized =
+            type_.deserialize_column(&mut cursor, values.len(), &mut de_state).await?;
 
         // Validate: rows missing 'id' should have id = 0 in JSON
         for (i, v) in deserialized.iter().enumerate() {
@@ -1514,7 +1515,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_typed_lowcard_nonnullable_defaults() -> Result<()> {
-        // Typed path 'status' is LowCardinality(String) non-nullable. Missing values should default to "".
+        // Typed path 'status' is LowCardinality(String) non-nullable. Missing values should default
+        // to "".
         let values = vec![
             Value::String(br#"{"name": "Alice"}"#.to_vec()),
             Value::String(br#"{"name": "Bob", "status": "ok"}"#.to_vec()),
@@ -1542,7 +1544,8 @@ mod tests {
         let mut cursor = Cursor::new(output);
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
-        let deserialized = type_.deserialize_column(&mut cursor, values.len(), &mut de_state).await?;
+        let deserialized =
+            type_.deserialize_column(&mut cursor, values.len(), &mut de_state).await?;
 
         // Validate: rows missing 'status' should have status = "" in JSON
         for (i, v) in deserialized.iter().enumerate() {
@@ -1564,7 +1567,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_typed_variant_null_missing() -> Result<()> {
-        // Typed path 'value' is Variant(String, UInt64). Missing should map to Variant null (JSON null).
+        // Typed path 'value' is Variant(String, UInt64). Missing should map to Variant null (JSON
+        // null).
         let values = vec![
             Value::String(br#"{"name": "Alice"}"#.to_vec()),
             Value::String(br#"{"name": "Bob", "value": "x"}"#.to_vec()),
@@ -1592,7 +1596,8 @@ mod tests {
         let mut cursor = Cursor::new(output);
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
-        let deserialized = type_.deserialize_column(&mut cursor, values.len(), &mut de_state).await?;
+        let deserialized =
+            type_.deserialize_column(&mut cursor, values.len(), &mut de_state).await?;
 
         // Validate: missing 'value' => JSON null; others preserved
         for (i, v) in deserialized.iter().enumerate() {
@@ -1788,9 +1793,10 @@ mod tests {
     #[tokio::test]
     async fn test_json_typed_paths_clickhouse_ordering() -> Result<()> {
         // Test the exact scenario from ClickHouse hex dump:
-        // select map('a', ['b' || toString(number)])::JSON(a Array(Variant(String, Int64))) as z from system.numbers limit 5
-        // ClickHouse reorders to JSON(a Array(Variant(Int64, String))) so discriminators are:
-        // - Int64 → discriminator 0  
+        // select map('a', ['b' || toString(number)])::JSON(a Array(Variant(String, Int64))) as z
+        // from system.numbers limit 5 ClickHouse reorders to JSON(a Array(Variant(Int64,
+        // String))) so discriminators are:
+        // - Int64 → discriminator 0
         // - String → discriminator 1
 
         let values = vec![
@@ -1805,20 +1811,20 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![(
+            typed_paths:       vec![(
                 "a".to_string(),
                 // This will be sorted alphabetically: Int64, String
                 Box::new(Type::Array(Box::new(Type::variant(vec![Type::String, Type::Int64])))),
             )],
-            skip_paths: vec![],
+            skip_paths:        vec![],
         };
 
         // Analyze values
         let state = JsonSerializer::analyze_values(&values, &type_)?;
-        
+
         if let TypeSpecificState::Json(json_state) = &state {
             println!("=== CLICKHOUSE ORDERING TEST ===");
-            
+
             // Check that we have typed path "a"
             assert_eq!(json_state.typed_paths.len(), 1);
             assert!(json_state.typed_paths.iter().any(|(name, _)| name == "a"));
@@ -1826,13 +1832,17 @@ mod tests {
             if let Some(typed_columns) = &json_state.typed_path_columns {
                 if let Some(a_column) = typed_columns.get("a") {
                     println!("Column 'a' has {} values", a_column.len());
-                    
-                    // Check that string values like "b0" get discriminator 1 (String is alphabetically second)
+
+                    // Check that string values like "b0" get discriminator 1 (String is
+                    // alphabetically second)
                     for (i, value) in a_column.iter().enumerate() {
                         if let Value::Array(arr) = value {
                             if let Some(Value::Variant(discriminator, inner_val)) = arr.first() {
-                                println!("Row {}: discriminator {}, value: {:?}", i, discriminator, inner_val);
-                                // String values should get discriminator 1 (Int64=0, String=1)  
+                                println!(
+                                    "Row {}: discriminator {}, value: {:?}",
+                                    i, discriminator, inner_val
+                                );
+                                // String values should get discriminator 1 (Int64=0, String=1)
                                 assert_eq!(*discriminator, 1, "String discriminator should be 1");
                             }
                         }

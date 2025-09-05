@@ -85,3 +85,26 @@ e2e_test!(
     TRACING_DIRECTIVES,
     None
 );
+
+// Test direct serde JSON/Object deserialization for JSON columns
+#[cfg(feature = "derive")]
+e2e_test!(
+    e2e_json_direct_serde,
+    tests::native::test_json_direct_deserialize,
+    TRACING_DIRECTIVES,
+    None
+);
+
+#[cfg(feature = "derive")]
+e2e_test!(
+    e2e_json_direct_dynamic,
+    tests::native::test_json_direct_dynamic,
+    TRACING_DIRECTIVES,
+    None
+);
+
+#[cfg(feature = "serde")]
+e2e_test!(e2e_query_json_basic, tests::native::test_query_json_basic, TRACING_DIRECTIVES, None);
+
+#[cfg(feature = "serde")]
+e2e_test!(e2e_json_map_roundtrip, tests::native::test_json_map_roundtrip, TRACING_DIRECTIVES, None);

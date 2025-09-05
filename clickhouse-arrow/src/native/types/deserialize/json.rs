@@ -49,13 +49,13 @@ impl JsonDeserializer {
                 // Read values for each path
                 let mut path_values = HashMap::new();
 
-        // Typed path prefixes were already read in read_prefix; now read their data
-        for (path_name, type_) in &typed_paths {
-            let mut typed_state = DeserializerState::default();
-            let values = type_.deserialize_column(reader, rows, &mut typed_state).await?;
-            let old = path_values.insert(path_name.clone(), values);
-            debug_assert!(old.is_none());
-        }
+                // Typed path prefixes were already read in read_prefix; now read their data
+                for (path_name, type_) in &typed_paths {
+                    let mut typed_state = DeserializerState::default();
+                    let values = type_.deserialize_column(reader, rows, &mut typed_state).await?;
+                    let old = path_values.insert(path_name.clone(), values);
+                    debug_assert!(old.is_none());
+                }
 
                 for (path_idx, path_name) in path_names.iter().enumerate() {
                     let (total_types, types) = &dynamic_data[path_idx];
@@ -142,13 +142,13 @@ impl JsonDeserializer {
                 // Read values for each path
                 let mut path_values = HashMap::new();
 
-        // Typed path prefixes were already read in read_prefix; now read their data
-        for (path_name, type_) in &typed_paths {
-            let mut typed_state = DeserializerState::default();
-            let values = type_.deserialize_column_sync(reader, rows, &mut typed_state)?;
-            let old = path_values.insert(path_name.clone(), values);
-            debug_assert!(old.is_none());
-        }
+                // Typed path prefixes were already read in read_prefix; now read their data
+                for (path_name, type_) in &typed_paths {
+                    let mut typed_state = DeserializerState::default();
+                    let values = type_.deserialize_column_sync(reader, rows, &mut typed_state)?;
+                    let old = path_values.insert(path_name.clone(), values);
+                    debug_assert!(old.is_none());
+                }
 
                 for (path_idx, path_name) in path_names.iter().enumerate() {
                     let (total_types, types) = &dynamic_data[path_idx];

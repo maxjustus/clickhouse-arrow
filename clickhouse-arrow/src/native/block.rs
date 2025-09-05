@@ -195,7 +195,8 @@ impl ProtocolData<Self, ()> for Block {
             }
 
             // EncodeStart
-            let ty_str = col_type.to_string();
+            // Compute type string, allowing conditional Object('json') for older servers
+            let ty_str = format_type_for_header(&col_type, &options);
             tracing::trace!(col=%name, ty=%ty_str, "block.write_async: column header");
             writer.write_string(&name).await?;
             writer.write_string(ty_str).await?;
@@ -261,7 +262,7 @@ impl ProtocolData<Self, ()> for Block {
             }
 
             // EncodeStart
-            let ty_str = col_type.to_string();
+            let ty_str = format_type_for_header(&col_type, &options);
             tracing::trace!(col=%name, ty=%ty_str, "block.write: column header");
             writer.put_string(&name)?;
             writer.put_string(ty_str)?;
@@ -413,5 +414,16 @@ impl ProtocolData<Self, ()> for Block {
         }
 
         Ok(block)
+    }
+}
+
+fn format_type_for_header(
+    ty: &Type,
+    _options: &Option<crate::client::connection::ClientMetadata>,
+) -> String {
+    match ty {
+        // Safe, backward-compatible emission for legacy Object JSON columns
+        Type::Object => "Object('json')".to_string(),
+        _ => ty.to_string(),
     }
 }

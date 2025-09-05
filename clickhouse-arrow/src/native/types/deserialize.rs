@@ -401,6 +401,11 @@ impl FromStr for Type {
         let following = following.trim();
         if !following.is_empty() {
             return Ok(match ident {
+                "Object" => {
+                    // Accept Object with optional arguments like Object('json') and ignore params
+                    let _args = parse_variable_args(following)?; // validate parens
+                    Type::Object
+                }
                 "Decimal" => {
                     let (args, count) = parse_fixed_args::<2>(following)?;
                     if count != 2 {
@@ -579,9 +584,29 @@ impl FromStr for Type {
                     Type::Array(Box::new(Type::from_str(args[0])?))
                 }
                 "Tuple" => {
+                    // Support both positional and named tuple fields, e.g.:
+                    //   Tuple(Int8, String)
+                    //   Tuple(id Int8, name String)
                     let args = parse_variable_args(following)?;
-                    let inner: Vec<Type> =
-                        args.into_iter().map(Type::from_str).collect::<Result<_, _>>()?;
+                    let mut inner: Vec<Type> = Vec::with_capacity(args.len());
+                    for arg in args {
+                        // Try plain positional type first
+                        match Type::from_str(arg) {
+                            Ok(t) => inner.push(t),
+                            Err(_) => {
+                                // Fallback: accept named field form "name Type"
+                                let (ident, rest) = eat_identifier(arg);
+                                let rest = rest.trim();
+                                if !ident.is_empty() && !rest.is_empty() {
+                                    inner.push(Type::from_str(rest)?);
+                                } else {
+                                    return Err(Error::TypeParseError(format!(
+                                        "invalid type with arguments: '{arg}' (ident = {ident})"
+                                    )));
+                                }
+                            }
+                        }
+                    }
                     Type::Tuple(inner)
                 }
                 "Nullable" => {

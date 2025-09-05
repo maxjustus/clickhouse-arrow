@@ -465,7 +465,7 @@ impl<T: ClientFormat> Client<T> {
             .await?;
 
         // Wait for the server's Header before sending data
-        let _ = header_rx
+        let _header = header_rx
             .await
             .map_err(|_| Error::Protocol(format!("Failed to receive header for query {qid}")))?;
 
@@ -475,9 +475,9 @@ impl<T: ClientFormat> Client<T> {
             .send_operation(Operation::Insert { data: block, response: tx_insert }, qid, true)
             .await?;
         // Await insert ack
-        rx_insert
-            .await
-            .map_err(|_| Error::Protocol(format!("Failed to receive response from insert {qid}")))??;
+        rx_insert.await.map_err(|_| {
+            Error::Protocol(format!("Failed to receive response from insert {qid}"))
+        })??;
 
         trace!({ ATT_CID } = self.client_id, { ATT_QID } = %qid, "sent insert data, awaiting query response stream");
         // Now await the query response stream
@@ -1397,6 +1397,89 @@ impl Client<NativeFormat> {
         stream.next().await.transpose()
     }
 
+    /// Query `ClickHouse` and return rows as dynamic JSON objects.
+    ///
+    /// This method executes a query and returns the results as a vector of
+    /// `serde_json::Map<String, serde_json::Value>` objects, providing schema-less
+    /// access to query results. Each row becomes a JSON object with column names
+    /// as keys and column values converted to appropriate JSON types.
+    ///
+    /// This method is the inverse of the serde Object-based dynamic insert functionality,
+    /// allowing for flexible data retrieval without predefined structs.
+    ///
+    /// # Arguments
+    /// * `query` - The SQL query to execute
+    /// * `qid` - Optional query ID for tracking and debugging
+    ///
+    /// # Returns
+    /// A `Result` containing a vector of JSON objects (one per row)
+    ///
+    /// # Errors
+    /// - Fails if the query is malformed or contains syntax errors.
+    /// - Fails if the connection to `ClickHouse` is interrupted.
+    /// - Fails if `ClickHouse` returns an exception.
+    /// - Fails if data conversion to JSON fails.
+    ///
+    /// # Examples
+    /// ```rust,ignore
+    /// use clickhouse_arrow::prelude::*;
+    ///
+    /// let client = Client::builder()
+    ///     .destination("localhost:9000")
+    ///     .build_native()
+    ///     .await?;
+    ///
+    /// let rows = client.query_json("SELECT id, name, created_at FROM users LIMIT 10", None).await?;
+    /// for row in rows {
+    ///     println!("ID: {}, Name: {}", row["id"], row["name"]);
+    /// }
+    /// ```
+    #[cfg(feature = "serde")]
+    #[instrument(
+        name = "clickhouse.query_json",
+        skip_all,
+        fields(db.system = "clickhouse", db.operation = "query", db.format = NativeFormat::FORMAT)
+    )]
+    pub async fn query_json(
+        &self,
+        query: impl Into<ParsedQuery>,
+        qid: Option<Qid>,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>> {
+        self.query_json_params(query, None, qid).await
+    }
+
+    /// Query `ClickHouse` with parameters and return rows as dynamic JSON objects.
+    ///
+    /// This is the parameterized version of `query_json`.
+    #[cfg(feature = "serde")]
+    #[instrument(
+        name = "clickhouse.query_json_params", 
+        skip_all,
+        fields(db.system = "clickhouse", db.operation = "query", db.format = NativeFormat::FORMAT)
+    )]
+    pub async fn query_json_params(
+        &self,
+        query: impl Into<ParsedQuery>,
+        params: Option<QueryParams>,
+        qid: Option<Qid>,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>> {
+        use futures_util::StreamExt;
+
+        let (query, qid) = record_query(qid, query.into(), self.client_id);
+        let raw = self.query_raw(query, params, qid).await?;
+
+        let mut all_rows = Vec::new();
+        tokio::pin!(raw);
+
+        while let Some(block) = raw.next().await.transpose()? {
+            // Convert block to JSON rows
+            let json_rows = block_to_json_rows(block)?;
+            all_rows.extend(json_rows);
+        }
+
+        Ok(all_rows)
+    }
+
     /// Creates a `ClickHouse` table from a Rust struct that implements the `Row` trait.
     ///
     /// This method generates and executes a `CREATE TABLE` DDL statement based on the
@@ -1493,9 +1576,9 @@ impl Client<NativeFormat> {
         let _ = connection
             .send_operation(Operation::Insert { data: block, response: tx_insert }, qid, true)
             .await?;
-        rx_insert
-            .await
-            .map_err(|_| Error::Protocol(format!("Failed to receive response from insert {qid}")))??;
+        rx_insert.await.map_err(|_| {
+            Error::Protocol(format!("Failed to receive response from insert {qid}"))
+        })??;
 
         let responses = rx_query
             .await
@@ -1516,11 +1599,7 @@ impl Client<NativeFormat> {
     /// with a single JSON column: each Serde row is serialized as the JSON value for that column.
     /// The JSON serializer handles typed paths, defaults for non-nullable typed paths, and
     /// dynamic paths automatically based on the table's JSON type.
-    pub async fn insert_into(
-        &self,
-        table: &str,
-        options: InsertOptions,
-    ) -> Result<InsertInto<'_>> {
+    pub async fn insert_into(&self, table: &str, options: InsertOptions) -> Result<InsertInto<'_>> {
         let (database, table) = split_db_table(self.connection.database(), table);
         Ok(InsertInto {
             client: self,
@@ -1557,39 +1636,43 @@ impl InsertOptions {
 
 impl Default for InsertOptions {
     fn default() -> Self {
-        Self { batch_size: Self::default_batch(), strict: false, on_missing_default: true, set_object_settings: true }
+        Self {
+            batch_size:          Self::default_batch(),
+            strict:              false,
+            on_missing_default:  true,
+            set_object_settings: true,
+        }
     }
 }
 
 pub struct InsertInto<'a> {
-    client:      &'a Client<NativeFormat>,
-    database:    String,
-    table:       String,
-    options:     InsertOptions,
-    pending:     Vec<serde_json::Value>,
-    total_rows:  usize,
+    client:     &'a Client<NativeFormat>,
+    database:   String,
+    table:      String,
+    options:    InsertOptions,
+    pending:    Vec<serde_json::Value>,
+    total_rows: usize,
 }
 
 impl InsertInto<'_> {
     /// Write a batch of Serde rows. For single JSON-column tables, each row is serialized
     /// as the JSON value for that column.
-    pub async fn write_rows<T: serde::Serialize>(&mut self, rows: impl IntoIterator<Item = T>) -> Result<usize> {
+    pub async fn write_rows<T: serde::Serialize>(
+        &mut self,
+        rows: impl IntoIterator<Item = T>,
+    ) -> Result<usize> {
         // Apply settings once if requested
         if self.options.set_object_settings {
             // Best-effort: ignore errors if already set
-            let _ = self
-                .client
-                .execute("SET allow_experimental_object_type = 1", None)
-                .await;
-            let _ = self
-                .client
-                .execute("SET allow_suspicious_low_cardinality_types = 1", None)
-                .await;
+            let _unused = self.client.execute("SET allow_experimental_object_type = 1", None).await;
+            let _unused =
+                self.client.execute("SET allow_suspicious_low_cardinality_types = 1", None).await;
         }
 
         let mut wrote = 0usize;
         for row in rows {
-            let v = serde_json::to_value(row).map_err(|e| Error::SerializeError(format!("serde serialize error: {e}")))?;
+            let v = serde_json::to_value(row)
+                .map_err(|e| Error::SerializeError(format!("serde serialize error: {e}")))?;
             self.pending.push(v);
             if self.pending.len() >= self.options.batch_size {
                 self.flush().await?;
@@ -1619,7 +1702,7 @@ impl InsertInto<'_> {
                 let column_types: Vec<(String, Type)> = header.to_vec();
                 let mut column_data: Vec<Value> = Vec::with_capacity(header.len() * rows_len);
                 // Map each column using server-declared names/types
-                for (col_name, col_type) in header.iter() {
+                for (col_name, col_type) in header {
                     let mut values: Vec<Value> = Vec::with_capacity(rows_len);
                     for row in &pending {
                         let cell = row.get(col_name);
@@ -1628,7 +1711,12 @@ impl InsertInto<'_> {
                     }
                     column_data.extend(values.into_iter());
                 }
-                Ok(Block { info: BlockInfo::default(), rows: rows_len as u64, column_types, column_data })
+                Ok(Block {
+                    info: BlockInfo::default(),
+                    rows: rows_len as u64,
+                    column_types,
+                    column_data,
+                })
             })
             .await?;
         while let Some(res) = stream.next().await {
@@ -1664,38 +1752,65 @@ fn map_cell_to_value(
                 Err(Error::SerializeError(format!("missing non-nullable column for type {t:?}")))
             }
         }
-        // Present cell, handle JSON specially
+        // Present cell, handle JSON/Object specially
         (Some(v), Type::JSON { .. }) => {
-            if v.is_null() { return Ok(Value::Null); }
+            if v.is_null() {
+                return Ok(Value::Null);
+            }
             // Accept either JSON object/array/value or a string containing JSON
             let bytes = if let serde_json::Value::String(s) = v {
                 match serde_json::from_str::<serde_json::Value>(s) {
-                    Ok(parsed) => serde_json::to_vec(&parsed).map_err(|e| Error::SerializeError(e.to_string()))?,
-                    Err(_) => serde_json::to_vec(v).map_err(|e| Error::SerializeError(e.to_string()))?,
+                    Ok(parsed) => serde_json::to_vec(&parsed)
+                        .map_err(|e| Error::SerializeError(e.to_string()))?,
+                    Err(_) => {
+                        serde_json::to_vec(v).map_err(|e| Error::SerializeError(e.to_string()))?
+                    }
                 }
             } else {
                 serde_json::to_vec(v).map_err(|e| Error::SerializeError(e.to_string()))?
             };
             Ok(Value::String(bytes))
         }
+        (Some(v), Type::Object) => {
+            if v.is_null() {
+                return Ok(Value::Null);
+            }
+            let bytes = if let serde_json::Value::String(s) = v {
+                match serde_json::from_str::<serde_json::Value>(s) {
+                    Ok(parsed) => serde_json::to_vec(&parsed)
+                        .map_err(|e| Error::SerializeError(e.to_string()))?,
+                    Err(_) => {
+                        serde_json::to_vec(v).map_err(|e| Error::SerializeError(e.to_string()))?
+                    }
+                }
+            } else {
+                serde_json::to_vec(v).map_err(|e| Error::SerializeError(e.to_string()))?
+            };
+            Ok(Value::Object(bytes))
+        }
         // Nullable: recurse into inner type
         (Some(serde_json::Value::Null), t) => {
-            if t.is_nullable() { Ok(Value::Null) } else { Ok(t.default_value()) }
+            if t.is_nullable() {
+                Ok(Value::Null)
+            } else {
+                Ok(t.default_value())
+            }
         }
-        (Some(v), Type::Nullable(inner)) => map_cell_to_value(Some(v), inner, strict, on_missing_default),
-        (Some(v), Type::LowCardinality(inner)) => map_cell_to_value(Some(v), inner, strict, on_missing_default),
+        (Some(v), Type::Nullable(inner) | Type::LowCardinality(inner)) => {
+            map_cell_to_value(Some(v), inner, strict, on_missing_default)
+        }
         // Scalars
         (Some(v), Type::String | Type::FixedSizedString(_)) => match v {
             serde_json::Value::String(s) => Ok(Value::String(s.as_bytes().to_vec())),
             _ => Ok(Value::String(v.to_string().into_bytes())),
         },
-        (Some(v), Type::UInt8) => to_u64(v, strict).and_then(|x| u8_from_u64(x)).map(Value::UInt8),
-        (Some(v), Type::UInt16) => to_u64(v, strict).and_then(|x| u16_from_u64(x)).map(Value::UInt16),
-        (Some(v), Type::UInt32) => to_u64(v, strict).and_then(|x| u32_from_u64(x)).map(Value::UInt32),
+        (Some(v), Type::UInt8) => to_u64(v, strict).and_then(u8_from_u64).map(Value::UInt8),
+        (Some(v), Type::UInt16) => to_u64(v, strict).and_then(u16_from_u64).map(Value::UInt16),
+        (Some(v), Type::UInt32) => to_u64(v, strict).and_then(u32_from_u64).map(Value::UInt32),
         (Some(v), Type::UInt64) => to_u64(v, strict).map(Value::UInt64),
-        (Some(v), Type::Int8) => to_i64(v, strict).and_then(|x| i8_from_i64(x)).map(Value::Int8),
-        (Some(v), Type::Int16) => to_i64(v, strict).and_then(|x| i16_from_i64(x)).map(Value::Int16),
-        (Some(v), Type::Int32) => to_i64(v, strict).and_then(|x| i32_from_i64(x)).map(Value::Int32),
+        (Some(v), Type::Int8) => to_i64(v, strict).and_then(i8_from_i64).map(Value::Int8),
+        (Some(v), Type::Int16) => to_i64(v, strict).and_then(i16_from_i64).map(Value::Int16),
+        (Some(v), Type::Int32) => to_i64(v, strict).and_then(i32_from_i64).map(Value::Int32),
         (Some(v), Type::Int64) => to_i64(v, strict).map(Value::Int64),
         (Some(v), Type::Float32) => to_f64(v, strict).map(|x| Value::Float32(x as f32)),
         (Some(v), Type::Float64) => to_f64(v, strict).map(Value::Float64),
@@ -1705,10 +1820,16 @@ fn map_cell_to_value(
 }
 
 fn to_u64(v: &serde_json::Value, strict: bool) -> Result<u64> {
-    if let Some(u) = v.as_u64() { return Ok(u); }
+    if let Some(u) = v.as_u64() {
+        return Ok(u);
+    }
     if !strict {
-        if let Some(i) = v.as_i64() { return Ok(i as u64); }
-        if let Some(f) = v.as_f64() { return Ok(f as u64); }
+        if let Some(i) = v.as_i64() {
+            return Ok(i as u64);
+        }
+        if let Some(f) = v.as_f64() {
+            return Ok(f as u64);
+        }
         if let Some(s) = v.as_str() {
             return s.parse::<u64>().map_err(|e| Error::SerializeError(format!("parse u64: {e}")));
         }
@@ -1717,10 +1838,16 @@ fn to_u64(v: &serde_json::Value, strict: bool) -> Result<u64> {
 }
 
 fn to_i64(v: &serde_json::Value, strict: bool) -> Result<i64> {
-    if let Some(i) = v.as_i64() { return Ok(i); }
+    if let Some(i) = v.as_i64() {
+        return Ok(i);
+    }
     if !strict {
-        if let Some(u) = v.as_u64() { return Ok(u as i64); }
-        if let Some(f) = v.as_f64() { return Ok(f as i64); }
+        if let Some(u) = v.as_u64() {
+            return Ok(u as i64);
+        }
+        if let Some(f) = v.as_f64() {
+            return Ok(f as i64);
+        }
         if let Some(s) = v.as_str() {
             return s.parse::<i64>().map_err(|e| Error::SerializeError(format!("parse i64: {e}")));
         }
@@ -1729,10 +1856,16 @@ fn to_i64(v: &serde_json::Value, strict: bool) -> Result<i64> {
 }
 
 fn to_f64(v: &serde_json::Value, strict: bool) -> Result<f64> {
-    if let Some(f) = v.as_f64() { return Ok(f); }
+    if let Some(f) = v.as_f64() {
+        return Ok(f);
+    }
     if !strict {
-        if let Some(i) = v.as_i64() { return Ok(i as f64); }
-        if let Some(u) = v.as_u64() { return Ok(u as f64); }
+        if let Some(i) = v.as_i64() {
+            return Ok(i as f64);
+        }
+        if let Some(u) = v.as_u64() {
+            return Ok(u as f64);
+        }
         if let Some(s) = v.as_str() {
             return s.parse::<f64>().map_err(|e| Error::SerializeError(format!("parse f64: {e}")));
         }
@@ -1741,27 +1874,51 @@ fn to_f64(v: &serde_json::Value, strict: bool) -> Result<f64> {
 }
 
 fn u8_from_u64(x: u64) -> Result<u8> {
-    if x <= u8::MAX as u64 { Ok(x as u8) } else { Err(Error::SerializeError(format!("value {x} overflows UInt8"))) }
+    if x <= u8::MAX as u64 {
+        Ok(x as u8)
+    } else {
+        Err(Error::SerializeError(format!("value {x} overflows UInt8")))
+    }
 }
 
 fn u16_from_u64(x: u64) -> Result<u16> {
-    if x <= u16::MAX as u64 { Ok(x as u16) } else { Err(Error::SerializeError(format!("value {x} overflows UInt16"))) }
+    if x <= u16::MAX as u64 {
+        Ok(x as u16)
+    } else {
+        Err(Error::SerializeError(format!("value {x} overflows UInt16")))
+    }
 }
 
 fn u32_from_u64(x: u64) -> Result<u32> {
-    if x <= u32::MAX as u64 { Ok(x as u32) } else { Err(Error::SerializeError(format!("value {x} overflows UInt32"))) }
+    if x <= u32::MAX as u64 {
+        Ok(x as u32)
+    } else {
+        Err(Error::SerializeError(format!("value {x} overflows UInt32")))
+    }
 }
 
 fn i8_from_i64(x: i64) -> Result<i8> {
-    if x >= i8::MIN as i64 && x <= i8::MAX as i64 { Ok(x as i8) } else { Err(Error::SerializeError(format!("value {x} overflows Int8"))) }
+    if x >= i8::MIN as i64 && x <= i8::MAX as i64 {
+        Ok(x as i8)
+    } else {
+        Err(Error::SerializeError(format!("value {x} overflows Int8")))
+    }
 }
 
 fn i16_from_i64(x: i64) -> Result<i16> {
-    if x >= i16::MIN as i64 && x <= i16::MAX as i64 { Ok(x as i16) } else { Err(Error::SerializeError(format!("value {x} overflows Int16"))) }
+    if x >= i16::MIN as i64 && x <= i16::MAX as i64 {
+        Ok(x as i16)
+    } else {
+        Err(Error::SerializeError(format!("value {x} overflows Int16")))
+    }
 }
 
 fn i32_from_i64(x: i64) -> Result<i32> {
-    if x >= i32::MIN as i64 && x <= i32::MAX as i64 { Ok(x as i32) } else { Err(Error::SerializeError(format!("value {x} overflows Int32"))) }
+    if x >= i32::MIN as i64 && x <= i32::MAX as i64 {
+        Ok(x as i32)
+    } else {
+        Err(Error::SerializeError(format!("value {x} overflows Int32")))
+    }
 }
 
 impl Client<ArrowFormat> {
@@ -2503,6 +2660,29 @@ fn record_query(qid: Option<Qid>, query: ParsedQuery, cid: u16) -> (String, Qid)
     let query = query.0;
     trace!(query, { ATT_CID } = cid, "Querying clickhouse");
     (query, qid)
+}
+
+/// Convert a Block to a vector of JSON objects (`serde_json::Map`).
+/// Each row becomes a JSON object with column names as keys.
+#[cfg(feature = "serde")]
+fn block_to_json_rows(mut block: Block) -> Result<Vec<serde_json::Map<String, serde_json::Value>>> {
+    let mut json_rows = Vec::with_capacity(block.rows as usize);
+
+    // Use the block's row iterator to get row data
+    let mut row_iter = block.take_iter_rows();
+
+    while let Some(row_data) = row_iter.next() {
+        let mut json_object = serde_json::Map::new();
+
+        for (column_name, _column_type, value) in row_data {
+            let json_value = value.to_json().map_err(|e| Error::DeserializeError(e.to_string()))?;
+            let _previous = json_object.insert(column_name.to_string(), json_value);
+        }
+
+        json_rows.push(json_object);
+    }
+
+    Ok(json_rows)
 }
 
 #[cfg(test)]

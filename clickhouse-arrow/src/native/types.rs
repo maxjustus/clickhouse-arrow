@@ -169,7 +169,8 @@ impl Type {
         }
     }
 
-    /// Create a Variant type with alphabetically sorted inner types to match ClickHouse canonical ordering
+    /// Create a Variant type with alphabetically sorted inner types to match ClickHouse canonical
+    /// ordering
     pub fn variant(mut types: Vec<Type>) -> Type {
         types.sort_by_key(ToString::to_string);
         Type::Variant(types)
@@ -423,7 +424,8 @@ impl Display for Type {
                     write!(f, "JSON({})", params.join(", "))
                 }
             }
-            Type::Object => write!(f, "Object"), // TODO: JSON type alias
+            // Serialize Object with explicit schema format to satisfy ClickHouse expectations
+            Type::Object => write!(f, "Object('json')"),
         }
     }
 }
