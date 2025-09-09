@@ -158,6 +158,91 @@ impl Block {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::connection::ClientMetadata;
+    use crate::formats::sealed::ClientFormatImpl;
+    use crate::native::protocol::DBMS_TCP_PROTOCOL_VERSION;
+    use crate::native::protocol::CompressionMethod;
+    use crate::{ArrowOptions, NativeFormat};
+
+    #[tokio::test]
+    async fn compressed_roundtrip_dynamic_json_map() {
+        let rows = 2u64;
+        let column_types = vec![
+            ("m".to_string(), Type::Map(Box::new(Type::String), Box::new(Type::Int32))),
+            ("d".to_string(), Type::Dynamic { max_types: None }),
+            ("j".to_string(), Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: None,
+                typed_paths:       vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
+            }),
+        ];
+
+        let map_row0 = Value::Map(
+            vec![Value::String(b"k1".to_vec()), Value::String(b"k2".to_vec())],
+            vec![Value::Int32(10), Value::Int32(20)],
+        );
+        let map_row1 = Value::Map(vec![Value::String(b"a".to_vec())], vec![Value::Int32(-1)]);
+
+        #[cfg(feature = "serde")]
+        let json_row0 = Value::Json(serde_json::json!({"a": 1, "b": "z"}));
+        #[cfg(not(feature = "serde"))]
+        let json_row0 = Value::Object(br#"{"a":1,"b":"z"}"#.to_vec());
+
+        #[cfg(feature = "serde")]
+        let json_row1 = Value::Json(serde_json::json!({"c": [1,2,3]}));
+        #[cfg(not(feature = "serde"))]
+        let json_row1 = Value::Object(br#"{"c":[1,2,3]}"#.to_vec());
+
+        // Column-major order flattened rows
+        // Column-major order: m[0..rows], d[0..rows], j[0..rows]
+        let d_row0 = Value::UInt64(42);
+        let d_row1 = Value::String(b"x".to_vec());
+        let column_data = vec![
+            map_row0.clone(), map_row1.clone(),
+            d_row0, d_row1,
+            json_row0.clone(), json_row1.clone(),
+        ];
+
+        let block = Block { info: BlockInfo::default(), rows, column_types: column_types.clone(), column_data };
+
+        // Write compressed
+        let metadata = ClientMetadata {
+            client_id: 1,
+            compression: CompressionMethod::LZ4,
+            arrow_options: ArrowOptions::default(),
+            server_version: None,
+        };
+        let mut buffer = Vec::new();
+        NativeFormat::write(
+            &mut buffer,
+            block.clone(),
+            Qid::default(),
+            Some(&block.column_types),
+            DBMS_TCP_PROTOCOL_VERSION,
+            metadata,
+        )
+        .await
+        .expect("write compressed block");
+
+        // Read back
+        let mut cursor = std::io::Cursor::new(buffer);
+        let mut state = DeserializerState::default();
+        let read_block = NativeFormat::read(&mut cursor, DBMS_TCP_PROTOCOL_VERSION, metadata, &mut state)
+            .await
+            .expect("read compressed block")
+            .expect("some block");
+
+        assert_eq!(read_block.rows, rows);
+        assert_eq!(read_block.column_types, column_types);
+        assert_eq!(read_block.column_data.len(), block.column_data.len());
+    }
+}
+
 impl ProtocolData<Self, ()> for Block {
     type Options = Option<crate::client::connection::ClientMetadata>;
 
@@ -401,9 +486,9 @@ impl ProtocolData<Self, ()> for Block {
 
             #[allow(clippy::cast_possible_truncation)]
             let mut row_data = if rows > 0 {
-                type_.deserialize_prefix(reader)?;
-                type_
-                    .deserialize_column_sync(reader, rows as usize, state)
+                // Use state-aware prefix reader to support metadata in sync mode
+                type_.deserialize_prefix(reader, state)?;
+                type_.deserialize_column_sync(reader, rows as usize, state)
                     .inspect_err(|e| error!("deserialize (name {name}): {e}"))?
             } else {
                 vec![]

@@ -89,6 +89,8 @@ pub enum Value {
     MultiPolygon(MultiPolygon),
 
     Object(Vec<u8>),
+    #[cfg(feature = "serde")]
+    Json(serde_json::Value),
 }
 
 impl PartialEq for Value {
@@ -134,6 +136,8 @@ impl PartialEq for Value {
             (Self::Dynamic(l_type, l_val), Self::Dynamic(r_type, r_val)) => {
                 l_type == r_type && l_val == r_val
             }
+            #[cfg(feature = "serde")]
+            (Self::Json(l0), Self::Json(r0)) => l0 == r0,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
     }
@@ -208,6 +212,14 @@ impl Hash for Value {
             Value::MultiPolygon(x) => ::core::hash::Hash::hash(x, state),
 
             Value::Null => {}
+            #[cfg(feature = "serde")]
+            Value::Json(x) => {
+                // serde_json::Value is not Hash; hash its canonical serialized form
+                // Fallback: serialize; errors are unlikely here; ignore errors by hashing empty
+                if let Ok(bytes) = serde_json::to_vec(x) {
+                    ::core::hash::Hash::hash(&bytes, state);
+                }
+            }
         }
     }
 }
@@ -256,6 +268,8 @@ impl Value {
         use serde_json::{Number, Value as JsonValue};
 
         Ok(match self {
+            #[cfg(feature = "serde")]
+            Value::Json(v) => v.clone(),
             Value::Null => JsonValue::Null,
 
             // Numeric types that fit in JSON numbers
@@ -668,6 +682,8 @@ impl Value {
             Value::Polygon(_) => Type::Polygon,
             Value::MultiPolygon(_) => Type::MultiPolygon,
             Value::Object(_) => Type::Object,
+            #[cfg(feature = "serde")]
+            Value::Json(_) => Type::Object,
         }
     }
 }
@@ -841,6 +857,13 @@ impl fmt::Display for Value {
             Value::Ring(x) => write!(f, "{x:?}"),
             Value::Polygon(x) => write!(f, "{x:?}"),
             Value::MultiPolygon(x) => write!(f, "{x:?}"),
+            #[cfg(feature = "serde")]
+            Value::Json(v) => {
+                write!(f, "'")?;
+                let s = serde_json::to_string(v).map_err(|_| fmt::Error)?;
+                escape_string(f, &s)?;
+                write!(f, "'")
+            }
             Value::Object(x) => {
                 write!(f, "'")?;
                 let obj_str = std::str::from_utf8(x).ok();

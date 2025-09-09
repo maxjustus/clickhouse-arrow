@@ -178,6 +178,9 @@ impl FromSql for String {
         }
         match value {
             Value::String(x) | Value::Object(x) => Ok(String::from_utf8(x)?),
+            #[cfg(feature = "serde")]
+            Value::Json(v) => Ok(serde_json::to_string(&v)
+                .map_err(|e| Error::DeserializeError(e.to_string()))?),
             _ => Err(unexpected_type(type_)),
         }
     }
@@ -282,6 +285,7 @@ impl FromSql for serde_json::Value {
             return Err(unexpected_type(type_));
         }
         match value {
+            Value::Json(v) => Ok(v),
             Value::Object(x) | Value::String(x) => {
                 Ok(serde_json::from_slice(&x)
                     .map_err(|e| Error::DeserializeError(e.to_string()))?)

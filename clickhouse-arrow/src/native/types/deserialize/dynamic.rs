@@ -253,7 +253,7 @@ impl DynamicDeserializer {
 
         // Read prefixes for nested types
         for (_, typ) in &types {
-            typ.deserialize_prefix(reader)?;
+            typ.deserialize_prefix(reader, state)?;
         }
 
         // Store metadata in state for data phase

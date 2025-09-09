@@ -24,6 +24,10 @@ struct Args {
     #[arg(long, group = "mode")]
     insert: Option<String>,
 
+    /// Optional comma-separated column list for INSERT (server applies defaults for others)
+    #[arg(long)]
+    columns: Option<String>,
+
     /// Get server information
     #[arg(long, group = "mode")]
     info: bool,
@@ -215,7 +219,7 @@ async fn main() -> Result<()> {
     if let Some(query) = args.query {
         execute_query(client, &query, args.params, args.settings, &args.format).await?;
     } else if let Some(table) = args.insert {
-        execute_insert(client, &table, &args.format).await?;
+        execute_insert(client, &table, args.columns.clone(), &args.format).await?;
     } else if args.info {
         get_server_info(client, &args.format).await?;
     } else if args.test_types {
@@ -271,7 +275,12 @@ async fn execute_query(
     Ok(())
 }
 
-async fn execute_insert(client: ClickHouseClient, table: &str, format: &str) -> Result<()> {
+async fn execute_insert(
+    client: ClickHouseClient,
+    table: &str,
+    columns: Option<String>,
+    format: &str,
+) -> Result<()> {
     if atty::is(atty::Stream::Stdin) {
         output_json(&JsonOutput::error("Insert mode requires JSON data from stdin".to_string()));
         std::process::exit(1);
@@ -294,7 +303,10 @@ async fn execute_insert(client: ClickHouseClient, table: &str, format: &str) -> 
 
                 // Insert in batches (simple approach)
                 if batch.len() >= 1000 {
-                    match client.insert_batch(table, batch.clone()).await {
+                    let cols = columns
+                        .as_ref()
+                        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>());
+                    match client.insert_batch(table, batch.clone(), cols).await {
                         Ok(_) => {
                             if format == "pretty" {
                                 println!("Inserted {} rows", batch.len());
@@ -321,7 +333,10 @@ async fn execute_insert(client: ClickHouseClient, table: &str, format: &str) -> 
 
     // Insert remaining rows
     if !batch.is_empty() {
-        match client.insert_batch(table, batch.clone()).await {
+        let cols = columns
+            .as_ref()
+            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>());
+        match client.insert_batch(table, batch.clone(), cols).await {
             Ok(_) => {
                 if format == "pretty" {
                     println!("Inserted {} rows", batch.len());

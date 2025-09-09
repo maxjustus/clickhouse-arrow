@@ -994,6 +994,6 @@ fn test_json_deserialize_prefix_sync_integration() {
     let mut reader = Cursor::new(buffer);
 
     // This should call json::JsonDeserializer::read_prefix_sync via the dispatcher
-    let result = json_type.deserialize_prefix(&mut reader);
+    let result = json_type.deserialize_prefix(&mut reader, &mut DeserializerState::default());
     assert!(result.is_ok(), "JSON deserialize_prefix_sync should succeed through dispatcher");
 }

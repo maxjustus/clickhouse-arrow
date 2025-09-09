@@ -288,6 +288,27 @@ fn roundtrip_json() {
     assert_eq!(fixed, roundtrip(fixed.clone(), &Type::Object));
 }
 
+#[cfg(feature = "serde")]
+#[test]
+fn fromsql_json_value_fastpath() {
+    use crate::FromSql;
+    let v = serde_json::json!({"a": 1, "b": [2,3]});
+    let ty = Type::JSON {
+        max_dynamic_paths: None,
+        max_dynamic_types: None,
+        typed_paths:       vec![],
+        skip_exact:        vec![],
+        skip_regex:        vec![],
+    };
+    // Fast-path: Value::Json should return directly
+    let got: serde_json::Value = FromSql::from_sql(&ty, Value::Json(v.clone())).unwrap();
+    assert_eq!(got, v);
+    // String conversion should also work
+    let s: String = FromSql::from_sql(&ty, Value::Json(v.clone())).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(parsed, v);
+}
+
 #[test]
 fn roundtrip_array() {
     let fixed = vec![5u32, 3, 2, 7];

@@ -229,7 +229,7 @@ impl VariantDeserializer {
 
         // Read prefixes for nested types
         for inner_type in type_.unwrap_variant()? {
-            inner_type.deserialize_prefix(reader)?;
+            inner_type.deserialize_prefix(reader, &mut DeserializerState::default())?;
         }
 
         Ok(())
@@ -293,7 +293,7 @@ mod tests {
                 // Test sync path
                 let mut sync_reader = Cursor::new(test_data.clone());
                 let mut sync_state = DeserializerState::default();
-                variant_type.deserialize_prefix(&mut sync_reader).unwrap();
+                variant_type.deserialize_prefix(&mut sync_reader, &mut DeserializerState::default()).unwrap();
                 let sync_values = VariantDeserializer::read_sync(
                     &variant_type,
                     &mut sync_reader,
@@ -455,7 +455,7 @@ mod tests {
         ]);
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader).unwrap();
+        variant_type.deserialize_prefix(&mut reader, &mut state).unwrap();
         let values =
             VariantDeserializer::read_sync(&variant_type, &mut reader, 3, &mut state).unwrap();
         assert_eq!(values.len(), 3);
@@ -482,7 +482,7 @@ mod tests {
         let (variant_type, data) = create_multitype_test_data();
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader).unwrap();
+        variant_type.deserialize_prefix(&mut reader, &mut state).unwrap();
         let values =
             VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
         assert_eq!(values.len(), 5);
@@ -498,7 +498,7 @@ mod tests {
         let (variant_type, data) = create_multitype_test_data();
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader).unwrap();
+        variant_type.deserialize_prefix(&mut reader, &mut state).unwrap();
         let values =
             VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
 
@@ -519,7 +519,7 @@ mod tests {
         let (variant_type, data) = create_multitype_test_data();
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader).unwrap();
+        variant_type.deserialize_prefix(&mut reader, &mut state).unwrap();
         let values =
             VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
 

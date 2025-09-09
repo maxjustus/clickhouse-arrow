@@ -1622,12 +1622,16 @@ fn split_db_table<'a>(default_db: &'a str, table: &'a str) -> (&'a str, &'a str)
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct InsertOptions {
     pub batch_size:          usize,
     pub strict:              bool,
     pub on_missing_default:  bool,
     pub set_object_settings: bool,
+    /// Optional explicit column list to include in the INSERT statement,
+    /// e.g. INSERT INTO db.table (col1, col2) VALUES ...
+    /// When set, the server applies defaults for unspecified columns.
+    pub columns:             Option<Vec<String>>,
 }
 
 impl InsertOptions {
@@ -1641,6 +1645,7 @@ impl Default for InsertOptions {
             strict:              false,
             on_missing_default:  true,
             set_object_settings: true,
+            columns:             None,
         }
     }
 }
@@ -1691,7 +1696,17 @@ impl InsertInto<'_> {
         let rows_len = self.pending.len();
 
         // Build query and send using header-driven builder
-        let query = format!("INSERT INTO `{}`.`{}` VALUES", self.database, self.table);
+        let query = if let Some(columns) = &self.options.columns {
+            // Build explicit column list; backtick-escape identifiers minimally
+            let collist = columns
+                .iter()
+                .map(|c| format!("`{}`", c.replace('`', "``")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("INSERT INTO `{}`.`{}` ({}) VALUES", self.database, self.table, collist)
+        } else {
+            format!("INSERT INTO `{}`.`{}` VALUES", self.database, self.table)
+        };
         tracing::debug!(query = %query, rows = rows_len, "insert_into: executing insert (header-driven)");
         let pending = std::mem::take(&mut self.pending);
         let strict = self.options.strict;
@@ -1758,18 +1773,27 @@ fn map_cell_to_value(
                 return Ok(Value::Null);
             }
             // Accept either JSON object/array/value or a string containing JSON
-            let bytes = if let serde_json::Value::String(s) = v {
-                match serde_json::from_str::<serde_json::Value>(s) {
+            if let serde_json::Value::String(s) = v {
+                // Keep string inputs as strings (back-compat)
+                let bytes = match serde_json::from_str::<serde_json::Value>(s) {
                     Ok(parsed) => serde_json::to_vec(&parsed)
                         .map_err(|e| Error::SerializeError(e.to_string()))?,
-                    Err(_) => {
-                        serde_json::to_vec(v).map_err(|e| Error::SerializeError(e.to_string()))?
-                    }
-                }
+                    Err(_) => serde_json::to_vec(v)
+                        .map_err(|e| Error::SerializeError(e.to_string()))?,
+                };
+                Ok(Value::String(bytes))
             } else {
-                serde_json::to_vec(v).map_err(|e| Error::SerializeError(e.to_string()))?
-            };
-            Ok(Value::String(bytes))
+                #[cfg(feature = "serde")]
+                {
+                    Ok(Value::Json(v.clone()))
+                }
+                #[cfg(not(feature = "serde"))]
+                {
+                    let bytes = serde_json::to_vec(v)
+                        .map_err(|e| Error::SerializeError(e.to_string()))?;
+                    Ok(Value::Object(bytes))
+                }
+            }
         }
         (Some(v), Type::Object) => {
             if v.is_null() {

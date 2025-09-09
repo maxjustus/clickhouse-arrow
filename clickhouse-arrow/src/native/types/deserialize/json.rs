@@ -291,12 +291,8 @@ impl JsonDeserializer {
         values
     }
 
-    /// Build JSON object strings from path values
-    /// TODO: should this be not stringified?
-    /// My intuition would be that this should return a Vec<serde_json::Value>
-    /// which can then be serialized to string only if needed.
-    /// Also - should this be streamed? I forget if that's the pattern elsewhere or if we process
-    /// in blocks.
+    /// Build JSON object from path values
+    /// Emits `Value::Json(..)` when serde is enabled, otherwise `Value::Object(Vec<u8>)`.
     fn build_json_objects(
         path_names: &[String],
         path_values: &HashMap<String, Vec<Value>>,
@@ -316,9 +312,16 @@ impl JsonDeserializer {
                 }
             }
 
-            let json_string = serde_json::to_string(&serde_json::Value::Object(row_object))
-                .map_err(|e| Error::DeserializeError(format!("Failed to serialize JSON: {e}")))?;
-            result.push(Value::String(json_string.into_bytes()));
+            #[cfg(feature = "serde")]
+            {
+                result.push(Value::Json(serde_json::Value::Object(row_object)));
+            }
+            #[cfg(not(feature = "serde"))]
+            {
+                let json_bytes = serde_json::to_vec(&serde_json::Value::Object(row_object))
+                    .map_err(|e| Error::DeserializeError(format!("Failed to serialize JSON: {e}")))?;
+                result.push(Value::Object(json_bytes));
+            }
         }
 
         Ok(result)
@@ -488,7 +491,7 @@ impl JsonDeserializer {
 
         // Read typed path prefixes using their native serializers (always present)
         for (_path_name, type_) in &typed_paths {
-            type_.deserialize_prefix(reader)?;
+            type_.deserialize_prefix(reader, state)?;
         }
 
         // Read Dynamic headers for dynamic paths only
@@ -511,7 +514,7 @@ impl JsonDeserializer {
 
             // Read prefixes for nested types
             for (_, typ) in &type_list {
-                typ.deserialize_prefix(reader)?;
+                typ.deserialize_prefix(reader, state)?;
             }
 
             dynamic_data.push((total_types, type_list));

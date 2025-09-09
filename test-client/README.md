@@ -62,6 +62,40 @@ cat data.jsonl | ./target/release/clickhouse-test-client --insert my_table
 echo '{"col1": "value1", "col2": 123}' | ./target/release/clickhouse-test-client --insert mydb.mytable
 ```
 
+#### Streaming Inserts (NDJSON)
+- Mode: `--insert [database.]table` reads newline-delimited JSON (one JSON object per line) from stdin.
+- Mapping: Each JSON object’s keys are matched to server-declared column names. Missing values are either
+  - set to `NULL` for `Nullable` columns, or
+  - set to the type’s default when `on_missing_default` is enabled (default behavior).
+- Batching: The client batches rows and sends native binary blocks over the ClickHouse native protocol.
+
+#### Column Lists and Server Defaults
+- Use `--columns "col_a,col_b"` to send an explicit column list, e.g. `INSERT INTO db.table (col_a, col_b) VALUES`.
+- With a column list, ClickHouse applies column DEFAULT/MATERIALIZED/ALIAS logic for unspecified columns.
+
+Examples:
+```bash
+# Only provide id and name; server fills other columns via DEFAULTS
+printf '%s\n' '{"id":1,"name":"Alice"}' '{"id":2,"name":"Bob"}' \
+| ./target/release/clickhouse-test-client --insert default.events --columns "id,name"
+```
+
+#### JSON Columns
+- For tables with JSON columns, prefer structured JSON objects in the row:
+```bash
+# Table: logs(data JSON(user String))
+printf '%s\n' '{"data":{"user":"alice"}}' '{"data":{"user":"bob"}}' \
+| ./target/release/clickhouse-test-client --insert default.logs
+```
+- Strings containing JSON are still accepted but less efficient (extra parse).
+
+#### Versus --query literal inserts
+- You can still use `--query "INSERT INTO t VALUES (1, 'a')"` for simple literals.
+- `--insert` is recommended for streaming NDJSON because it:
+  - Uses the server header to map types correctly (including JSON v3 typed paths).
+  - Handles quoting/escaping and complex types automatically.
+  - Batches efficiently using the native protocol.
+
 ### Type Testing
 
 Test all supported ClickHouse native types:

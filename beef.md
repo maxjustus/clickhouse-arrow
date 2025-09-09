@@ -7,4 +7,30 @@
 - we should generate golden files from --format Variant queries to verify how we're serializing to match clickhouse
   or just run commands directly and diff?
 
-  is in_json_type name accurate enough? is it really via_typed_json_path or something?
+Next up, I can correct the JSON typed-path handling so that for non-nullable typed paths we substitute default values instead of Null (so we don’t
+attempt to inject Nulls into non-nullable LC or other non-nullable types). Want me to implement that?
+
+codex mentioned something about including the one off e2e tests via macro in the main e2e test files. We should do that.
+
+do we have any facility to or should we implement the ability to decode JSON column data we select directly into a Serde Object?
+
+- [ ] That convenience helper idea is compelling but limited in scope. I'm thinking about clickhouse client handles this by parsing and inferring/
+      coercing input format data. The fact that we're using Rust gives us Serde which is a huge advantage for this use case.
+      An API which allows a user to insert a Serde object and have the library map it to the insert table clickhouse types automatically would be amazing.
+      We could possibly expand on or reuse what we're doing for insert type inferrence with the JSON col type for this. What do you think?
+
+
+Insert serde api:
+- [ ] Expand coercion to more complex non‑JSON types (Date/DateTime, Arrays, Tuples, Maps, Variant non‑JSON).
+- [ ] Add strict=true behavior to reject lossy conversions and enforce exact type matches.
+- Optionally use insert_many to reduce insert handshakes across multiple batches and only close the stream once at finish().
+
+Confirm that we don't already have an API like this that we're duplicating
+
+- [ ] explore improvements for streaming insert:
+  - Keep insert session open across flushes:
+      - For streaming InsertInto, holding the insert open and reusing the first Header avoids a header fetch per flush. This is a small improvement to latency without changing the API surface.
+
+- [ ] explore serde json for decoding JSON cols dynamically without knowing types in advance
+- [ ] explore Serde map Object for decoding rows as well
+- [ ] examine including serde object encoding for Arrow format as well

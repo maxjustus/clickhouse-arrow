@@ -79,6 +79,39 @@ impl JsonData {
 
         for (row_idx, value) in values.into_iter().enumerate() {
             match value {
+                Value::Object(bytes) => {
+                    // Parse JSON bytes into object
+                    let json_value: serde_json::Value = serde_json::from_slice(&bytes)
+                        .map_err(|e| Error::SerializeError(format!("Invalid JSON bytes: {e}")))?;
+
+                    // Extract paths from JSON object
+                    Self::extract_paths_from_json(
+                        &json_value,
+                        "",
+                        &mut dynamic_path_columns,
+                        &mut typed_path_columns,
+                        typed_paths,
+                        &skip_exact_set,
+                        &skip_patterns,
+                        row_idx,
+                        rows,
+                    )?;
+                }
+                #[cfg(feature = "serde")]
+                Value::Json(json_value) => {
+                    // Consume structured JSON directly, no parsing
+                    Self::extract_paths_from_json(
+                        &json_value,
+                        "",
+                        &mut dynamic_path_columns,
+                        &mut typed_path_columns,
+                        typed_paths,
+                        &skip_exact_set,
+                        &skip_patterns,
+                        row_idx,
+                        rows,
+                    )?;
+                }
                 Value::String(bytes) => {
                     // Parse JSON string into object
                     let json_str = String::from_utf8(bytes).map_err(|e| {
@@ -106,8 +139,7 @@ impl JsonData {
                 }
                 _ => {
                     return Err(Error::SerializeError(format!(
-                        "JSON serialization only supports String values containing JSON, got: \
-                         {value:?}"
+                        "JSON serialization expects Object (bytes) or String (text) containing JSON, got: {value:?}"
                     )));
                 }
             }
@@ -1349,14 +1381,17 @@ mod tests {
 
         // Verify deserialized data structure
         for value in &deserialized {
-            if let Value::String(bytes) = value {
-                let json_str = String::from_utf8(bytes.clone())?;
-                let json_value: serde_json::Value = serde_json::from_str(&json_str)
-                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?;
+            #[cfg(feature = "serde")]
+            if let Value::Json(json_value) = value {
                 assert!(json_value.is_object(), "Deserialized value should be a JSON object");
-            } else {
-                panic!("Expected String value containing JSON");
+                continue;
             }
+            let json_value: serde_json::Value = match value {
+                Value::Object(bytes) | Value::String(bytes) => serde_json::from_slice(bytes)
+                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?,
+                other => panic!("Unexpected value variant: {other:?}"),
+            };
+            assert!(json_value.is_object(), "Deserialized value should be a JSON object");
         }
         Ok(())
     }
@@ -1536,18 +1571,19 @@ mod tests {
 
         // Validate: rows missing 'id' should have id = 0 in JSON
         for (i, v) in deserialized.iter().enumerate() {
-            if let Value::String(bytes) = v {
-                let obj: serde_json::Value = serde_json::from_slice(bytes)
-                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?;
+            #[cfg(feature = "serde")]
+            if let Value::Json(obj) = v {
                 let id = obj.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                match i {
-                    0 | 2 => assert_eq!(id, serde_json::Value::from(0u64)),
-                    1 => assert_eq!(id, serde_json::Value::from(42u64)),
-                    _ => unreachable!(),
-                }
-            } else {
-                panic!("Expected String JSON value");
+                match i { 0 | 2 => assert_eq!(id, serde_json::Value::from(0u64)), 1 => assert_eq!(id, serde_json::Value::from(42u64)), _ => unreachable!(), }
+                continue;
             }
+            let obj: serde_json::Value = match v {
+                Value::Object(bytes) | Value::String(bytes) => serde_json::from_slice(bytes)
+                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?,
+                other => panic!("Unexpected value variant: {other:?}"),
+            };
+            let id = obj.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            match i { 0 | 2 => assert_eq!(id, serde_json::Value::from(0u64)), 1 => assert_eq!(id, serde_json::Value::from(42u64)), _ => unreachable!(), }
         }
         Ok(())
     }
@@ -1589,18 +1625,19 @@ mod tests {
 
         // Validate: rows missing 'status' should have status = "" in JSON
         for (i, v) in deserialized.iter().enumerate() {
-            if let Value::String(bytes) = v {
-                let obj: serde_json::Value = serde_json::from_slice(bytes)
-                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?;
+            #[cfg(feature = "serde")]
+            if let Value::Json(obj) = v {
                 let status = obj.get("status").cloned().unwrap_or(serde_json::Value::Null);
-                match i {
-                    0 | 2 => assert_eq!(status, serde_json::Value::from("")),
-                    1 => assert_eq!(status, serde_json::Value::from("ok")),
-                    _ => unreachable!(),
-                }
-            } else {
-                panic!("Expected String JSON value");
+                match i { 0 | 2 => assert_eq!(status, serde_json::Value::from("")), 1 => assert_eq!(status, serde_json::Value::from("ok")), _ => unreachable!(), }
+                continue;
             }
+            let obj: serde_json::Value = match v {
+                Value::Object(bytes) | Value::String(bytes) => serde_json::from_slice(bytes)
+                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?,
+                other => panic!("Unexpected value variant: {other:?}"),
+            };
+            let status = obj.get("status").cloned().unwrap_or(serde_json::Value::Null);
+            match i { 0 | 2 => assert_eq!(status, serde_json::Value::from("")), 1 => assert_eq!(status, serde_json::Value::from("ok")), _ => unreachable!(), }
         }
         Ok(())
     }
@@ -1642,18 +1679,17 @@ mod tests {
 
         // Validate: missing 'value' => JSON null; others preserved
         for (i, v) in deserialized.iter().enumerate() {
-            if let Value::String(bytes) = v {
-                let obj: serde_json::Value = serde_json::from_slice(bytes)
-                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?;
-                match i {
-                    0 => assert_eq!(obj.get("value"), Some(&serde_json::Value::Null)),
-                    1 => assert_eq!(obj.get("value"), Some(&serde_json::Value::from("x"))),
-                    2 => assert_eq!(obj.get("value"), Some(&serde_json::Value::from(7u64))),
-                    _ => unreachable!(),
-                }
-            } else {
-                panic!("Expected String JSON value");
+            #[cfg(feature = "serde")]
+            if let Value::Json(obj) = v {
+                match i { 0 => assert_eq!(obj.get("value"), Some(&serde_json::Value::Null)), 1 => assert_eq!(obj.get("value"), Some(&serde_json::Value::from("x"))), 2 => assert_eq!(obj.get("value"), Some(&serde_json::Value::from(7u64))), _ => unreachable!(), }
+                continue;
             }
+            let obj: serde_json::Value = match v {
+                Value::Object(bytes) | Value::String(bytes) => serde_json::from_slice(bytes)
+                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?,
+                other => panic!("Unexpected value variant: {other:?}"),
+            };
+            match i { 0 => assert_eq!(obj.get("value"), Some(&serde_json::Value::Null)), 1 => assert_eq!(obj.get("value"), Some(&serde_json::Value::from("x"))), 2 => assert_eq!(obj.get("value"), Some(&serde_json::Value::from(7u64))), _ => unreachable!(), }
         }
         Ok(())
     }
@@ -1816,16 +1852,21 @@ mod tests {
         // Verify we got the same data back
         assert_eq!(deserialized.len(), values.len());
         for (orig, deser) in values.iter().zip(deserialized.iter()) {
-            // Parse both as JSON to compare structure, not formatting
-            if let (Value::String(orig_bytes), Value::String(deser_bytes)) = (orig, deser) {
-                let orig_json: serde_json::Value = serde_json::from_slice(orig_bytes)
-                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?;
-                let deser_json: serde_json::Value = serde_json::from_slice(deser_bytes)
-                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?;
-                assert_eq!(orig_json, deser_json);
-            } else {
-                panic!("Expected String values");
-            }
+            let orig_json: serde_json::Value = match orig {
+                Value::String(orig_bytes) | Value::Object(orig_bytes) => serde_json::from_slice(orig_bytes)
+                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?,
+                #[cfg(feature = "serde")]
+                Value::Json(v) => v.clone(),
+                other => panic!("Unexpected value variant: {other:?}"),
+            };
+            let deser_json: serde_json::Value = match deser {
+                Value::Object(deser_bytes) | Value::String(deser_bytes) => serde_json::from_slice(deser_bytes)
+                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?,
+                #[cfg(feature = "serde")]
+                Value::Json(v) => v.clone(),
+                other => panic!("Unexpected value variant: {other:?}"),
+            };
+            assert_eq!(orig_json, deser_json);
         }
 
         Ok(())
@@ -1937,40 +1978,41 @@ mod tests {
 
         // Parse and compare JSON objects
         for (original, deserialized) in values.iter().zip(deserialized.iter()) {
-            if let (Value::String(orig_bytes), Value::String(deser_bytes)) =
-                (original, deserialized)
-            {
-                let orig_str = String::from_utf8(orig_bytes.clone())?;
-                let deser_str = String::from_utf8(deser_bytes.clone())?;
+            let orig_json: serde_json::Value = match original {
+                Value::String(orig_bytes) | Value::Object(orig_bytes) => serde_json::from_slice(orig_bytes)
+                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?,
+                #[cfg(feature = "serde")]
+                Value::Json(v) => v.clone(),
+                other => panic!("Unexpected value variant: {other:?}"),
+            };
+            let deser_json: serde_json::Value = match deserialized {
+                Value::Object(deser_bytes) | Value::String(deser_bytes) => serde_json::from_slice(deser_bytes)
+                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?,
+                #[cfg(feature = "serde")]
+                Value::Json(v) => v.clone(),
+                other => panic!("Unexpected value variant: {other:?}"),
+            };
 
-                let orig_json: serde_json::Value = serde_json::from_str(&orig_str)
-                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?;
-                let deser_json: serde_json::Value = serde_json::from_str(&deser_str)
-                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?;
+            // Verify typed paths are preserved
+            assert_eq!(orig_json["id"], deser_json["id"]);
+            assert_eq!(orig_json["name"], deser_json["name"]);
 
-                // Verify typed paths are preserved
-                assert_eq!(orig_json["id"], deser_json["id"]);
-                assert_eq!(orig_json["name"], deser_json["name"]);
-
-                // Verify dynamic paths are preserved when they exist
-                if !orig_json["score"].is_null() {
-                    assert_eq!(orig_json["score"], deser_json["score"]);
+            // Verify dynamic paths are preserved when they exist
+            if !orig_json["score"].is_null() {
+                assert_eq!(orig_json["score"], deser_json["score"]);
+            }
+            if !orig_json["active"].is_null() {
+                // Bool gets converted to UInt8 (0/1) in ClickHouse
+                if orig_json["active"].is_boolean() && deser_json["active"].is_number() {
+                    let orig_bool = orig_json["active"].as_bool().unwrap();
+                    let deser_num = deser_json["active"].as_u64().unwrap();
+                    assert_eq!(orig_bool as u64, deser_num);
+                } else {
+                    assert_eq!(orig_json["active"], deser_json["active"]);
                 }
-                if !orig_json["active"].is_null() {
-                    // Bool gets converted to UInt8 (0/1) in ClickHouse
-                    if orig_json["active"].is_boolean() && deser_json["active"].is_number() {
-                        let orig_bool = orig_json["active"].as_bool().unwrap();
-                        let deser_num = deser_json["active"].as_u64().unwrap();
-                        assert_eq!(orig_bool as u64, deser_num);
-                    } else {
-                        assert_eq!(orig_json["active"], deser_json["active"]);
-                    }
-                }
-                if !orig_json["tags"].is_null() {
-                    assert_eq!(orig_json["tags"], deser_json["tags"]);
-                }
-            } else {
-                panic!("Expected String values");
+            }
+            if !orig_json["tags"].is_null() {
+                assert_eq!(orig_json["tags"], deser_json["tags"]);
             }
         }
 
@@ -2020,11 +2062,20 @@ mod tests {
 
         // Parse and verify JSON structure
         for (orig, deser) in values.iter().zip(deserialized.iter()) {
-            if let (Value::String(orig_bytes), Value::String(deser_bytes)) = (orig, deser) {
-                let orig_json: serde_json::Value = serde_json::from_slice(orig_bytes)
-                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?;
-                let deser_json: serde_json::Value = serde_json::from_slice(deser_bytes)
-                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?;
+            let orig_json: serde_json::Value = match orig {
+                Value::String(orig_bytes) | Value::Object(orig_bytes) => serde_json::from_slice(orig_bytes)
+                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?,
+                #[cfg(feature = "serde")]
+                Value::Json(v) => v.clone(),
+                other => panic!("Unexpected value variant: {other:?}"),
+            };
+            let deser_json: serde_json::Value = match deser {
+                Value::Object(deser_bytes) | Value::String(deser_bytes) => serde_json::from_slice(deser_bytes)
+                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?,
+                #[cfg(feature = "serde")]
+                Value::Json(v) => v.clone(),
+                other => panic!("Unexpected value variant: {other:?}"),
+            };
 
                 // Verify typed paths are preserved with correct types
                 // Note: Values may be truncated due to type conversions
@@ -2042,9 +2093,7 @@ mod tests {
                     assert_eq!(deser_json["int8"], 127);
                     assert_eq!(deser_json["uint8"], 255);
                 }
-            } else {
-                panic!("Expected String values");
-            }
+            // done
         }
 
         Ok(())
@@ -2088,10 +2137,13 @@ mod tests {
 
         // Parse and verify skipped paths are not present
         for deserialized_val in deserialized.iter() {
-            if let Value::String(deser_bytes) = deserialized_val {
-                let deser_str = String::from_utf8(deser_bytes.clone())?;
-                let deser_json: serde_json::Value = serde_json::from_str(&deser_str)
-                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?;
+            let deser_json: serde_json::Value = match deserialized_val {
+                Value::Object(deser_bytes) | Value::String(deser_bytes) => serde_json::from_slice(deser_bytes)
+                    .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?,
+                #[cfg(feature = "serde")]
+                Value::Json(v) => v.clone(),
+                other => panic!("Unexpected value variant: {other:?}"),
+            };
 
                 // Verify only public field is present
                 assert!(!deser_json["public"].is_null());
@@ -2101,9 +2153,7 @@ mod tests {
                 assert!(deser_json["private_key"].is_null());
                 assert!(deser_json["secret_token"].is_null());
                 assert!(deser_json["api_key"].is_null());
-            } else {
-                panic!("Expected String values");
-            }
+            // done
         }
 
         Ok(())
@@ -2194,14 +2244,13 @@ mod tests {
         let result_values = type_.deserialize_column(&mut input, 2, &mut de_state).await?;
 
         // Parse results to verify wrapping behavior
-        let result1 = match &result_values[0] {
-            Value::String(s) => {
-                String::from_utf8(s.clone()).map_err(|e| Error::SerializeError(e.to_string()))?
-            }
-            _ => return Err(Error::SerializeError("Expected String value".to_string())),
+        let parsed1: serde_json::Value = match &result_values[0] {
+            #[cfg(feature = "serde")]
+            Value::Json(v) => v.clone(),
+            Value::Object(b) | Value::String(b) => serde_json::from_slice(b)
+                .map_err(|e| Error::SerializeError(e.to_string()))?,
+            other => return Err(Error::SerializeError(format!("Unexpected value: {other:?}"))),
         };
-        let parsed1: serde_json::Value =
-            serde_json::from_str(&result1).map_err(|e| Error::SerializeError(e.to_string()))?;
 
         // 256 wraps to 0 as UInt8
         assert_eq!(parsed1["overflow_u8"], 0);
@@ -2210,14 +2259,13 @@ mod tests {
         // 65536 wraps to 0 as UInt8
         assert_eq!(parsed1["big_to_small"], 0);
 
-        let result2 = match &result_values[1] {
-            Value::String(s) => {
-                String::from_utf8(s.clone()).map_err(|e| Error::SerializeError(e.to_string()))?
-            }
-            _ => return Err(Error::SerializeError("Expected String value".to_string())),
+        let parsed2: serde_json::Value = match &result_values[1] {
+            #[cfg(feature = "serde")]
+            Value::Json(v) => v.clone(),
+            Value::Object(b) | Value::String(b) => serde_json::from_slice(b)
+                .map_err(|e| Error::SerializeError(e.to_string()))?,
+            other => return Err(Error::SerializeError(format!("Unexpected value: {other:?}"))),
         };
-        let parsed2: serde_json::Value =
-            serde_json::from_str(&result2).map_err(|e| Error::SerializeError(e.to_string()))?;
 
         // -1 as UInt8 becomes 255 (two's complement)
         assert_eq!(parsed2["negative_to_u8"], 255);
@@ -2264,14 +2312,13 @@ mod tests {
         type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
         let result_values = type_.deserialize_column(&mut input, 1, &mut de_state).await?;
 
-        let result = match &result_values[0] {
-            Value::String(s) => {
-                String::from_utf8(s.clone()).map_err(|e| Error::SerializeError(e.to_string()))?
-            }
-            _ => return Err(Error::SerializeError("Expected String value".to_string())),
+        let parsed: serde_json::Value = match &result_values[0] {
+            #[cfg(feature = "serde")]
+            Value::Json(v) => v.clone(),
+            Value::Object(b) | Value::String(b) => serde_json::from_slice(b)
+                .map_err(|e| Error::SerializeError(e.to_string()))?,
+            other => return Err(Error::SerializeError(format!("Unexpected value: {other:?}"))),
         };
-        let parsed: serde_json::Value =
-            serde_json::from_str(&result).map_err(|e| Error::SerializeError(e.to_string()))?;
 
         assert_eq!(parsed["str_int"], 123);
         const TEST_FLOAT: f64 = 3.14;
@@ -2330,14 +2377,13 @@ mod tests {
         type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
         let result_values = type_.deserialize_column(&mut input, 1, &mut de_state).await?;
 
-        let result = match &result_values[0] {
-            Value::String(s) => {
-                String::from_utf8(s.clone()).map_err(|e| Error::SerializeError(e.to_string()))?
-            }
-            _ => return Err(Error::SerializeError("Expected String value".to_string())),
+        let parsed: serde_json::Value = match &result_values[0] {
+            #[cfg(feature = "serde")]
+            Value::Json(v) => v.clone(),
+            Value::Object(b) | Value::String(b) => serde_json::from_slice(b)
+                .map_err(|e| Error::SerializeError(e.to_string()))?,
+            other => return Err(Error::SerializeError(format!("Unexpected value: {other:?}"))),
         };
-        let parsed: serde_json::Value =
-            serde_json::from_str(&result).map_err(|e| Error::SerializeError(e.to_string()))?;
 
         // Check Array element conversions with wrapping
         assert_eq!(parsed["int_array"][0], 0); // 256 wraps to 0 as UInt8
@@ -2409,14 +2455,13 @@ mod tests {
         type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
         let result_values = type_.deserialize_column(&mut input, 1, &mut de_state).await?;
 
-        let result = match &result_values[0] {
-            Value::String(s) => {
-                String::from_utf8(s.clone()).map_err(|e| Error::SerializeError(e.to_string()))?
-            }
-            _ => return Err(Error::SerializeError("Expected String value".to_string())),
+        let parsed: serde_json::Value = match &result_values[0] {
+            #[cfg(feature = "serde")]
+            Value::Json(v) => v.clone(),
+            Value::Object(b) | Value::String(b) => serde_json::from_slice(b)
+                .map_err(|e| Error::SerializeError(e.to_string()))?,
+            other => return Err(Error::SerializeError(format!("Unexpected value: {other:?}"))),
         };
-        let parsed: serde_json::Value =
-            serde_json::from_str(&result).map_err(|e| Error::SerializeError(e.to_string()))?;
 
         // Check array of tuples
         assert_eq!(parsed["array_of_tuples"][0][0], 1);

@@ -45,7 +45,11 @@ pub(crate) trait ClickHouseNativeDeserializer {
         state: &'a mut DeserializerState,
     ) -> impl Future<Output = Result<()>> + Send + 'a;
 
-    fn deserialize_prefix<R: ClickHouseBytesRead>(&self, reader: &mut R) -> Result<()>;
+    fn deserialize_prefix<R: ClickHouseBytesRead>(
+        &self,
+        reader: &mut R,
+        state: &mut DeserializerState,
+    ) -> Result<()>;
 }
 
 impl ClickHouseNativeDeserializer for Type {
@@ -132,12 +136,27 @@ impl ClickHouseNativeDeserializer for Type {
         .boxed()
     }
 
-    fn deserialize_prefix<R: ClickHouseBytesRead>(&self, reader: &mut R) -> Result<()> {
+    fn deserialize_prefix<R: ClickHouseBytesRead>(
+        &self,
+        reader: &mut R,
+        state: &mut DeserializerState,
+    ) -> Result<()> {
         match self {
-            Type::Array(inner) | Type::Nullable(inner) => inner.deserialize_prefix(reader)?,
+            Type::Array(inner) | Type::Nullable(inner) => {
+                inner.deserialize_prefix(reader, state)?;
+            }
+            Type::Tuple(inner) => {
+                for inner_type in inner {
+                    inner_type.deserialize_prefix(reader, state)?;
+                }
+            }
+            Type::Map(key, value) => {
+                let nested = super::map::normalize_map_type(key, value);
+                nested.deserialize_prefix(reader, state)?;
+            }
             Type::Point => {
                 for _ in 0..2 {
-                    Type::Float64.deserialize_prefix(reader)?;
+                    Type::Float64.deserialize_prefix(reader, state)?;
                 }
             }
             Type::LowCardinality(_) => {
@@ -148,15 +167,6 @@ impl ClickHouseNativeDeserializer for Type {
                     )));
                 }
             }
-            Type::Map(key, value) => {
-                let nested = super::map::normalize_map_type(key, value);
-                nested.deserialize_prefix(reader)?;
-            }
-            Type::Tuple(inner) => {
-                for inner_type in inner {
-                    inner_type.deserialize_prefix(reader)?;
-                }
-            }
             Type::Object => {
                 let _ = reader.try_get_i8()?;
             }
@@ -164,18 +174,10 @@ impl ClickHouseNativeDeserializer for Type {
                 variant::VariantDeserializer::read_prefix_sync(self, reader)?;
             }
             Type::Dynamic { .. } => {
-                dynamic::DynamicDeserializer::read_prefix_sync(
-                    self,
-                    reader,
-                    &mut DeserializerState::default(),
-                )?;
+                dynamic::DynamicDeserializer::read_prefix_sync(self, reader, state)?;
             }
             Type::JSON { .. } => {
-                json::JsonDeserializer::read_prefix_sync(
-                    self,
-                    reader,
-                    &mut DeserializerState::default(),
-                )?;
+                json::JsonDeserializer::read_prefix_sync(self, reader, state)?;
             }
             _ => {}
         }

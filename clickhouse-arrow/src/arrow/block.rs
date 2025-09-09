@@ -348,7 +348,9 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
                     builders.last_mut().unwrap()
                 };
 
-                type_hint.deserialize_prefix(reader)?;
+                // Arrow path does not require shared metadata; use a local state
+                let mut prefix_state = DeserializerState::default();
+                type_hint.deserialize_prefix(reader, &mut prefix_state)?;
                 type_hint
                     .deserialize_arrow(builder, reader, dt, rows, &[], &mut deser.buffer)
                     .inspect_err(|error| error!(?error, ?type_hint, ?field, "deserialize {i}"))?

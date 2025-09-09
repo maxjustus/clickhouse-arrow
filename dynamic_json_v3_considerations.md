@@ -177,3 +177,20 @@ Goal: preserve arrays and nested collections as native types (Array, Map, Tuple,
 - Maintain version gating and fail early on unsupported versions/settings
 - Avoid partial segment writes for flattened Dynamic within a block
 - Enforce recursion depth and Variant alternatives caps to prevent pathological inputs
+
+## Client-side SKIP and limits (flattened v3)
+
+Flattened JSON v3 treats the ObjectStructure (flattened paths list) as authoritative for ingestion. The server does not apply SKIP/SKIP REGEXP itself at ingest time. The practical implications for the client are:
+
+- Apply SKIP in the client:
+  - SKIP exact: filter out non-typed paths whose full dotted path equals the value (e.g., `password`).
+  - SKIP REGEXP: filter out non-typed paths that match the regex on the full dotted path (e.g., `secret.*`).
+  - Typed paths always win over SKIP. If a path is declared typed in the schema, it is included regardless of SKIP rules.
+
+- Do not enforce `max_dynamic_paths` client-side for v3:
+  - Send all discovered (non-skipped) dynamic paths in the flattened header; the server decides which to materialize as dynamic subcolumns and which to move into shared data.
+
+- Do not enforce `max_dynamic_types` client-side for v3:
+  - Build the per-path Dynamic type registry from observed values and send all types; the server can accept or constrain types according to its configuration.
+
+This approach keeps client behavior aligned with ClickHouse’s v3 design: the client prepares a faithful flattened view (minus SKIPped paths), and the server performs final selection and layout.
