@@ -305,13 +305,20 @@ enum EnumParseState {
     InValue,
 }
 
-type JsonParameters = (Option<u32>, Option<u32>, Vec<(String, Box<Type>)>, Vec<String>);
+type JsonParameters = (
+    Option<u32>,                 // max_dynamic_paths
+    Option<u32>,                 // max_dynamic_types
+    Vec<(String, Box<Type>)>,    // typed_paths
+    Vec<String>,                 // skip_exact
+    Vec<String>,                 // skip_regex
+);
 
 fn parse_json_parameters(args: Vec<&str>) -> Result<JsonParameters> {
     let mut max_dynamic_paths = None;
     let mut max_dynamic_types = None;
     let mut typed_paths = Vec::new();
-    let mut skip_paths = Vec::new();
+    let mut skip_exact = Vec::new();
+    let mut skip_regex = Vec::new();
 
     for arg in args {
         let arg = arg.trim();
@@ -333,7 +340,7 @@ fn parse_json_parameters(args: Vec<&str>) -> Result<JsonParameters> {
                 .trim_end_matches('\'')
                 .trim_start_matches('"')
                 .trim_end_matches('"');
-            skip_paths.push(pattern.to_string());
+            skip_regex.push(pattern.to_string());
         } else if let Some(skip_path) = arg.strip_prefix("SKIP ") {
             // Handle literal skip paths: SKIP field_name
             let field = skip_path
@@ -344,7 +351,7 @@ fn parse_json_parameters(args: Vec<&str>) -> Result<JsonParameters> {
                 .trim_end_matches('\'')
                 .trim_start_matches('"')
                 .trim_end_matches('"');
-            skip_paths.push(field.to_string());
+            skip_exact.push(field.to_string());
         } else if arg.contains(' ') && !arg.starts_with("max_") && !arg.starts_with("SKIP") {
             // Handle typed paths: Name String, Age Int64, etc.
             let parts: Vec<&str> = arg.splitn(2, ' ').collect();
@@ -364,7 +371,7 @@ fn parse_json_parameters(args: Vec<&str>) -> Result<JsonParameters> {
         }
     }
 
-    Ok((max_dynamic_paths, max_dynamic_types, typed_paths, skip_paths))
+    Ok((max_dynamic_paths, max_dynamic_types, typed_paths, skip_exact, skip_regex))
 }
 
 fn parse_dynamic_parameters(args: Vec<&str>) -> Result<Option<u32>> {
@@ -650,9 +657,9 @@ impl FromStr for Type {
                 }
                 "JSON" => {
                     let args = parse_variable_args(following)?;
-                    let (max_dynamic_paths, max_dynamic_types, typed_paths, skip_paths) =
+                    let (max_dynamic_paths, max_dynamic_types, typed_paths, skip_exact, skip_regex) =
                         parse_json_parameters(args)?;
-                    Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_paths }
+                    Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_exact, skip_regex }
                 }
                 // Unsupported
                 "Nested" => {
@@ -700,13 +707,14 @@ impl FromStr for Type {
                         max_dynamic_paths: None,
                         max_dynamic_types: None,
                         typed_paths:       Vec::new(),
-                        skip_paths:        Vec::new(),
+                        skip_exact:        Vec::new(),
+                        skip_regex:        Vec::new(),
                     }
                 } else {
                     let args = parse_variable_args(following)?;
-                    let (max_dynamic_paths, max_dynamic_types, typed_paths, skip_paths) =
+                    let (max_dynamic_paths, max_dynamic_types, typed_paths, skip_exact, skip_regex) =
                         parse_json_parameters(args)?;
-                    Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_paths }
+                    Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_exact, skip_regex }
                 }
             }
             "Dynamic" => {
@@ -1055,7 +1063,8 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         });
         assert_eq!(Type::from_str("Object").unwrap(), Type::Object);
         assert_eq!(Type::from_str("Json").unwrap(), Type::Object);
@@ -1145,19 +1154,22 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         });
         assert_eq!(Type::from_str("JSON(max_dynamic_paths=16)").unwrap(), Type::JSON {
             max_dynamic_paths: Some(16),
             max_dynamic_types: None,
             typed_paths:       vec![],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         });
         assert_eq!(Type::from_str("JSON(max_dynamic_types=64)").unwrap(), Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: Some(64),
             typed_paths:       vec![],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         });
         assert_eq!(
             Type::from_str("JSON(max_dynamic_paths=100, max_dynamic_types=32)").unwrap(),
@@ -1165,7 +1177,8 @@ mod tests {
                 max_dynamic_paths: Some(100),
                 max_dynamic_types: Some(32),
                 typed_paths:       vec![],
-                skip_paths:        vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             }
         );
         assert_eq!(
@@ -1174,7 +1187,8 @@ mod tests {
                 max_dynamic_paths: Some(100),
                 max_dynamic_types: Some(32),
                 typed_paths:       vec![],
-                skip_paths:        vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             }
         );
 
@@ -1191,7 +1205,8 @@ mod tests {
                 max_dynamic_paths: Some(100),
                 max_dynamic_types: None,
                 typed_paths:       vec![("Name".to_string(), Box::new(Type::String))],
-                skip_paths:        vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             }
         );
         assert_eq!(Type::from_str("JSON(Name String, Age Int64)").unwrap(), Type::JSON {
@@ -1201,7 +1216,8 @@ mod tests {
                 ("Name".to_string(), Box::new(Type::String)),
                 ("Age".to_string(), Box::new(Type::Int64))
             ],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         });
 
         // Test skip paths parsing
@@ -1211,14 +1227,16 @@ mod tests {
                 max_dynamic_paths: None,
                 max_dynamic_types: Some(32),
                 typed_paths:       vec![],
-                skip_paths:        vec!["fake.field".to_string()],
+                skip_exact:        vec!["fake.field".to_string()],
+                skip_regex:        vec![],
             }
         );
         assert_eq!(Type::from_str("JSON(SKIP REGEXP '.*\\.debug')").unwrap(), Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
-            skip_paths:        vec![".*\\.debug".to_string()],
+            skip_exact:        vec![],
+            skip_regex:        vec![".*\\.debug".to_string()],
         });
 
         // Test combined typed paths and skip paths
@@ -1234,7 +1252,8 @@ mod tests {
                     ("Name".to_string(), Box::new(Type::String)),
                     ("Age".to_string(), Box::new(Type::Int64))
                 ],
-                skip_paths:        vec![".*\\.debug".to_string(), "temp.field".to_string()],
+                skip_exact:        vec!["temp.field".to_string()],
+                skip_regex:        vec![".*\\.debug".to_string()],
             }
         );
     }
@@ -1244,27 +1263,30 @@ mod tests {
     fn test_json_quoted_skip_paths() {
         // Test single-quoted skip paths
         let json_type = Type::from_str("JSON(SKIP 'field.to.skip')").unwrap();
-        if let Type::JSON { skip_paths, .. } = json_type {
-            assert_eq!(skip_paths.len(), 1);
-            assert_eq!(skip_paths[0], "field.to.skip");
+        if let Type::JSON { skip_exact, skip_regex, .. } = json_type {
+            assert_eq!(skip_exact.len(), 1);
+            assert_eq!(skip_exact[0], "field.to.skip");
+            assert!(skip_regex.is_empty());
         } else {
             panic!("Expected JSON type");
         }
 
         // Test double-quoted skip paths
         let json_type = Type::from_str("JSON(SKIP \"another.field\")").unwrap();
-        if let Type::JSON { skip_paths, .. } = json_type {
-            assert_eq!(skip_paths.len(), 1);
-            assert_eq!(skip_paths[0], "another.field");
+        if let Type::JSON { skip_exact, skip_regex, .. } = json_type {
+            assert_eq!(skip_exact.len(), 1);
+            assert_eq!(skip_exact[0], "another.field");
+            assert!(skip_regex.is_empty());
         } else {
             panic!("Expected JSON type");
         }
 
         // Test backtick-quoted skip paths (existing behavior)
         let json_type = Type::from_str("JSON(SKIP `backtick.field`)").unwrap();
-        if let Type::JSON { skip_paths, .. } = json_type {
-            assert_eq!(skip_paths.len(), 1);
-            assert_eq!(skip_paths[0], "backtick.field");
+        if let Type::JSON { skip_exact, skip_regex, .. } = json_type {
+            assert_eq!(skip_exact.len(), 1);
+            assert_eq!(skip_exact[0], "backtick.field");
+            assert!(skip_regex.is_empty());
         } else {
             panic!("Expected JSON type");
         }
@@ -1272,11 +1294,12 @@ mod tests {
         // Test mixed quotes with multiple skip paths
         let json_type =
             Type::from_str("JSON(SKIP 'single', SKIP \"double\", SKIP `backtick`)").unwrap();
-        if let Type::JSON { skip_paths, .. } = json_type {
-            assert_eq!(skip_paths.len(), 3);
-            assert_eq!(skip_paths[0], "single");
-            assert_eq!(skip_paths[1], "double");
-            assert_eq!(skip_paths[2], "backtick");
+        if let Type::JSON { skip_exact, skip_regex, .. } = json_type {
+            assert_eq!(skip_exact.len(), 3);
+            assert!(skip_regex.is_empty());
+            assert_eq!(skip_exact[0], "single");
+            assert_eq!(skip_exact[1], "double");
+            assert_eq!(skip_exact[2], "backtick");
         } else {
             panic!("Expected JSON type");
         }
@@ -1284,10 +1307,11 @@ mod tests {
         // Test combined with other parameters
         let json_type =
             Type::from_str("JSON(max_dynamic_paths=100, SKIP 'field.name', Name String)").unwrap();
-        if let Type::JSON { max_dynamic_paths, skip_paths, typed_paths, .. } = json_type {
+        if let Type::JSON { max_dynamic_paths, skip_exact, skip_regex, typed_paths, .. } = json_type {
             assert_eq!(max_dynamic_paths, Some(100));
-            assert_eq!(skip_paths.len(), 1);
-            assert_eq!(skip_paths[0], "field.name");
+            assert_eq!(skip_exact.len(), 1);
+            assert_eq!(skip_exact[0], "field.name");
+            assert!(skip_regex.is_empty());
             assert_eq!(typed_paths.len(), 1);
             assert_eq!(typed_paths[0], ("Name".to_string(), Box::new(Type::String)));
         } else {
@@ -1300,23 +1324,23 @@ mod tests {
     fn test_json_typed_and_skip_paths() {
         // Test basic typed paths
         let json_type = Type::from_str("JSON(Name String, Age UInt32, Score Float64)").unwrap();
-        if let Type::JSON { typed_paths, skip_paths, .. } = json_type {
+        if let Type::JSON { typed_paths, skip_exact, skip_regex, .. } = json_type {
             assert_eq!(typed_paths.len(), 3);
             assert_eq!(typed_paths[0], ("Name".to_string(), Box::new(Type::String)));
             assert_eq!(typed_paths[1], ("Age".to_string(), Box::new(Type::UInt32)));
             assert_eq!(typed_paths[2], ("Score".to_string(), Box::new(Type::Float64)));
-            assert!(skip_paths.is_empty());
+            assert!(skip_exact.is_empty());
+            assert!(skip_regex.is_empty());
         } else {
             panic!("Expected JSON type");
         }
 
         // Test basic skip paths
         let json_type = Type::from_str("JSON(SKIP debug.info, SKIP REGEXP '.*\\.temp')").unwrap();
-        if let Type::JSON { typed_paths, skip_paths, .. } = json_type {
+        if let Type::JSON { typed_paths, skip_exact, skip_regex, .. } = json_type {
             assert!(typed_paths.is_empty());
-            assert_eq!(skip_paths.len(), 2);
-            assert_eq!(skip_paths[0], "debug.info");
-            assert_eq!(skip_paths[1], ".*\\.temp");
+            assert_eq!(skip_exact, vec!["debug.info".to_string()]);
+            assert_eq!(skip_regex, vec![".*\\.temp".to_string()]);
         } else {
             panic!("Expected JSON type");
         }
@@ -1374,31 +1398,36 @@ mod tests {
                 max_dynamic_paths: None,
                 max_dynamic_types: None,
                 typed_paths:       vec![],
-                skip_paths:        vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             },
             Type::JSON {
                 max_dynamic_paths: Some(16),
                 max_dynamic_types: None,
                 typed_paths:       vec![],
-                skip_paths:        vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             },
             Type::JSON {
                 max_dynamic_paths: None,
                 max_dynamic_types: Some(64),
                 typed_paths:       vec![],
-                skip_paths:        vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             },
             Type::JSON {
                 max_dynamic_paths: Some(100),
                 max_dynamic_types: Some(32),
                 typed_paths:       vec![],
-                skip_paths:        vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             },
             Type::JSON {
                 max_dynamic_paths: None,
                 max_dynamic_types: None,
                 typed_paths:       vec![("Name".to_string(), Box::new(Type::String))],
-                skip_paths:        vec!["debug.field".to_string()],
+                skip_exact:        vec!["debug.field".to_string()],
+                skip_regex:        vec![],
             },
         ];
 

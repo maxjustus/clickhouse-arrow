@@ -978,7 +978,8 @@ fn test_json_deserialize_prefix_sync_integration() {
         max_dynamic_paths: None,
         max_dynamic_types: None,
         typed_paths:       Vec::default(),
-        skip_paths:        Vec::default(),
+        skip_exact:        Vec::default(),
+        skip_regex:        Vec::default(),
     };
 
     // Create a minimal valid JSON prefix buffer

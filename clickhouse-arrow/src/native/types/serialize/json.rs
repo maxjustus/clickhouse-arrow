@@ -47,7 +47,8 @@ impl JsonData {
     fn from_values(
         values: Vec<Value>,
         typed_paths: &[(String, Type)],
-        skip_paths: &[String],
+        skip_exact: &[String],
+        skip_regex: &[String],
     ) -> Result<Self> {
         let mut dynamic_path_columns: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         let mut typed_path_columns: BTreeMap<String, Vec<Value>> = BTreeMap::new();
@@ -65,14 +66,14 @@ impl JsonData {
             drop(typed_path_columns.insert(path.clone(), vec![fill; rows]));
         }
 
-        // Compile skip path patterns as regex
-        let skip_patterns: Result<Vec<regex::Regex>> = skip_paths
+        // Prepare skip matchers
+        let skip_exact_set: std::collections::HashSet<&str> =
+            skip_exact.iter().map(|s| s.as_str()).collect();
+        let skip_patterns: Result<Vec<regex::Regex>> = skip_regex
             .iter()
-            .map(|p| {
-                regex::Regex::new(p).map_err(|e| {
-                    Error::SerializeError(format!("Invalid skip_path pattern '{p}': {e}"))
-                })
-            })
+            .map(|p| regex::Regex::new(p).map_err(|e| {
+                Error::SerializeError(format!("Invalid skip_path pattern '{p}': {e}"))
+            }))
             .collect();
         let skip_patterns = skip_patterns?;
 
@@ -94,6 +95,7 @@ impl JsonData {
                         &mut dynamic_path_columns,
                         &mut typed_path_columns,
                         typed_paths,
+                        &skip_exact_set,
                         &skip_patterns,
                         row_idx,
                         rows,
@@ -128,6 +130,7 @@ impl JsonData {
         dynamic_path_columns: &mut BTreeMap<String, Vec<Value>>,
         typed_path_columns: &mut BTreeMap<String, Vec<Value>>,
         typed_paths: &[(String, Type)],
+        skip_exact: &std::collections::HashSet<&str>,
         skip_patterns: &[regex::Regex],
         row_idx: usize,
         total_rows: usize,
@@ -146,25 +149,31 @@ impl JsonData {
                     dynamic_path_columns,
                     typed_path_columns,
                     typed_paths,
+                    skip_exact,
                     skip_patterns,
                     row_idx,
                     total_rows,
                 )?;
             }
         } else {
-            // Check if this path should be skipped
-            for pattern in skip_patterns {
-                if pattern.is_match(current_path) {
-                    return Ok(()); // Skip this path
+            // Determine if this is typed
+            let typed_path_type =
+                typed_paths.iter().find(|(path, _)| path == current_path).map(|(_, typ)| typ);
+
+            // Apply skip only for dynamic (non-typed) paths
+            if typed_path_type.is_none() {
+                if skip_exact.contains(current_path) {
+                    return Ok(());
+                }
+                for pattern in skip_patterns {
+                    if pattern.is_match(current_path) {
+                        return Ok(());
+                    }
                 }
             }
 
             // Leaf value - convert to ClickHouse Value and store
             let ch_value = Self::json_value_to_clickhouse_value(json_value)?;
-
-            // Check if this is a typed path
-            let typed_path_type =
-                typed_paths.iter().find(|(path, _)| path == current_path).map(|(_, typ)| typ);
 
             if let Some(expected_type) = typed_path_type {
                 // Convert the value to the expected type
@@ -714,25 +723,35 @@ impl JsonSerializer {
 impl JsonSerializer {
     /// Analyze JSON values and return metadata for use in `write_prefix`
     pub(crate) fn analyze_values(values: &[Value], type_: &Type) -> Result<TypeSpecificState> {
-        // Extract typed_paths and skip_paths from the Type
-        let (typed_paths, skip_paths) = match type_ {
-            Type::JSON { typed_paths, skip_paths, .. } => {
+        // Extract typed_paths and SKIP rules from the Type
+        let (typed_paths, skip_exact, skip_regex, _max_dyn_paths, _max_dyn_types) = match type_ {
+            Type::JSON { typed_paths, skip_exact, skip_regex, max_dynamic_paths, max_dynamic_types } => {
                 let typed_list: Vec<(String, Type)> = typed_paths
                     .iter()
                     .map(|(path, boxed_type)| (path.clone(), *boxed_type.clone()))
                     .collect();
-                (typed_list, skip_paths.clone())
+                (
+                    typed_list,
+                    skip_exact.clone(),
+                    skip_regex.clone(),
+                    *max_dynamic_paths,
+                    *max_dynamic_types,
+                )
             }
             _ => return Err(Error::SerializeError("Expected JSON type".to_string())),
         };
 
-        // Parse JSON values into path-organized structure
-        let json_data = JsonData::from_values(values.to_vec(), &typed_paths, &skip_paths)?;
+        // Parse JSON values into path-organized structure (filtering skipped paths)
+        let json_data =
+            JsonData::from_values(values.to_vec(), &typed_paths, &skip_exact, &skip_regex)?;
 
         // Build the metadata
         let mut dynamic_paths: Vec<String> =
             json_data.dynamic_path_columns.keys().cloned().collect();
         dynamic_paths.sort(); // Ensure consistent ordering
+
+        // Do NOT enforce max_dynamic_paths client-side in flattened v3.
+        // Send all discovered paths; server will select which become dynamic vs shared.
 
         // Build states for typed paths
         // This is crucial for types like LowCardinality that need to build dictionaries
@@ -750,6 +769,17 @@ impl JsonSerializer {
             drop(typed_path_states.insert(path.clone(), SerializerState::default()));
         }
 
+        // Precompute Dynamic states per dynamic path. Do NOT error on max_dynamic_types in v3; let server decide.
+        let mut path_dynamic_states = BTreeMap::new();
+        for path in &dynamic_paths {
+            if let Some(col) = json_data.dynamic_path_columns.get(path) {
+                let analyzed = DynamicSerializer::analyze_values(col);
+                if let TypeSpecificState::Dynamic(dyn_state) = analyzed.clone() {
+                    drop(path_dynamic_states.insert(path.clone(), dyn_state));
+                }
+            }
+        }
+
         let state = JsonState {
             version: None, // Will be set properly in write_prefix
             dynamic_paths: dynamic_paths.clone(),
@@ -758,7 +788,7 @@ impl JsonSerializer {
             typed_path_columns: Some(json_data.typed_path_columns),
             rows: Some(json_data.rows),
             dynamic_data: None,
-            path_dynamic_states: Default::default(), // Will be filled in write_prefix
+            path_dynamic_states, // Pre-built per-path Dynamic states
             typed_path_states,                       // Pre-built states for typed paths
             // Deprecated fields for compatibility
             #[allow(deprecated)]
@@ -861,29 +891,32 @@ impl JsonSerializer {
                 path_type.serialize_prefix(writer, &mut typed_prefix_state);
             }
 
-            // Write Dynamic column headers for each dynamic path and store states
+            // Write Dynamic column headers for each dynamic path using precomputed states
             if let Some(dynamic_columns) = dynamic_columns {
-                // Create a map to store Dynamic states
-                let mut path_dynamic_states = BTreeMap::new();
+                let path_dynamic_states = if let TypeSpecificState::Json(json_state_ref) = &state.type_specific {
+                    json_state_ref.path_dynamic_states.clone()
+                } else {
+                    Default::default()
+                };
 
                 for path in dynamic_paths {
-                    if let Some(column_values) = dynamic_columns.get(&path) {
-                        // Write Dynamic headers with normal Native context (no JSON suppression)
-                        let dynamic_state = DynamicSerializer::write_dynamic_header_sync(
-                            column_values,
-                            writer,
-                            state,
-                        )?;
-                        // Store the Dynamic state for this path
-                        if let TypeSpecificState::Dynamic(dyn_state) = dynamic_state {
-                            drop(path_dynamic_states.insert(path, dyn_state));
+                    if dynamic_columns.get(&path).is_some() {
+                        if let Some(dyn_state) = path_dynamic_states.get(&path) {
+                            // Temporarily swap state to use provided Dynamic state
+                            let original = std::mem::replace(
+                                &mut state.type_specific,
+                                TypeSpecificState::Dynamic(dyn_state.clone()),
+                            );
+                            // Write prefix for this dynamic path (sync)
+                            DynamicSerializer::write_prefix_sync(
+                                &Type::Dynamic { max_types: None },
+                                writer,
+                                state,
+                            )?;
+                            // Restore
+                            state.type_specific = original;
                         }
                     }
-                }
-
-                // Now update the state with all the dynamic states
-                if let TypeSpecificState::Json(json_state_mut) = &mut state.type_specific {
-                    json_state_mut.path_dynamic_states = path_dynamic_states;
                 }
             }
         } else {
@@ -948,30 +981,30 @@ impl Serializer for JsonSerializer {
                 path_type.serialize_prefix_async(writer, &mut typed_prefix_state).await?;
             }
 
-            // Write Dynamic column headers for each dynamic path and store states
+            // Write Dynamic column headers for each dynamic path using precomputed states
             if let Some(dynamic_columns) = dynamic_columns {
-                // Create a map to store Dynamic states
-                let mut path_dynamic_states = BTreeMap::new();
+                let path_dynamic_states = if let TypeSpecificState::Json(json_state_ref) = &state.type_specific {
+                    json_state_ref.path_dynamic_states.clone()
+                } else {
+                    Default::default()
+                };
 
                 for path in dynamic_paths {
-                    if let Some(column_values) = dynamic_columns.get(&path) {
-                        // Write Dynamic headers with normal Native context (no JSON suppression)
-                        let dynamic_state = DynamicSerializer::write_dynamic_header_async(
-                            column_values,
-                            writer,
-                            state,
-                        )
-                        .await?;
-                        // Store the Dynamic state for this path
-                        if let TypeSpecificState::Dynamic(dyn_state) = dynamic_state {
-                            drop(path_dynamic_states.insert(path, dyn_state));
+                    if dynamic_columns.get(&path).is_some() {
+                        if let Some(dyn_state) = path_dynamic_states.get(&path) {
+                            let original = std::mem::replace(
+                                &mut state.type_specific,
+                                TypeSpecificState::Dynamic(dyn_state.clone()),
+                            );
+                            DynamicSerializer::write_prefix(
+                                &Type::Dynamic { max_types: None },
+                                writer,
+                                state,
+                            )
+                            .await?;
+                            state.type_specific = original;
                         }
                     }
-                }
-
-                // Now update the state with all the dynamic states
-                if let TypeSpecificState::Json(json_state_mut) = &mut state.type_specific {
-                    json_state_mut.path_dynamic_states = path_dynamic_states;
                 }
             }
         } else {
@@ -1185,7 +1218,8 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
         let values_len = values.len();
 
@@ -1288,7 +1322,8 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
         let mut output = vec![];
         let mut state = SerializerState::default();
@@ -1348,7 +1383,8 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
         let mut output = vec![];
         let mut state = SerializerState::default();
@@ -1400,7 +1436,8 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
         let type_specific_state = JsonSerializer::analyze_values(&values, &type_)?;
 
@@ -1431,7 +1468,8 @@ mod tests {
                 ("id".to_string(), Box::new(Type::UInt32)),
                 ("name".to_string(), Box::new(Type::String)),
             ],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Analyze values
@@ -1478,7 +1516,8 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![("id".to_string(), Box::new(Type::UInt32))],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1530,7 +1569,8 @@ mod tests {
                 "status".to_string(),
                 Box::new(Type::LowCardinality(Box::new(Type::String))),
             )],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1582,7 +1622,8 @@ mod tests {
                 "value".to_string(),
                 Box::new(Type::variant(vec![Type::String, Type::UInt64])),
             )],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1633,11 +1674,8 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
-            skip_paths:        vec![
-                "password".to_string(),
-                ".*_key".to_string(),   // Regex pattern
-                "secret.*".to_string(), // Regex pattern
-            ],
+            skip_exact:        vec!["password".to_string()],
+            skip_regex:        vec![".*_key".to_string(), "secret.*".to_string()],
         };
 
         // Analyze values
@@ -1678,7 +1716,8 @@ mod tests {
                 ("id".to_string(), Box::new(Type::UInt32)),
                 ("name".to_string(), Box::new(Type::String)),
             ],
-            skip_paths:        vec!["password".to_string(), ".*_key".to_string()],
+            skip_exact:        vec!["password".to_string()],
+            skip_regex:        vec![".*_key".to_string()],
         };
 
         // Analyze values
@@ -1713,7 +1752,8 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![("id".to_string(), Box::new(Type::UInt32))],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Just test analyze for now
@@ -1756,7 +1796,8 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1816,7 +1857,8 @@ mod tests {
                 // This will be sorted alphabetically: Int64, String
                 Box::new(Type::Array(Box::new(Type::variant(vec![Type::String, Type::Int64])))),
             )],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Analyze values
@@ -1873,7 +1915,8 @@ mod tests {
                 ("id".to_string(), Box::new(Type::UInt32)),
                 ("name".to_string(), Box::new(Type::String)),
             ],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1955,7 +1998,8 @@ mod tests {
                 ("float32".to_string(), Box::new(Type::Float32)),
                 ("float64".to_string(), Box::new(Type::Float64)),
             ],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -2022,11 +2066,8 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
-            skip_paths:        vec![
-                "password".to_string(),
-                ".*_key".to_string(),
-                "secret.*".to_string(),
-            ],
+            skip_exact:        vec!["password".to_string()],
+            skip_regex:        vec![".*_key".to_string(), "secret.*".to_string()],
         };
 
         // Serialize
@@ -2135,7 +2176,8 @@ mod tests {
                 ("negative_to_u16".to_string(), Box::new(Type::UInt16)),
                 ("negative_to_u32".to_string(), Box::new(Type::UInt32)),
             ],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -2205,7 +2247,8 @@ mod tests {
                 ("digit_u8_1".to_string(), Box::new(Type::UInt8)),
                 ("digit_u8_0".to_string(), Box::new(Type::UInt8)),
             ],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -2270,7 +2313,8 @@ mod tests {
                     Box::new(Type::Map(Box::new(Type::String), Box::new(Type::Int16))),
                 ),
             ],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -2348,7 +2392,8 @@ mod tests {
                     Box::new(Type::Array(Box::new(Type::Nullable(Box::new(Type::UInt32))))),
                 ),
             ],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -2414,7 +2459,8 @@ mod tests {
                 "a".to_string(),
                 Box::new(Type::LowCardinality(Box::new(Type::String))),
             )],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         let mut output = vec![];
@@ -2510,7 +2556,8 @@ mod tests {
                 "value".to_string(),
                 Box::new(Type::variant(vec![Type::Int64, Type::Float64])),
             )],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Analyze values
@@ -2582,7 +2629,8 @@ mod tests {
                     Type::Float64,
                 ])))),
             )],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Analyze values
@@ -2655,7 +2703,8 @@ mod tests {
                 "strict_int".to_string(),
                 Box::new(Type::variant(vec![Type::UInt32, Type::Int32])), // Only numeric types
             )],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // This should fail since "not_a_number" cannot be converted to UInt32 or Int32
@@ -2681,7 +2730,8 @@ mod tests {
             max_dynamic_types: None,
             typed_paths:       vec![], /* Let these be dynamic for now since nested typed paths
                                         * are complex */
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Analyze values - this tests that nested structures work

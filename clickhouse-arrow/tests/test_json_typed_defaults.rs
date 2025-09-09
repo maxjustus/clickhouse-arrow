@@ -60,7 +60,8 @@ mod tests {
                 ("status".to_string(), Box::new(Type::LowCardinality(Box::new(Type::String)))),
                 ("value".to_string(), Box::new(Type::variant(vec![Type::String, Type::UInt64]))),
             ],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         let block = Block {

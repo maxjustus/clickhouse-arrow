@@ -291,7 +291,12 @@ impl JsonDeserializer {
         values
     }
 
-    /// Build JSON objects from path values
+    /// Build JSON object strings from path values
+    /// TODO: should this be not stringified?
+    /// My intuition would be that this should return a Vec<serde_json::Value>
+    /// which can then be serialized to string only if needed.
+    /// Also - should this be streamed? I forget if that's the pattern elsewhere or if we process
+    /// in blocks.
     fn build_json_objects(
         path_names: &[String],
         path_values: &HashMap<String, Vec<Value>>,
@@ -785,7 +790,8 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       Vec::default(),
-            skip_paths:        Vec::default(),
+            skip_exact:        Vec::default(),
+            skip_regex:        Vec::default(),
         };
 
         // Test the sync prefix reading
@@ -824,7 +830,8 @@ mod tests {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       Vec::default(),
-            skip_paths:        Vec::default(),
+            skip_exact:        Vec::default(),
+            skip_regex:        Vec::default(),
         };
 
         let result = JsonDeserializer::read_prefix_sync(&json_type, &mut reader, &mut state);

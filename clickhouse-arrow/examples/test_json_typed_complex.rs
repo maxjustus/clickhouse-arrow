@@ -82,7 +82,8 @@ async fn test_lowcardinality_typed_paths(
                     ))))),
                 ),
             ],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         })],
         column_data:  rows,
     };
@@ -172,7 +173,8 @@ async fn test_variant_typed_paths(
                     ])),
                 ),
             ],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         })],
         column_data:  rows,
     };

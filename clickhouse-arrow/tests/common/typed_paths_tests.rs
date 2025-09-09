@@ -33,10 +33,8 @@ pub fn generate_json_typed_paths_test_block() -> Block {
                 ("id".to_string(), Box::new(Type::UInt32)),
                 ("name".to_string(), Box::new(Type::String)),
             ],
-            skip_paths:        vec![
-                "password".to_string(),
-                "secret.*".to_string(), // Regex pattern
-            ],
+            skip_exact:        vec!["password".to_string()],
+            skip_regex:        vec!["secret.*".to_string()],
         })],
         column_data:  rows,
     }
@@ -62,11 +60,8 @@ pub fn generate_json_skip_paths_test_block() -> Block {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
-            skip_paths:        vec![
-                "private.*".to_string(),
-                "secret.*".to_string(),
-                ".*_key".to_string(),
-            ],
+            skip_exact:        vec![],
+            skip_regex:        vec!["private.*".to_string(), "secret.*".to_string(), ".*_key".to_string()],
         })],
         column_data:  rows,
     }
@@ -103,11 +98,8 @@ pub fn generate_json_semi_evil_test_block() -> Block {
                 ("name".to_string(), Box::new(Type::String)),
                 ("meta.active".to_string(), Box::new(Type::UInt8)), // Nested typed path
             ],
-            skip_paths:        vec![
-                "password".to_string(),
-                "secret.*".to_string(),
-                ".*token".to_string(),
-            ],
+            skip_exact:        vec!["password".to_string()],
+            skip_regex:        vec!["secret.*".to_string(), ".*token".to_string()],
         })],
         column_data:  rows,
     }

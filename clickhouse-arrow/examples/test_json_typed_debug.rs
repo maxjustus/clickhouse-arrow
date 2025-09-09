@@ -53,7 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ("id".to_string(), Box::new(Type::UInt32)),
                 ("name".to_string(), Box::new(Type::String)),
             ],
-            skip_paths:        vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         })],
         column_data:  rows,
     };

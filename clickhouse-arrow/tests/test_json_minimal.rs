@@ -44,7 +44,8 @@ mod tests {
                 max_dynamic_paths: None,
                 max_dynamic_types: None,
                 typed_paths:       vec![],
-                skip_paths:        vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             })],
             column_data:  json_values,
         };

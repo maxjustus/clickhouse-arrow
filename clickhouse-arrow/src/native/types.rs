@@ -94,7 +94,8 @@ pub enum Type {
         max_dynamic_paths: Option<u32>,              // Default: 1024 if None
         max_dynamic_types: Option<u32>,              // Default: 32 if None
         typed_paths:       Vec<(String, Box<Type>)>, // (path, type) pairs like ("Name", String)
-        skip_paths:        Vec<String>,              // Paths to skip, including REGEXP patterns
+        skip_exact:        Vec<String>,              // Exact paths to skip
+        skip_regex:        Vec<String>,              // Regex patterns to skip
     },
 
     Object,
@@ -221,7 +222,21 @@ impl Type {
     /// Get JSON skip paths
     pub fn json_skip_paths(&self) -> Option<&[String]> {
         match self {
-            Type::JSON { skip_paths, .. } => Some(skip_paths),
+            Type::JSON { skip_exact, .. } => Some(skip_exact),
+            _ => None,
+        }
+    }
+
+    pub fn json_skip_exact(&self) -> Option<&[String]> {
+        match self {
+            Type::JSON { skip_exact, .. } => Some(skip_exact),
+            _ => None,
+        }
+    }
+
+    pub fn json_skip_regex(&self) -> Option<&[String]> {
+        match self {
+            Type::JSON { skip_regex, .. } => Some(skip_regex),
             _ => None,
         }
     }
@@ -328,7 +343,8 @@ fn format_json_params(
     max_dynamic_paths: Option<u32>,
     max_dynamic_types: Option<u32>,
     typed_paths: &[(String, Box<Type>)],
-    skip_paths: &[String],
+    skip_exact: &[String],
+    skip_regex: &[String],
 ) -> Vec<String> {
     let mut params = Vec::new();
 
@@ -337,13 +353,14 @@ fn format_json_params(
         params.push(format!("{path} {typ}"));
     }
 
-    // Add skip paths
-    for skip_path in skip_paths {
-        if skip_path.starts_with("SKIP REGEXP") {
-            params.push(skip_path.clone());
-        } else {
-            params.push(format!("SKIP {skip_path}"));
-        }
+    // Add skip paths: exact then regex
+    for exact in skip_exact {
+        params.push(format!("SKIP {exact}"));
+    }
+    for pattern in skip_regex {
+        // Quote the pattern for ClickHouse syntax
+        let escaped = pattern.replace('\'', "''");
+        params.push(format!("SKIP REGEXP '{escaped}'"));
     }
 
     // Add config parameters
@@ -411,12 +428,13 @@ impl Display for Type {
                 Some(max_types) => write!(f, "Dynamic(max_types={max_types})"),
                 None => write!(f, "Dynamic"),
             },
-            Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_paths } => {
+            Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_exact, skip_regex } => {
                 let params = format_json_params(
                     *max_dynamic_paths,
                     *max_dynamic_types,
                     typed_paths,
-                    skip_paths,
+                    skip_exact,
+                    skip_regex,
                 );
                 if params.is_empty() {
                     write!(f, "JSON")

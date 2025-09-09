@@ -27,7 +27,7 @@ const CLICKHOUSE_CONFIG_DEST: &str = "/etc/clickhouse-server/config.xml";
 // Env defaults
 const CLICKHOUSE_USER: &str = "clickhouse";
 const CLICKHOUSE_PASSWORD: &str = "clickhouse";
-const CLICKHOUSE_VERSION: &str = "latest";
+const CLICKHOUSE_VERSION: &str = "25.8";
 const CLICKHOUSE_NATIVE_PORT: u16 = 9000;
 const CLICKHOUSE_HTTP_PORT: u16 = 8123;
 const CLICKHOUSE_ENDPOINT: &str = "localhost";

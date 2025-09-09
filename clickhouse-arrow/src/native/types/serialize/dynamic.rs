@@ -19,63 +19,6 @@ const DYNAMIC_VERSION_FLATTENED: u64 = 3;
 pub struct DynamicSerializer;
 
 impl DynamicSerializer {
-    /// Write a Dynamic column header only (used by JSON in prefix phase)
-    pub(crate) async fn write_dynamic_header_async<W: ClickHouseWrite>(
-        values: &[Value],
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<TypeSpecificState> {
-        // Analyze values and create Dynamic state
-        let analyzed_state = Self::analyze_values(values);
-
-        // Write Dynamic FLATTENED header version
-        writer.write_u64_le(DYNAMIC_VERSION_FLATTENED).await?;
-
-        if let TypeSpecificState::Dynamic(ref dynamic_state) = analyzed_state {
-            // Write type count and names
-            writer.write_var_uint(dynamic_state.total_types).await?;
-            for type_name in &dynamic_state.type_names {
-                writer.write_string(type_name).await?;
-            }
-
-            // Write nested type prefixes
-            for type_name in &dynamic_state.type_names {
-                let (_, typ) = &dynamic_state.type_map[type_name];
-                typ.serialize_prefix_async(writer, state).await?;
-            }
-        }
-
-        Ok(analyzed_state)
-    }
-
-    /// Write Dynamic column header only - sync version
-    pub(crate) fn write_dynamic_header_sync<W: ClickHouseBytesWrite>(
-        values: &[Value],
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<TypeSpecificState> {
-        // Analyze values and create Dynamic state
-        let analyzed_state = Self::analyze_values(values);
-
-        // Write Dynamic FLATTENED header version
-        writer.put_u64_le(DYNAMIC_VERSION_FLATTENED);
-
-        if let TypeSpecificState::Dynamic(ref dynamic_state) = analyzed_state {
-            // Write type count and names
-            writer.put_var_uint(dynamic_state.total_types)?;
-            for type_name in &dynamic_state.type_names {
-                writer.put_string(type_name.as_bytes())?;
-            }
-
-            // Write nested type prefixes
-            for type_name in &dynamic_state.type_names {
-                let (_, typ) = &dynamic_state.type_map[type_name];
-                typ.serialize_prefix(writer, state);
-            }
-        }
-
-        Ok(analyzed_state)
-    }
 
     /// Write Dynamic column data only (used by JSON in write phase)
     pub(crate) async fn write_dynamic_data_async<W: ClickHouseWrite>(
