@@ -14,11 +14,11 @@
 /// See the [ClickHouse Native Protocol Documentation](https://clickhouse.com/docs/en/interfaces/tcp)
 /// for details on compression in the native protocol.
 use std::future::Future;
+use futures_util::FutureExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-
-use futures_util::FutureExt;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
+use std::task::ready;
 
 use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::protocol::CompressionMethod;
@@ -310,6 +310,157 @@ impl<R: ClickHouseRead> AsyncRead for DecompressionReader<'_, R> {
         // No inner reader left AND no data in buffer - this is true EOF
         // Only return EOF if we've actually exhausted all data sources
         Poll::Ready(Ok(()))
+    }
+}
+
+/// Async writer that frames and compresses data into ClickHouse compression chunks.
+/// Each chunk is written as:
+/// [16 bytes checksum][1 byte type][4 bytes compressed_size_with_header][4 bytes decompressed_size][payload]
+pub(crate) struct StreamingCompressor<W: AsyncWrite + Unpin> {
+    inner: W,
+    method: CompressionMethod,
+    max_uncompressed_chunk: usize,
+    in_buf: Vec<u8>,
+    out_buf: Vec<u8>,
+    out_pos: usize,
+}
+
+impl<W: AsyncWrite + Unpin> StreamingCompressor<W> {
+    pub fn new(inner: W, method: CompressionMethod, max_uncompressed_chunk: usize) -> Self {
+        Self {
+            inner,
+            method,
+            max_uncompressed_chunk: max_uncompressed_chunk.max(64 * 1024),
+            in_buf: Vec::with_capacity(max_uncompressed_chunk),
+            out_buf: Vec::new(),
+            out_pos: 0,
+        }
+    }
+
+    #[inline]
+    fn chunk_ready(&self) -> bool { self.in_buf.len() >= self.max_uncompressed_chunk }
+
+    fn build_frame(&mut self) -> Result<()> {
+        if self.in_buf.is_empty() {
+            return Ok(());
+        }
+        let decompressed_size = self.in_buf.len();
+        // Compress
+        let mut compressed = match self.method {
+            CompressionMethod::LZ4 => lz4_flex::compress(&self.in_buf),
+            CompressionMethod::ZSTD => zstd::bulk::compress(&self.in_buf, 1)
+                .map_err(|e| Error::SerializeError(format!("ZSTD compress error: {e}")))?,
+            CompressionMethod::None => {
+                // Should not be used with None (caller decides), but handle gracefully
+                self.out_buf.clear();
+                self.out_pos = 0;
+                self.in_buf.clear();
+                return Ok(());
+            }
+        };
+
+        let type_byte = self.method.byte();
+        let compressed_size_with_header = (compressed.len() as u32) + 9;
+        let decompressed_u32 = decompressed_size as u32;
+
+        // Compose header+payload for checksum
+        let mut header_plus_payload = Vec::with_capacity(9 + compressed.len());
+        header_plus_payload.push(type_byte);
+        header_plus_payload.extend_from_slice(&compressed_size_with_header.to_le_bytes());
+        header_plus_payload.extend_from_slice(&decompressed_u32.to_le_bytes());
+        header_plus_payload.append(&mut compressed);
+
+        let checksum = cityhash_rs::cityhash_102_128(&header_plus_payload);
+        let hi = (checksum >> 64) as u64;
+        let lo = checksum as u64;
+
+        self.out_buf.clear();
+        self.out_pos = 0;
+        self.out_buf.reserve(16 + header_plus_payload.len());
+        self.out_buf.extend_from_slice(&hi.to_le_bytes());
+        self.out_buf.extend_from_slice(&lo.to_le_bytes());
+        self.out_buf.extend_from_slice(&header_plus_payload);
+
+        // clear input for next chunk accumulation
+        self.in_buf.clear();
+        Ok(())
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for StreamingCompressor<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+
+        // Drain any pending frame
+        while self.out_pos < self.out_buf.len() {
+            // Take a temporary owned slice to avoid aliasing with &mut self.inner
+            let start = self.out_pos;
+            let tmp = self.out_buf[start..].to_vec();
+            let nw = ready!(Pin::new(&mut self.inner).poll_write(cx, &tmp[..]))?;
+            if nw == 0 { return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "write zero"))); }
+            self.out_pos += nw;
+        }
+        // accept into input buffer
+        let remaining = self.max_uncompressed_chunk - self.in_buf.len();
+        let take = remaining.min(buf.len());
+        if take > 0 { self.in_buf.extend_from_slice(&buf[..take]); }
+        // if chunk full, frame and start draining
+        if self.chunk_ready() {
+            if let Err(e) = self.build_frame() {
+                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+            }
+            while self.out_pos < self.out_buf.len() {
+                let start = self.out_pos;
+                let tmp = self.out_buf[start..].to_vec();
+                let nw = ready!(Pin::new(&mut self.inner).poll_write(cx, &tmp[..]))?;
+                if nw == 0 { return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "write zero"))); }
+                self.out_pos += nw;
+            }
+            self.out_buf.clear();
+            self.out_pos = 0;
+        }
+        Poll::Ready(Ok(take))
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        // drain any existing frame
+        while self.out_pos < self.out_buf.len() {
+            let start = self.out_pos;
+            let tmp = self.out_buf[start..].to_vec();
+            let nw = ready!(Pin::new(&mut self.inner).poll_write(cx, &tmp[..]))?;
+            if nw == 0 { return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "write zero"))); }
+            self.out_pos += nw;
+        }
+        // if we have buffered input, frame it and drain
+        if !self.in_buf.is_empty() {
+            if let Err(e) = self.build_frame() {
+                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+            }
+            while self.out_pos < self.out_buf.len() {
+                let start = self.out_pos;
+                let tmp = self.out_buf[start..].to_vec();
+                let nw = ready!(Pin::new(&mut self.inner).poll_write(cx, &tmp[..]))?;
+                if nw == 0 { return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "write zero"))); }
+                self.out_pos += nw;
+            }
+            self.out_buf.clear();
+            self.out_pos = 0;
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        ready!(self.as_mut().poll_flush(cx))?;
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 

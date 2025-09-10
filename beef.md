@@ -34,3 +34,9 @@ Confirm that we don't already have an API like this that we're duplicating
 - [ ] explore serde json for decoding JSON cols dynamically without knowing types in advance
 - [ ] explore Serde map Object for decoding rows as well
 - [ ] examine including serde object encoding for Arrow format as well
+
+- [ ] remove sync serialize/deserialize code now that we have async compressed reads/writes working.
+  - [ ] stress test compressed reads/writes with large datasets
+
+- [ ] add a random structure round trip test that compares output / input against clickhouse client
+- [ ] add golden file type tests

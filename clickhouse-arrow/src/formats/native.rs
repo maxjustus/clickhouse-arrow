@@ -1,10 +1,10 @@
-use bytes::BytesMut;
+// use bytes::BytesMut;
 
 use super::DeserializerState;
 use super::protocol_data::{EmptyBlock, ProtocolData};
 use crate::Type;
 use crate::client::connection::ClientMetadata;
-use crate::compression::compress_data_sync;
+// use crate::compression::compress_data_sync;
 use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::block::Block;
 // Already imported as `super::DeserializerState`
@@ -65,19 +65,21 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
                 .await
                 .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "(block:uncompressed)"))
         } else {
-            // Hybrid approach: sync serialization + async compression
-            let estimated_size = data.estimate_size();
-            let mut buffer = BytesMut::with_capacity(estimated_size);
-
-            data.write(&mut buffer, revision, header, Some(metadata))
-                .inspect_err(|error| error!(?error, {ATT_QID} = %qid, "(block:compressed)"))?;
-
-            // Remove heavy debug bytes dump in normal operation
-
-            compress_data_sync(writer, buffer.freeze(), metadata.compression)
-                .instrument(trace_span!("compress_block"))
+            // Stream-compress while writing the block to avoid buffering the whole block in memory
+            use tokio::io::AsyncWriteExt as _;
+            let mut sc = crate::compression::StreamingCompressor::new(
+                writer,
+                metadata.compression,
+                1 << 20, // 1 MiB chunks (consider exposing via ClientOptions in the future)
+            );
+            let res = data
+                .write_async(&mut sc, revision, header, Some(metadata))
+                .instrument(trace_span!("serialize_block_streaming"))
                 .await
-                .inspect_err(|error| error!(?error, {ATT_QID} = %qid, "compressing"))
+                .inspect_err(|error| error!(?error, {ATT_QID} = %qid, "(block:streaming-compressed)"));
+            // Ensure all frames are flushed; do NOT shutdown the underlying socket here.
+            if let Err(e) = sc.flush().await { error!(?e, {ATT_QID} = %qid, "flush compressor"); }
+            res
         }
     }
 }
