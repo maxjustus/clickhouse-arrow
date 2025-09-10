@@ -4,7 +4,7 @@ use super::DeserializerState;
 use super::protocol_data::{EmptyBlock, ProtocolData};
 use crate::Type;
 use crate::client::connection::ClientMetadata;
-use crate::compression::{compress_data_sync, decompress_data_async};
+use crate::compression::compress_data_sync;
 use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::block::Block;
 // Already imported as `super::DeserializerState`
@@ -38,9 +38,15 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
         Ok(if let CompressionMethod::None = metadata.compression {
             Block::read_async(reader, revision, None, state).await?.into_option()
         } else {
-            let mut buffer =
-                BytesMut::from_iter(decompress_data_async(reader, metadata.compression).await?);
-            Block::read(&mut buffer, revision, None, state)?.into_option()
+            // Stream-decompress all chunks for this packet and read block asynchronously - NOTE:
+            // this means that effectively we no longer use the sync deserialization code.
+            // This strat is simpler because with async block processing we properly handle
+            // multiple compressed chunks per block. The next todo should be to add an async
+            // compression writer and make the write path fully async as well. Then remove all
+            // the duplicative sync serialization/deserialization code.
+            let mut decompressor =
+                crate::compression::DecompressionReader::new(metadata.compression, reader).await?;
+            Block::read_async(&mut decompressor, revision, None, state).await?.into_option()
         })
     }
 
