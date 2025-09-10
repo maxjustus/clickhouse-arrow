@@ -61,7 +61,11 @@ pub fn generate_json_skip_paths_test_block() -> Block {
             max_dynamic_types: None,
             typed_paths:       vec![],
             skip_exact:        vec![],
-            skip_regex:        vec!["private.*".to_string(), "secret.*".to_string(), ".*_key".to_string()],
+            skip_regex:        vec![
+                "private.*".to_string(),
+                "secret.*".to_string(),
+                ".*_key".to_string(),
+            ],
         })],
         column_data:  rows,
     }

@@ -303,9 +303,12 @@ async fn execute_insert(
 
                 // Insert in batches (simple approach)
                 if batch.len() >= 1000 {
-                    let cols = columns
-                        .as_ref()
-                        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>());
+                    let cols = columns.as_ref().map(|s| {
+                        s.split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                    });
                     match client.insert_batch(table, batch.clone(), cols).await {
                         Ok(_) => {
                             if format == "pretty" {
@@ -333,9 +336,9 @@ async fn execute_insert(
 
     // Insert remaining rows
     if !batch.is_empty() {
-        let cols = columns
-            .as_ref()
-            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>());
+        let cols = columns.as_ref().map(|s| {
+            s.split(',').map(|x| x.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>()
+        });
         match client.insert_batch(table, batch.clone(), cols).await {
             Ok(_) => {
                 if format == "pretty" {

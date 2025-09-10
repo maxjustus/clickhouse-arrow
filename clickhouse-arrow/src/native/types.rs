@@ -428,7 +428,13 @@ impl Display for Type {
                 Some(max_types) => write!(f, "Dynamic(max_types={max_types})"),
                 None => write!(f, "Dynamic"),
             },
-            Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_exact, skip_regex } => {
+            Type::JSON {
+                max_dynamic_paths,
+                max_dynamic_types,
+                typed_paths,
+                skip_exact,
+                skip_regex,
+            } => {
                 let params = format_json_params(
                     *max_dynamic_paths,
                     *max_dynamic_types,

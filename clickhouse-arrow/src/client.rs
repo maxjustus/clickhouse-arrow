@@ -1778,8 +1778,9 @@ fn map_cell_to_value(
                 let bytes = match serde_json::from_str::<serde_json::Value>(s) {
                     Ok(parsed) => serde_json::to_vec(&parsed)
                         .map_err(|e| Error::SerializeError(e.to_string()))?,
-                    Err(_) => serde_json::to_vec(v)
-                        .map_err(|e| Error::SerializeError(e.to_string()))?,
+                    Err(_) => {
+                        serde_json::to_vec(v).map_err(|e| Error::SerializeError(e.to_string()))?
+                    }
                 };
                 Ok(Value::String(bytes))
             } else {
@@ -1789,8 +1790,8 @@ fn map_cell_to_value(
                 }
                 #[cfg(not(feature = "serde"))]
                 {
-                    let bytes = serde_json::to_vec(v)
-                        .map_err(|e| Error::SerializeError(e.to_string()))?;
+                    let bytes =
+                        serde_json::to_vec(v).map_err(|e| Error::SerializeError(e.to_string()))?;
                     Ok(Value::Object(bytes))
                 }
             }

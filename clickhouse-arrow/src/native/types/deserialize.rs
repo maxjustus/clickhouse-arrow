@@ -12,6 +12,7 @@ pub(crate) mod tuple;
 pub(crate) mod variant;
 
 use super::low_cardinality::LOW_CARDINALITY_VERSION;
+use crate::native::types::deserialize::sized::SizedDeserializer;
 use super::*;
 use crate::io::ClickHouseBytesRead;
 
@@ -142,6 +143,36 @@ impl ClickHouseNativeDeserializer for Type {
         state: &mut DeserializerState,
     ) -> Result<()> {
         match self {
+            // Sized primitives: allow reading sparse/custom toggle in sync prefix
+            Type::Int8
+            | Type::Int16
+            | Type::Int32
+            | Type::Int64
+            | Type::Int128
+            | Type::Int256
+            | Type::UInt8
+            | Type::UInt16
+            | Type::UInt32
+            | Type::UInt64
+            | Type::UInt128
+            | Type::UInt256
+            | Type::Float32
+            | Type::Float64
+            | Type::Decimal32(_)
+            | Type::Decimal64(_)
+            | Type::Decimal128(_)
+            | Type::Decimal256(_)
+            | Type::Uuid
+            | Type::Date
+            | Type::Date32
+            | Type::DateTime(_)
+            | Type::DateTime64(_, _)
+            | Type::Ipv4
+            | Type::Ipv6
+            | Type::Enum8(_)
+            | Type::Enum16(_) => {
+                SizedDeserializer::read_prefix_sync(self, reader, state)?;
+            }
             Type::Array(inner) | Type::Nullable(inner) => {
                 inner.deserialize_prefix(reader, state)?;
             }
@@ -308,11 +339,11 @@ enum EnumParseState {
 }
 
 type JsonParameters = (
-    Option<u32>,                 // max_dynamic_paths
-    Option<u32>,                 // max_dynamic_types
-    Vec<(String, Box<Type>)>,    // typed_paths
-    Vec<String>,                 // skip_exact
-    Vec<String>,                 // skip_regex
+    Option<u32>,              // max_dynamic_paths
+    Option<u32>,              // max_dynamic_types
+    Vec<(String, Box<Type>)>, // typed_paths
+    Vec<String>,              // skip_exact
+    Vec<String>,              // skip_regex
 );
 
 fn parse_json_parameters(args: Vec<&str>) -> Result<JsonParameters> {
@@ -661,7 +692,13 @@ impl FromStr for Type {
                     let args = parse_variable_args(following)?;
                     let (max_dynamic_paths, max_dynamic_types, typed_paths, skip_exact, skip_regex) =
                         parse_json_parameters(args)?;
-                    Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_exact, skip_regex }
+                    Type::JSON {
+                        max_dynamic_paths,
+                        max_dynamic_types,
+                        typed_paths,
+                        skip_exact,
+                        skip_regex,
+                    }
                 }
                 // Unsupported
                 "Nested" => {
@@ -716,7 +753,13 @@ impl FromStr for Type {
                     let args = parse_variable_args(following)?;
                     let (max_dynamic_paths, max_dynamic_types, typed_paths, skip_exact, skip_regex) =
                         parse_json_parameters(args)?;
-                    Type::JSON { max_dynamic_paths, max_dynamic_types, typed_paths, skip_exact, skip_regex }
+                    Type::JSON {
+                        max_dynamic_paths,
+                        max_dynamic_types,
+                        typed_paths,
+                        skip_exact,
+                        skip_regex,
+                    }
                 }
             }
             "Dynamic" => {
@@ -1309,7 +1352,8 @@ mod tests {
         // Test combined with other parameters
         let json_type =
             Type::from_str("JSON(max_dynamic_paths=100, SKIP 'field.name', Name String)").unwrap();
-        if let Type::JSON { max_dynamic_paths, skip_exact, skip_regex, typed_paths, .. } = json_type {
+        if let Type::JSON { max_dynamic_paths, skip_exact, skip_regex, typed_paths, .. } = json_type
+        {
             assert_eq!(max_dynamic_paths, Some(100));
             assert_eq!(skip_exact.len(), 1);
             assert_eq!(skip_exact[0], "field.name");

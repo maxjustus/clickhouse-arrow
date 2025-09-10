@@ -19,7 +19,6 @@ const DYNAMIC_VERSION_FLATTENED: u64 = 3;
 pub struct DynamicSerializer;
 
 impl DynamicSerializer {
-
     /// Write Dynamic column data only (used by JSON in write phase)
     pub(crate) async fn write_dynamic_data_async<W: ClickHouseWrite>(
         values: &[Value],

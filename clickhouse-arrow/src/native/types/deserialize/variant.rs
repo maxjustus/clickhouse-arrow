@@ -293,7 +293,9 @@ mod tests {
                 // Test sync path
                 let mut sync_reader = Cursor::new(test_data.clone());
                 let mut sync_state = DeserializerState::default();
-                variant_type.deserialize_prefix(&mut sync_reader, &mut DeserializerState::default()).unwrap();
+                variant_type
+                    .deserialize_prefix(&mut sync_reader, &mut DeserializerState::default())
+                    .unwrap();
                 let sync_values = VariantDeserializer::read_sync(
                     &variant_type,
                     &mut sync_reader,

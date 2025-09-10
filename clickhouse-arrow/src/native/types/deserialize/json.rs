@@ -319,7 +319,9 @@ impl JsonDeserializer {
             #[cfg(not(feature = "serde"))]
             {
                 let json_bytes = serde_json::to_vec(&serde_json::Value::Object(row_object))
-                    .map_err(|e| Error::DeserializeError(format!("Failed to serialize JSON: {e}")))?;
+                    .map_err(|e| {
+                        Error::DeserializeError(format!("Failed to serialize JSON: {e}"))
+                    })?;
                 result.push(Value::Object(json_bytes));
             }
         }

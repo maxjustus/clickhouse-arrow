@@ -179,8 +179,9 @@ impl FromSql for String {
         match value {
             Value::String(x) | Value::Object(x) => Ok(String::from_utf8(x)?),
             #[cfg(feature = "serde")]
-            Value::Json(v) => Ok(serde_json::to_string(&v)
-                .map_err(|e| Error::DeserializeError(e.to_string()))?),
+            Value::Json(v) => {
+                Ok(serde_json::to_string(&v).map_err(|e| Error::DeserializeError(e.to_string()))?)
+            }
             _ => Err(unexpected_type(type_)),
         }
     }

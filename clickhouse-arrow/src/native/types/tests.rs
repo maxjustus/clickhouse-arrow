@@ -997,3 +997,67 @@ fn test_json_deserialize_prefix_sync_integration() {
     let result = json_type.deserialize_prefix(&mut reader, &mut DeserializerState::default());
     assert!(result.is_ok(), "JSON deserialize_prefix_sync should succeed through dispatcher");
 }
+
+#[test]
+fn roundtrip_low_cardinality_string_sync() {
+    use std::io::Cursor;
+
+    use crate::native::types::serialize::ClickHouseNativeSerializer;
+
+    let type_ = Type::LowCardinality(Box::new(Type::String));
+    let values = vec![
+        Value::string(""),
+        Value::string("abc"),
+        Value::string("abc"),
+        Value::string("bcd"),
+        Value::string("bcd2"),
+        Value::string("abc"),
+    ];
+
+    // Serialize (sync) including prefix
+    let mut buf = Vec::new();
+    let mut s_state = SerializerState::default();
+    type_.serialize_prefix(&mut buf, &mut s_state);
+    type_.serialize_column_sync(values.clone(), &mut buf, &mut s_state).unwrap();
+
+    // Deserialize (sync) including prefix
+    let mut reader = Cursor::new(buf);
+    let mut d_state = DeserializerState::default();
+    type_.deserialize_prefix(&mut reader, &mut d_state).unwrap();
+    let out = type_.deserialize_column_sync(&mut reader, values.len(), &mut d_state).unwrap();
+
+    assert_eq!(out, values);
+}
+
+#[test]
+fn roundtrip_low_cardinality_nullable_string_sync() {
+    use std::io::Cursor;
+
+    use crate::native::types::serialize::ClickHouseNativeSerializer;
+
+    let type_ = Type::LowCardinality(Box::new(Type::Nullable(Box::new(Type::String))));
+    let values = vec![
+        Value::string(""),
+        Value::Null,
+        Value::string("abc"),
+        Value::string("abc"),
+        Value::string("bcd"),
+        Value::Null,
+        Value::string("bcd2"),
+        Value::string("abc"),
+    ];
+
+    // Serialize (sync) including prefix
+    let mut buf = Vec::new();
+    let mut s_state = SerializerState::default();
+    type_.serialize_prefix(&mut buf, &mut s_state);
+    type_.serialize_column_sync(values.clone(), &mut buf, &mut s_state).unwrap();
+
+    // Deserialize (sync) including prefix
+    let mut reader = Cursor::new(buf);
+    let mut d_state = DeserializerState::default();
+    type_.deserialize_prefix(&mut reader, &mut d_state).unwrap();
+    let out = type_.deserialize_column_sync(&mut reader, values.len(), &mut d_state).unwrap();
+
+    assert_eq!(out, values);
+}

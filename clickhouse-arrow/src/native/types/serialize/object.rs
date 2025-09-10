@@ -32,8 +32,8 @@ impl Serializer for ObjectSerializer {
                 }
                 #[cfg(feature = "serde")]
                 Value::Json(v) => {
-                    let bytes = serde_json::to_vec(&v)
-                        .map_err(|e| Error::SerializeError(e.to_string()))?;
+                    let bytes =
+                        serde_json::to_vec(&v).map_err(|e| Error::SerializeError(e.to_string()))?;
                     writer.write_string(bytes).await?;
                 }
                 _ => {
@@ -60,8 +60,8 @@ impl Serializer for ObjectSerializer {
                 }
                 #[cfg(feature = "serde")]
                 Value::Json(v) => {
-                    let bytes = serde_json::to_vec(&v)
-                        .map_err(|e| Error::SerializeError(e.to_string()))?;
+                    let bytes =
+                        serde_json::to_vec(&v).map_err(|e| Error::SerializeError(e.to_string()))?;
                     writer.put_string(bytes)?;
                 }
                 _ => {

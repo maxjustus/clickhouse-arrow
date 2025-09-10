@@ -156,4 +156,16 @@ pub enum TypeSpecificState {
     None,
     Dynamic(DynamicState),
     Json(JsonState),
+    // Indicates server-side custom/sparse serialization for current column
+    Sparse(SparseState),
+}
+
+/// State for custom/sparse serialization
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SparseState {
+    pub has_custom: bool,
+    pub use_custom: Option<bool>,
+    pub num_trailing_defaults: usize,
+    pub has_value_after_defaults: bool,
+    // Future: we could add thresholds or stats here
 }

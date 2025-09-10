@@ -163,8 +163,7 @@ mod tests {
     use super::*;
     use crate::client::connection::ClientMetadata;
     use crate::formats::sealed::ClientFormatImpl;
-    use crate::native::protocol::DBMS_TCP_PROTOCOL_VERSION;
-    use crate::native::protocol::CompressionMethod;
+    use crate::native::protocol::{CompressionMethod, DBMS_TCP_PROTOCOL_VERSION};
     use crate::{ArrowOptions, NativeFormat};
 
     #[tokio::test]
@@ -182,10 +181,11 @@ mod tests {
             }),
         ];
 
-        let map_row0 = Value::Map(
-            vec![Value::String(b"k1".to_vec()), Value::String(b"k2".to_vec())],
-            vec![Value::Int32(10), Value::Int32(20)],
-        );
+        let map_row0 =
+            Value::Map(vec![Value::String(b"k1".to_vec()), Value::String(b"k2".to_vec())], vec![
+                Value::Int32(10),
+                Value::Int32(20),
+            ]);
         let map_row1 = Value::Map(vec![Value::String(b"a".to_vec())], vec![Value::Int32(-1)]);
 
         #[cfg(feature = "serde")]
@@ -203,18 +203,26 @@ mod tests {
         let d_row0 = Value::UInt64(42);
         let d_row1 = Value::String(b"x".to_vec());
         let column_data = vec![
-            map_row0.clone(), map_row1.clone(),
-            d_row0, d_row1,
-            json_row0.clone(), json_row1.clone(),
+            map_row0.clone(),
+            map_row1.clone(),
+            d_row0,
+            d_row1,
+            json_row0.clone(),
+            json_row1.clone(),
         ];
 
-        let block = Block { info: BlockInfo::default(), rows, column_types: column_types.clone(), column_data };
+        let block = Block {
+            info: BlockInfo::default(),
+            rows,
+            column_types: column_types.clone(),
+            column_data,
+        };
 
         // Write compressed
         let metadata = ClientMetadata {
-            client_id: 1,
-            compression: CompressionMethod::LZ4,
-            arrow_options: ArrowOptions::default(),
+            client_id:      1,
+            compression:    CompressionMethod::LZ4,
+            arrow_options:  ArrowOptions::default(),
             server_version: None,
         };
         let mut buffer = Vec::new();
@@ -232,10 +240,11 @@ mod tests {
         // Read back
         let mut cursor = std::io::Cursor::new(buffer);
         let mut state = DeserializerState::default();
-        let read_block = NativeFormat::read(&mut cursor, DBMS_TCP_PROTOCOL_VERSION, metadata, &mut state)
-            .await
-            .expect("read compressed block")
-            .expect("some block");
+        let read_block =
+            NativeFormat::read(&mut cursor, DBMS_TCP_PROTOCOL_VERSION, metadata, &mut state)
+                .await
+                .expect("read compressed block")
+                .expect("some block");
 
         assert_eq!(read_block.rows, rows);
         assert_eq!(read_block.column_types, column_types);
@@ -287,6 +296,10 @@ impl ProtocolData<Self, ()> for Block {
             writer.write_string(ty_str).await?;
 
             if self.rows > 0 {
+                // We do not write sparse/custom columns on client side; let the server choose.
+                // NOTE: We currently do NOT implement client-side sparse/custom serialization
+                // for sized primitives. Always emit 0 (no custom serialization) for writes.
+                // The server may still choose sparse on read responses; our reader supports it.
                 if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
                     writer.write_u8(0).await?;
                 }
@@ -298,7 +311,7 @@ impl ProtocolData<Self, ()> for Block {
                     state = state.with_server_version(version);
                 }
 
-                // For Dynamic type, we need to analyze values before writing prefix
+                // For Dynamic/JSON types, analyze values before writing prefix
                 state.type_specific = if matches!(col_type, Type::Dynamic { .. }) {
                     DynamicSerializer::analyze_values(&values)
                 } else if matches!(col_type, Type::JSON { .. }) {
@@ -353,6 +366,9 @@ impl ProtocolData<Self, ()> for Block {
             writer.put_string(ty_str)?;
 
             if self.rows > 0 {
+                // NOTE: We currently do NOT implement client-side sparse/custom serialization
+                // for sized primitives. Always emit 0 (no custom serialization) for writes.
+                // The server may still choose sparse on read responses; our reader supports it.
                 if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
                     writer.put_u8(0);
                 }
@@ -364,7 +380,7 @@ impl ProtocolData<Self, ()> for Block {
                     state = state.with_server_version(version);
                 }
 
-                // For Dynamic type, we need to analyze values before writing prefix
+                // For Dynamic/JSON types, analyze values before writing prefix
                 state.type_specific = if matches!(col_type, Type::Dynamic { .. }) {
                     DynamicSerializer::analyze_values(&values)
                 } else if matches!(col_type, Type::JSON { .. }) {
@@ -411,10 +427,14 @@ impl ProtocolData<Self, ()> for Block {
                 .await
                 .inspect_err(|e| error!("reading column type (name {name}): {e}"))?;
 
-            // TODO: implement
+            // Custom/Sparse serialization detection (server-side flag)
+            // If non-zero, the server intends to use custom/sparse serialization for this column.
+            // We currently do not implement sparse decoding for primitives; emit a diagnostic log.
             let mut _has_custom_serialization = false;
             if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
                 _has_custom_serialization = reader.read_u8().await? != 0;
+                // Log presence of server-side custom/sparse for this column
+                if _has_custom_serialization { tracing::debug!(col = %name, ty = %type_name, "server custom/sparse serialization detected"); }
             }
 
             let type_ = Type::from_str(&type_name).inspect_err(|error| {
@@ -422,6 +442,14 @@ impl ProtocolData<Self, ()> for Block {
             })?;
 
             let mut row_data = if rows > 0 {
+                // Seed state with sparse/custom flag for this column so prefix can consume it
+                use crate::formats::{SparseState, TypeSpecificState};
+                state.type_specific = if _has_custom_serialization {
+                    TypeSpecificState::Sparse(SparseState { has_custom: true, use_custom: None, num_trailing_defaults: 0, has_value_after_defaults: false })
+                } else {
+                    TypeSpecificState::None
+                };
+
                 type_.deserialize_prefix_async(reader, state).await?;
 
                 #[allow(clippy::cast_possible_truncation)]
@@ -435,6 +463,8 @@ impl ProtocolData<Self, ()> for Block {
 
             block.column_types.push((name, type_));
             block.column_data.append(&mut row_data);
+
+            // No per-column sparse state persistence across blocks
         }
 
         Ok(block)
@@ -474,10 +504,11 @@ impl ProtocolData<Self, ()> for Block {
                     .to_vec(),
             )?;
 
-            // TODO: implement
+            // Custom/Sparse serialization detection (server-side flag)
             let mut _has_custom_serialization = false;
             if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
                 _has_custom_serialization = reader.try_get_u8()? != 0;
+                if _has_custom_serialization { tracing::debug!(col = %name, ty = %type_name, "server custom/sparse serialization detected (sync)"); }
             }
 
             let type_ = Type::from_str(&type_name).inspect_err(|error| {
@@ -486,9 +517,19 @@ impl ProtocolData<Self, ()> for Block {
 
             #[allow(clippy::cast_possible_truncation)]
             let mut row_data = if rows > 0 {
+                // Seed state with sparse/custom flag for this column so the column reader can act on it
+                use crate::formats::{SparseState, TypeSpecificState};
+                state.type_specific = if _has_custom_serialization {
+                    TypeSpecificState::Sparse(SparseState { has_custom: true, use_custom: None, num_trailing_defaults: 0, has_value_after_defaults: false })
+                } else {
+                    TypeSpecificState::None
+                };
                 // Use state-aware prefix reader to support metadata in sync mode
+                let before_rem = reader.remaining();
+                tracing::debug!(message = "sync column start", index = i, col = %name, ty = %type_name, rows, before_remaining = before_rem, has_custom = _has_custom_serialization);
                 type_.deserialize_prefix(reader, state)?;
-                type_.deserialize_column_sync(reader, rows as usize, state)
+                type_
+                    .deserialize_column_sync(reader, rows as usize, state)
                     .inspect_err(|e| error!("deserialize (name {name}): {e}"))?
             } else {
                 vec![]
@@ -496,6 +537,10 @@ impl ProtocolData<Self, ()> for Block {
 
             block.column_types.push((name, type_));
             block.column_data.append(&mut row_data);
+
+            // No per-column sparse state persistence across blocks
+            let after_rem = reader.remaining();
+            tracing::debug!(message = "sync column end", index = i, rows, after_remaining = after_rem);
         }
 
         Ok(block)

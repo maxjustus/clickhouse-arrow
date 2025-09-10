@@ -103,7 +103,8 @@ impl Deserializer for MapDeserializer {
         }
         let total_length = *offsets
             .last()
-            .ok_or_else(|| Error::DeserializeError("Missing map offsets".to_string()))? as usize;
+            .ok_or_else(|| Error::DeserializeError("Missing map offsets".to_string()))?
+            as usize;
 
         // Read keys and values columns
         let keys = key.deserialize_column_sync(reader, total_length, state)?;

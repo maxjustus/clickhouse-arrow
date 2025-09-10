@@ -79,8 +79,8 @@ impl ClickHouseClient {
 
         // Log response data if enabled
         if self.tcp_dump_config.enabled {
-            let response_data = serde_json::to_vec(&rows)
-                .unwrap_or_else(|_| b"<failed to serialize>".to_vec());
+            let response_data =
+                serde_json::to_vec(&rows).unwrap_or_else(|_| b"<failed to serialize>".to_vec());
             self.log_application_data("RESPONSE", &response_data);
         }
 
