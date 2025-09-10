@@ -13,6 +13,8 @@ pub(crate) mod variant;
 
 use super::low_cardinality::LOW_CARDINALITY_VERSION;
 use crate::native::types::deserialize::sized::SizedDeserializer;
+pub(crate) mod sparse;
+// no direct use here; imported where needed
 use super::*;
 use crate::io::ClickHouseBytesRead;
 

@@ -12,33 +12,6 @@ use crate::{Date, Date32, DateTime, DynDateTime64, Result, i256, u256};
 pub(crate) struct SizedDeserializer;
 
 impl SizedDeserializer {
-    #[inline]
-    fn default_value_for(ty: &Type) -> Value {
-        match ty.strip_null() {
-            Type::Int8 => Value::Int8(0),
-            Type::Int16 => Value::Int16(0),
-            Type::Int32 => Value::Int32(0),
-            Type::Int64 => Value::Int64(0),
-            Type::Int128 => Value::Int128(0),
-            Type::Int256 => Value::Int256(i256([0; 32])),
-            Type::UInt8 => Value::UInt8(0),
-            Type::UInt16 => Value::UInt16(0),
-            Type::UInt32 => Value::UInt32(0),
-            Type::UInt64 => Value::UInt64(0),
-            Type::UInt128 => Value::UInt128(0),
-            Type::UInt256 => Value::UInt256(u256([0; 32])),
-            Type::Float32 => Value::Float32(0.0),
-            Type::Float64 => Value::Float64(0.0),
-            Type::Date => Value::Date(Date(0)),
-            Type::Date32 => Value::Date32(Date32(0)),
-            Type::DateTime(tz) => Value::DateTime(DateTime(*tz, 0)),
-            Type::DateTime64(prec, tz) => Value::DateTime64(DynDateTime64(*tz, 0, *prec)),
-            Type::Ipv4 => Value::Ipv4(std::net::Ipv4Addr::from(0u32).into()),
-            Type::Ipv6 => Value::Ipv6(std::net::Ipv6Addr::from([0u8; 16]).into()),
-            _ => Value::Int8(0),
-        }
-    }
-
     // No extra flags here beyond the column-level toggle
 
     async fn read_sparse_values<R: ClickHouseRead>(
@@ -174,7 +147,7 @@ impl SizedDeserializer {
             });
         }
 
-        let mut out = vec![Self::default_value_for(type_); rows];
+        let mut out = vec![type_.default_value(); rows];
         for (i, v) in indices.into_iter().zip(values.into_iter()) {
             if i < rows { out[i] = v; }
         }
@@ -310,7 +283,7 @@ impl SizedDeserializer {
                 _ => return Err(crate::Error::DeserializeError(format!("Sparse deserialization not implemented for type: {type_:?}"))),
             });
         }
-        let mut out = vec![Self::default_value_for(type_); rows];
+        let mut out = vec![type_.default_value(); rows];
         for (i, v) in indices.into_iter().zip(values.into_iter()) {
             if i < rows { out[i] = v; }
         }
@@ -329,7 +302,17 @@ impl Deserializer for SizedDeserializer {
         reader: &mut R,
         state: &mut DeserializerState,
     ) -> impl std::future::Future<Output = Result<()>> {
-        async move { let _ = reader; let _ = state; Ok(()) }
+        async move {
+            if let TypeSpecificState::Sparse(SparseState { has_custom: true, use_custom, .. }) =
+                &mut state.type_specific
+            {
+                let toggle = reader.read_var_uint().await?;
+                let use_flag = toggle != 0;
+                *use_custom = Some(use_flag);
+                tracing::debug!(toggle, use_custom = use_flag, ty = ?_type_, "sized sparse prefix toggle (async)");
+            }
+            Ok(())
+        }
     }
     async fn read<R: ClickHouseRead>(
         type_: &Type,
@@ -338,7 +321,10 @@ impl Deserializer for SizedDeserializer {
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
         // If sparse/custom is enabled for this column, use sparse path
-        let sparse_enabled = matches!(state.type_specific, TypeSpecificState::Sparse(SparseState { has_custom: true, .. }));
+        let sparse_enabled = matches!(
+            state.type_specific,
+            TypeSpecificState::Sparse(SparseState { has_custom: true, use_custom: Some(true), .. })
+        );
 
         if sparse_enabled {
             return Self::read_sparse_values(type_, reader, rows, state).await;
@@ -522,8 +508,14 @@ impl SizedDeserializer {
         reader: &mut impl ClickHouseBytesRead,
         state: &mut DeserializerState,
     ) -> Result<()> {
-        let _ = reader;
-        let _ = state;
+        if let TypeSpecificState::Sparse(SparseState { has_custom: true, use_custom, .. }) =
+            &mut state.type_specific
+        {
+            let toggle = reader.try_get_var_uint()?;
+            let use_flag = toggle != 0;
+            *use_custom = Some(use_flag);
+            tracing::debug!(toggle, use_custom = use_flag, ty = ?_type_, "sized sparse prefix toggle (sync)");
+        }
         Ok(())
     }
 }

@@ -27,6 +27,7 @@ use super::values::{
 use crate::formats::{DeserializerState, SerializerState};
 use crate::io::{ClickHouseBytesRead, ClickHouseBytesWrite, ClickHouseRead, ClickHouseWrite};
 use crate::{Date32, Error, Result};
+use crate::native::types::deserialize::sparse::read_sparse_async;
 
 /// A raw `ClickHouse` type.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -467,6 +468,41 @@ impl Type {
                 return Err(Error::Protocol(format!(
                     "deserialize response size too large. {rows} > {MAX_STRING_SIZE}"
                 )));
+            }
+
+            if matches!(state.type_specific, crate::formats::TypeSpecificState::Sparse(crate::formats::SparseState { has_custom: true, .. })) {
+                match self {
+                    Type::Int8
+                    | Type::Int16
+                    | Type::Int32
+                    | Type::Int64
+                    | Type::Int128
+                    | Type::Int256
+                    | Type::UInt8
+                    | Type::UInt16
+                    | Type::UInt32
+                    | Type::UInt64
+                    | Type::UInt128
+                    | Type::UInt256
+                    | Type::Float32
+                    | Type::Float64
+                    | Type::Decimal32(_)
+                    | Type::Decimal64(_)
+                    | Type::Decimal128(_)
+                    | Type::Decimal256(_)
+                    | Type::Uuid
+                    | Type::Date
+                    | Type::Date32
+                    | Type::DateTime(_)
+                    | Type::DateTime64(_, _)
+                    | Type::Ipv4
+                    | Type::Ipv6
+                    | Type::Enum8(_)
+                    | Type::Enum16(_) => {}
+                    _ => {
+                        return read_sparse_async(self, reader, rows, state).await;
+                    }
+                }
             }
 
             Ok(match self {
