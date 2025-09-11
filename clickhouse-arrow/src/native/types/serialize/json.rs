@@ -5,7 +5,7 @@ use tokio::io::AsyncWriteExt;
 use super::dynamic::DynamicSerializer;
 use super::{ClickHouseNativeSerializer, Serializer, SerializerState, Type};
 use crate::formats::{JsonState, TypeSpecificState};
-use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
+use crate::io::ClickHouseWrite;
 use crate::native::values::{Date, Date32, DateTime, DynDateTime64};
 use crate::{Error, Result, Value};
 
@@ -847,27 +847,7 @@ impl JsonSerializer {
         JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED
     }
 
-    /// Write paths header based on version
-    fn write_paths_header_sync<W: ClickHouseBytesWrite>(
-        paths: &[String],
-        version: u64,
-        writer: &mut W,
-    ) -> Result<()> {
-        if version != JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED {
-            return Err(Error::SerializeError(format!(
-                "Unsupported JSON serialization version: {version}"
-            )));
-        }
-
-        // V3 format: total dynamic paths count
-        writer.put_var_uint(paths.len() as u64)?;
-
-        // Write path names
-        for path in paths {
-            writer.put_string(path.as_bytes())?;
-        }
-        Ok(())
-    }
+    // sync JSON paths header writer removed
 
     /// Write paths header based on version (async)
     async fn write_paths_header_async<W: ClickHouseWrite>(
@@ -891,87 +871,7 @@ impl JsonSerializer {
         Ok(())
     }
 
-    pub(crate) fn write_prefix_sync<W: ClickHouseBytesWrite>(
-        _type_: &Type,
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        // Check server version support
-        Self::check_server_version(state)?;
-
-        let version = Self::get_serialization_version(state);
-        writer.put_u64_le(version);
-
-        // Update the version in state
-        if let TypeSpecificState::Json(json_state) = &mut state.type_specific {
-            json_state.version = Some(version);
-        }
-
-        // Retrieve metadata from state
-        if let TypeSpecificState::Json(json_state) = &state.type_specific {
-            // In v3 format, ALL paths (typed + dynamic) are written to ObjectStructure
-
-            // Only dynamic paths go in the flattened paths header
-            // Typed paths are NOT included because they have custom serializations
-            let _typed_paths: Vec<String> =
-                json_state.typed_paths.iter().map(|(name, _)| name.clone()).collect();
-            let dynamic_paths = json_state.dynamic_paths.clone();
-            let dynamic_columns = json_state.dynamic_path_columns.clone();
-            Self::write_paths_header_sync(&dynamic_paths, version, writer)?;
-
-            // Write typed path prefixes using their nested serializers
-            // Sort typed paths by name to match ClickHouse's deterministic order
-            let mut typed_entries: Vec<(&String, &Type)> =
-                json_state.typed_paths.iter().map(|(n, t)| (n, t)).collect();
-            typed_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-            for (_path_name, path_type) in typed_entries {
-                let mut typed_prefix_state = SerializerState::default();
-                if let Some(version) = state.server_version {
-                    typed_prefix_state = typed_prefix_state.with_server_version(version);
-                }
-                path_type.serialize_prefix(writer, &mut typed_prefix_state);
-            }
-
-            // Write Dynamic column headers for each dynamic path using precomputed states
-            if let Some(dynamic_columns) = dynamic_columns {
-                let path_dynamic_states =
-                    if let TypeSpecificState::Json(json_state_ref) = &state.type_specific {
-                        json_state_ref.path_dynamic_states.clone()
-                    } else {
-                        Default::default()
-                    };
-
-                for path in dynamic_paths {
-                    if dynamic_columns.get(&path).is_some() {
-                        if let Some(dyn_state) = path_dynamic_states.get(&path) {
-                            // Temporarily swap state to use provided Dynamic state
-                            let original = std::mem::replace(
-                                &mut state.type_specific,
-                                TypeSpecificState::Dynamic(dyn_state.clone()),
-                            );
-                            // Write prefix for this dynamic path (sync)
-                            DynamicSerializer::write_prefix_sync(
-                                &Type::Dynamic { max_types: None },
-                                writer,
-                                state,
-                            )?;
-                            // Restore
-                            state.type_specific = original;
-                        }
-                    }
-                }
-            }
-        } else {
-            return Err(Error::SerializeError(
-                "JSON serialization state not found. `analyze_values` must be called before \
-                 `write_prefix`."
-                    .to_string(),
-            ));
-        }
-
-        Ok(())
-    }
+    // sync JSON write_prefix removed
 }
 
 impl Serializer for JsonSerializer {
@@ -1153,97 +1053,7 @@ impl Serializer for JsonSerializer {
         Ok(())
     }
 
-    fn write_sync(
-        _type_: &Type,
-        _values: Vec<Value>,
-        writer: &mut impl ClickHouseBytesWrite,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        // Always use v3 now (server version already checked in write_prefix)
-        let use_v3 = true;
-
-        // Get metadata from state
-        let (typed_paths, typed_columns, dynamic_paths, dynamic_columns, rows) =
-            if let TypeSpecificState::Json(json_state) = &state.type_specific {
-                let rows = json_state.rows.ok_or_else(|| {
-                    Error::SerializeError("JSON rows count not found in state".to_string())
-                })?;
-
-                let typed_columns = json_state.typed_path_columns.clone().unwrap_or_default();
-                let dynamic_columns = json_state.dynamic_path_columns.clone().unwrap_or_default();
-
-                (
-                    json_state.typed_paths.clone(),
-                    typed_columns,
-                    json_state.dynamic_paths.clone(),
-                    dynamic_columns,
-                    rows,
-                )
-            } else {
-                return Err(Error::SerializeError(
-                    "JSON serialization state not found. `analyze_values` must be called before \
-                     `write`."
-                        .to_string(),
-                ));
-            };
-
-        // First write typed path columns (part of FLATTENED format)
-        for (path, type_) in &typed_paths {
-            // Use a clean state for typed columns but preserve server version
-            let mut typed_state = SerializerState::default();
-            if let Some(version) = state.server_version {
-                typed_state = typed_state.with_server_version(version);
-            }
-
-            // Get the column values or use nulls
-            let column_values = if let Some(values) = typed_columns.get(path) {
-                values.clone()
-            } else {
-                vec![Value::Null; rows]
-            };
-
-            // LowCardinality no longer needs a JSON-context flag; behavior is type-driven.
-
-            // For typed paths in FLATTENED format, just call serialize_column_sync
-            // which internally calls write_sync() that includes prefix/version and data
-            type_.serialize_column_sync(column_values, writer, &mut typed_state)?;
-        }
-
-        // Then write dynamic path columns
-        let path_dynamic_states = if let TypeSpecificState::Json(json_state) = &state.type_specific
-        {
-            json_state.path_dynamic_states.clone()
-        } else {
-            Default::default()
-        };
-
-        for path in &dynamic_paths {
-            if let Some(column_values) = dynamic_columns.get(path) {
-                if let Some(dynamic_state) = path_dynamic_states.get(path) {
-                    // Use the stored Dynamic state for this path
-                    DynamicSerializer::write_dynamic_data_sync(
-                        column_values,
-                        writer,
-                        state,
-                        TypeSpecificState::Dynamic(dynamic_state.clone()),
-                    )?;
-                } else {
-                    return Err(Error::SerializeError(format!(
-                        "Dynamic state not found for path: {path}"
-                    )));
-                }
-            }
-        }
-
-        // V0 format needs SharedData (empty) per row
-        if !use_v3 {
-            for _ in 0..rows {
-                writer.put_u64_le(0);
-            }
-        }
-
-        Ok(())
-    }
+    // sync JSON write removed
 }
 
 #[cfg(test)]

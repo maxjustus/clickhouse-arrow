@@ -1,6 +1,6 @@
 use super::{ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
 use crate::Result;
-use crate::io::{ClickHouseBytesRead, ClickHouseRead};
+use crate::io::ClickHouseRead;
 use crate::native::values::Value;
 
 pub(crate) struct TupleDeserializer;
@@ -49,19 +49,5 @@ impl Deserializer for TupleDeserializer {
         Ok(build_tuples(rows, inner_types, column_data))
     }
 
-    fn read_sync(
-        type_: &Type,
-        reader: &mut impl ClickHouseBytesRead,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        let inner_types = type_.unwrap_tuple()?;
-        let mut column_data = Vec::with_capacity(inner_types.len());
-
-        for type_ in inner_types {
-            column_data.push(type_.deserialize_column_sync(reader, rows, state)?);
-        }
-
-        Ok(build_tuples(rows, inner_types, column_data))
-    }
+    // sync tuple deserialization removed
 }

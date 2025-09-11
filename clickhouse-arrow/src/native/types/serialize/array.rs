@@ -1,7 +1,7 @@
 use tokio::io::AsyncWriteExt;
 
 use super::{ClickHouseNativeSerializer, Serializer, SerializerState, Type};
-use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
+use crate::io::ClickHouseWrite;
 use crate::prelude::*;
 use crate::{Result, Value};
 
@@ -112,40 +112,4 @@ impl<T: ArraySerializerGeneric + 'static> Serializer for T {
         Ok(())
     }
 
-    fn write_sync(
-        type_: &Type,
-        values: Vec<Value>,
-        writer: &mut impl ClickHouseBytesWrite,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        let type_ = T::inner_type(type_)?;
-
-        let mut offset = 0usize;
-        for value in &values {
-            offset += Self::value_len(value)?;
-            writer.put_u64_le(offset as u64);
-        }
-        let mut all_values: Vec<Value> = Vec::with_capacity(offset);
-        for value in values {
-            all_values.append(&mut Self::values(value)?);
-        }
-
-        // Check if we need to transform values for heterogeneous arrays
-        let final_values =
-            if let Some(variant_types) = needs_heterogeneous_transformation(type_, &all_values) {
-                wrap_heterogeneous_elements(&all_values, &variant_types)?
-            } else {
-                all_values
-            };
-
-        match type_.serialize_column_sync(final_values, writer, state) {
-            Ok(()) => {}
-            Err(e) => {
-                error!("error serializing column in array type={type_:?}: {}", e);
-                return Err(e);
-            }
-        }
-
-        Ok(())
-    }
 }

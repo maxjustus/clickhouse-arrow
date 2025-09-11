@@ -29,14 +29,6 @@ macro_rules! read_discriminator {
             _ => $reader.read_u64_le().await?,
         }
     };
-    (sync $reader:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => u64::from($reader.get_u8()),
-            256..=65535 => u64::from($reader.get_u16_le()),
-            65536..=4_294_967_295 => u64::from($reader.get_u32_le()),
-            _ => $reader.get_u64_le(),
-        }
-    };
 }
 pub(crate) use read_discriminator;
 
@@ -91,7 +83,7 @@ impl ClickHouseNativeDeserializer for Type {
                 | Type::Ipv6
                 | Type::Enum8(_)
                 | Type::Enum16(_) => {
-                    sized::SizedDeserializer::read_prefix(self, reader, state).await?;
+                    SizedDeserializer::read_prefix(self, reader, state).await?;
                 }
 
                 Type::String
@@ -204,7 +196,17 @@ impl ClickHouseNativeDeserializer for Type {
                 let _ = reader.try_get_i8()?;
             }
             Type::Variant(_) => {
-                variant::VariantDeserializer::read_prefix_sync(self, reader)?;
+                // Inline sync variant prefix: read version and nested prefixes
+                let version = reader.try_get_u64_le()?;
+                if version != 0 {
+                    return Err(Error::DeserializeError(format!(
+                        "Unsupported Variant serialization version: {}",
+                        version
+                    )));
+                }
+                for inner_type in self.unwrap_variant()? {
+                    inner_type.deserialize_prefix(reader, &mut DeserializerState::default())?;
+                }
             }
             Type::Dynamic { .. } => {
                 dynamic::DynamicDeserializer::read_prefix_sync(self, reader, state)?;

@@ -1,6 +1,7 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use tokio::io::AsyncReadExt;
+use std::future::Future;
 use uuid::Uuid;
 
 use super::{Deserializer, DeserializerState, Type};
@@ -159,141 +160,6 @@ impl SizedDeserializer {
         Ok(out)
     }
 
-    fn read_sparse_values_sync(
-        type_: &Type,
-        reader: &mut impl ClickHouseBytesRead,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        const END_OF_GRANULE_FLAG: u64 = 1u64 << 62;
-        let mut indices: Vec<usize> = Vec::new();
-        let mut total_rows: usize;
-        let mut tmp_offset: usize = 0; // rows_offset is 0 at block start
-        let mut skipped_values_rows: usize = 0;
-        let mut first = true;
-
-        let (mut trailing_defaults, mut has_value_after_defaults) = match &state.type_specific {
-            TypeSpecificState::Sparse(SparseState { num_trailing_defaults, has_value_after_defaults, .. }) => {
-                (*num_trailing_defaults, *has_value_after_defaults)
-            }
-            _ => (0, false),
-        };
-
-        tracing::debug!(
-            ty = ?type_, rows,
-            prev_trailing_defaults = trailing_defaults,
-            prev_has_value_after_defaults = has_value_after_defaults,
-            "sparse(sized, sync): start"
-        );
-
-        total_rows = trailing_defaults;
-
-        if has_value_after_defaults {
-            if trailing_defaults >= tmp_offset {
-                let start_of_group = 0;
-                indices.push(start_of_group + trailing_defaults - tmp_offset);
-                tmp_offset = 0;
-                first = false;
-                tracing::trace!(action = "pending_value_push", index = indices.last().copied().unwrap_or(0));
-            } else {
-                skipped_values_rows += 1;
-                tmp_offset = tmp_offset.saturating_sub(trailing_defaults + 1);
-                tracing::trace!(action = "pending_value_skip", skipped_values_rows);
-            }
-            has_value_after_defaults = false;
-            trailing_defaults = 0;
-            total_rows += 1;
-        }
-
-        loop {
-            let mut v = reader.try_get_var_uint()?;
-            let end = (v & END_OF_GRANULE_FLAG) != 0;
-            if end { v &= !END_OF_GRANULE_FLAG; }
-            let mut group_size = v as usize;
-
-            let mut next_total_rows = total_rows + group_size;
-            group_size += trailing_defaults;
-
-            if next_total_rows >= rows {
-                trailing_defaults = next_total_rows - rows;
-                has_value_after_defaults = !end;
-                tracing::trace!(action = "early_stop", trailing_defaults, has_value_after_defaults);
-                break;
-            }
-
-            if end {
-                has_value_after_defaults = false;
-                trailing_defaults = group_size;
-                tracing::trace!(action = "end_of_granule", trailing_defaults);
-                break;
-            } else {
-                let start_of_group = if !first && !indices.is_empty() { indices[indices.len()-1] + 1 } else { 0 };
-                if group_size >= tmp_offset {
-                    indices.push(start_of_group + group_size - tmp_offset);
-                    tmp_offset = 0;
-                    first = false;
-                    tracing::trace!(action = "push_index", index = indices.last().copied().unwrap_or(0));
-                } else {
-                    skipped_values_rows += 1;
-                    tmp_offset = tmp_offset.saturating_sub(group_size + 1);
-                    tracing::trace!(action = "skip_value", skipped_values_rows);
-                }
-                trailing_defaults = 0;
-                has_value_after_defaults = false;
-                next_total_rows += 1;
-            }
-            total_rows = next_total_rows;
-        }
-
-        if let TypeSpecificState::Sparse(s) = &mut state.type_specific {
-            s.num_trailing_defaults = trailing_defaults;
-            s.has_value_after_defaults = has_value_after_defaults;
-        }
-
-        // Discard skipped values
-        for _ in 0..skipped_values_rows {
-            match type_ {
-                Type::Int8 => { let _ = reader.try_get_i8()?; }
-                Type::Int16 => { let _ = reader.try_get_i16_le()?; }
-                Type::Int32 => { let _ = reader.try_get_i32_le()?; }
-                Type::Int64 => { let _ = reader.try_get_i64_le()?; }
-                Type::UInt8 => { let _ = reader.try_get_u8()?; }
-                Type::UInt16 => { let _ = reader.try_get_u16_le()?; }
-                Type::UInt32 => { let _ = reader.try_get_u32_le()?; }
-                Type::UInt64 => { let _ = reader.try_get_u64_le()?; }
-                Type::Float32 => { let _ = reader.try_get_u32_le()?; }
-                Type::Float64 => { let _ = reader.try_get_u64_le()?; }
-                _ => return Err(crate::Error::DeserializeError(format!("Sparse skip not implemented for type: {type_:?}"))),
-            }
-        }
-
-        let mut values = Vec::with_capacity(indices.len());
-        for _ in 0..indices.len() {
-            values.push(match type_ {
-                Type::Int8 => Value::Int8(reader.try_get_i8()?),
-                Type::Int16 => Value::Int16(reader.try_get_i16_le()?),
-                Type::Int32 => Value::Int32(reader.try_get_i32_le()?),
-                Type::Int64 => Value::Int64(reader.try_get_i64_le()?),
-                Type::UInt8 => Value::UInt8(reader.try_get_u8()?),
-                Type::UInt16 => Value::UInt16(reader.try_get_u16_le()?),
-                Type::UInt32 => Value::UInt32(reader.try_get_u32_le()?),
-                Type::UInt64 => Value::UInt64(reader.try_get_u64_le()?),
-                Type::Float32 => Value::Float32(f32::from_bits(reader.try_get_u32_le()?)),
-                Type::Float64 => Value::Float64(f64::from_bits(reader.try_get_u64_le()?)),
-                _ => return Err(crate::Error::DeserializeError(format!("Sparse deserialization not implemented for type: {type_:?}"))),
-            });
-        }
-        let mut out = vec![type_.default_value(); rows];
-        for (i, v) in indices.into_iter().zip(values.into_iter()) {
-            if i < rows { out[i] = v; }
-        }
-        tracing::debug!(
-            ty = ?type_, rows, indices_len = out.len(), skipped_values_rows,
-            next_trailing_defaults = trailing_defaults, next_has_value_after_defaults = has_value_after_defaults,
-            "sparse(sized, sync): end"
-        );
-        Ok(out)
-    }
 }
 
 impl Deserializer for SizedDeserializer {
@@ -301,7 +167,7 @@ impl Deserializer for SizedDeserializer {
         _type_: &Type,
         reader: &mut R,
         state: &mut DeserializerState,
-    ) -> impl std::future::Future<Output = Result<()>> {
+    ) -> impl Future<Output = Result<()>> {
         async move {
             if let TypeSpecificState::Sparse(SparseState { has_custom: true, use_custom, .. }) =
                 &mut state.type_specific
@@ -408,98 +274,7 @@ impl Deserializer for SizedDeserializer {
         Ok(out)
     }
 
-    fn read_sync(
-        type_: &Type,
-        reader: &mut impl ClickHouseBytesRead,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        // If sparse/custom is enabled for this column, use sparse path
-        let sparse_enabled = matches!(
-            state.type_specific,
-            TypeSpecificState::Sparse(SparseState { has_custom: true, use_custom: Some(true), .. })
-        );
-
-        if sparse_enabled {
-            return Self::read_sparse_values_sync(type_, reader, rows, state);
-        }
-        let mut out = Vec::with_capacity(rows);
-        for _ in 0..rows {
-            out.push(match type_ {
-                Type::Int8 => Value::Int8(reader.try_get_i8()?),
-                Type::Int16 => Value::Int16(reader.try_get_i16_le()?),
-                Type::Int32 => Value::Int32(reader.try_get_i32_le()?),
-                Type::Int64 => Value::Int64(reader.try_get_i64_le()?),
-                Type::Int128 => Value::Int128(reader.try_get_i128_le()?),
-                Type::Int256 => {
-                    let mut buf = [0u8; 32];
-                    reader.try_copy_to_slice(&mut buf[..])?;
-                    buf.reverse();
-                    Value::Int256(i256(buf))
-                }
-                Type::UInt8 => Value::UInt8(reader.try_get_u8()?),
-                Type::UInt16 => Value::UInt16(reader.try_get_u16_le()?),
-                Type::UInt32 => Value::UInt32(reader.try_get_u32_le()?),
-                Type::UInt64 => Value::UInt64(reader.try_get_u64_le()?),
-                Type::UInt128 => Value::UInt128(reader.try_get_u128_le()?),
-                Type::UInt256 => {
-                    let mut buf = [0u8; 32];
-                    reader.try_copy_to_slice(&mut buf[..])?;
-                    buf.reverse();
-                    Value::UInt256(u256(buf))
-                }
-                Type::Float32 => Value::Float32(f32::from_bits(reader.try_get_u32_le()?)),
-                Type::Float64 => Value::Float64(f64::from_bits(reader.try_get_u64_le()?)),
-                Type::Decimal32(s) => Value::Decimal32(*s, reader.try_get_i32_le()?),
-                Type::Decimal64(s) => Value::Decimal64(*s, reader.try_get_i64_le()?),
-                Type::Decimal128(s) => Value::Decimal128(*s, reader.try_get_i128_le()?),
-                Type::Decimal256(s) => {
-                    let mut buf = [0u8; 32];
-                    reader.try_copy_to_slice(&mut buf[..])?;
-                    buf.reverse();
-                    Value::Decimal256(*s, i256(buf))
-                }
-                Type::Uuid => Value::Uuid({
-                    let n1 = reader.try_get_u64_le()?;
-                    let n2 = reader.try_get_u64_le()?;
-                    Uuid::from_u128((u128::from(n1) << 64) | u128::from(n2))
-                }),
-                Type::Date => Value::Date(Date(reader.try_get_u16_le()?)),
-                Type::Date32 => Value::Date32(Date32(reader.try_get_i32_le()?)),
-                Type::DateTime(tz) => Value::DateTime(DateTime(*tz, reader.try_get_u32_le()?)),
-                Type::Ipv4 => Value::Ipv4(Ipv4Addr::from(reader.try_get_u32_le()?).into()),
-                Type::Ipv6 => {
-                    let mut octets = [0u8; 16];
-                    reader.try_copy_to_slice(&mut octets[..])?;
-                    Value::Ipv6(Ipv6Addr::from(octets).into())
-                }
-                Type::DateTime64(precision, tz) => {
-                    let raw = reader.try_get_u64_le()?;
-                    Value::DateTime64(DynDateTime64(*tz, raw, *precision))
-                }
-                Type::Enum8(pairs) => {
-                    let idx = reader.try_get_i8()?;
-                    let value = pairs.iter().find(|(_, i)| *i == idx).ok_or(
-                        crate::Error::DeserializeError(format!("Invalid enum8 index: {idx}")),
-                    )?;
-                    Value::Enum8(value.0.clone(), idx)
-                }
-                Type::Enum16(pairs) => {
-                    let idx = reader.try_get_i16_le()?;
-                    let value = pairs.iter().find(|(_, i)| *i == idx).ok_or(
-                        crate::Error::DeserializeError(format!("Invalid enum16 index: {idx}")),
-                    )?;
-                    Value::Enum16(value.0.clone(), idx)
-                }
-                _ => {
-                    return Err(crate::Error::DeserializeError(format!(
-                        "SizedDeserializer unimplemented: {type_:?}"
-                    )));
-                }
-            });
-        }
-        Ok(out)
-    }
+    // sync sized deserialization removed
 }
 
 impl SizedDeserializer {
@@ -522,7 +297,6 @@ impl SizedDeserializer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::BytesMut;
     // Prefix methods come via trait in other modules; not needed here.
 
@@ -543,60 +317,7 @@ mod tests {
         buf.extend_from_slice(&tmp[..pos]);
     }
 
-    #[test]
-    fn test_sparse_float32_offsets_early_stop() {
-        // Build sparse-encoded column for 10 rows with non-defaults at 1 and 5
-        // Offsets groups: 1, 3, then end group 4|END (final group reaches limit, no value)
-        let mut bytes = BytesMut::new();
-
-        // Sync path does not read toggle; write only groups
-        put_var_uint(&mut bytes, 1);
-        put_var_uint(&mut bytes, 3);
-        let end_group = (1u64 << 62) | 4u64;
-        put_var_uint(&mut bytes, end_group);
-
-        // Elements: values for indices [1, 5]
-        let v1 = f32::to_bits(3000.0).to_le_bytes();
-        let v2 = f32::to_bits(30000.0).to_le_bytes();
-        bytes.extend_from_slice(&v1);
-        bytes.extend_from_slice(&v2);
-
-        // Prepare reader and state
-        let mut reader = bytes.freeze();
-        let mut state = DeserializerState::default();
-        state.type_specific = TypeSpecificState::Sparse(SparseState {
-            has_custom: true,
-            use_custom: Some(true),
-            num_trailing_defaults: 0,
-            has_value_after_defaults: false,
-        });
-
-        let ty = Type::Float32;
-        // Sync prefix is a no-op for sized; directly read column
-        let out = ty
-            .deserialize_column_sync(&mut reader, 10, &mut state)
-            .expect("sparse float32 deserialize");
-
-        // Validate
-        assert_eq!(out.len(), 10);
-        let mut got = Vec::new();
-        for v in out {
-            match v {
-                Value::Float32(x) => got.push(x),
-                _ => panic!("expected Float32 values"),
-            }
-        }
-        assert_eq!(got[0], 0.0);
-        assert_eq!(got[1], 3000.0);
-        assert_eq!(got[2], 0.0);
-        assert_eq!(got[3], 0.0);
-        assert_eq!(got[4], 0.0);
-        assert_eq!(got[5], 30000.0);
-        assert_eq!(got[6], 0.0);
-        assert_eq!(got[7], 0.0);
-        assert_eq!(got[8], 0.0);
-        assert_eq!(got[9], 0.0);
-    }
+    // sync-only sparse test removed
 
     // toggle-based sparse prefix is not used for sized types; offsets terminate at end-of-granule flag
 }

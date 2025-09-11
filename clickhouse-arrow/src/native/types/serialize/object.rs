@@ -46,33 +46,7 @@ impl Serializer for ObjectSerializer {
         Ok(())
     }
 
-    fn write_sync(
-        type_: &Type,
-        values: Vec<Value>,
-        writer: &mut impl ClickHouseBytesWrite,
-        _state: &mut SerializerState,
-    ) -> Result<()> {
-        for value in values {
-            let value = if value == Value::Null { type_.default_value() } else { value };
-            match value {
-                Value::Object(bytes) => {
-                    writer.put_string(bytes)?;
-                }
-                #[cfg(feature = "serde")]
-                Value::Json(v) => {
-                    let bytes =
-                        serde_json::to_vec(&v).map_err(|e| Error::SerializeError(e.to_string()))?;
-                    writer.put_string(bytes)?;
-                }
-                _ => {
-                    return Err(Error::SerializeError(format!(
-                        "ObjectSerializer unimplemented: {type_:?} for value = {value:?}",
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
+    // sync object serialization removed
 }
 
 impl ObjectSerializer {

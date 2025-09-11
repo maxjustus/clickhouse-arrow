@@ -1,7 +1,7 @@
 use tokio::io::AsyncReadExt;
 
 use super::{ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
-use crate::io::{ClickHouseBytesRead, ClickHouseRead};
+use crate::io::ClickHouseRead;
 use crate::native::values::Value;
 use crate::{Error, Result};
 
@@ -44,24 +44,5 @@ impl Deserializer for NullableDeserializer {
         Ok(out)
     }
 
-    fn read_sync(
-        type_: &Type,
-        reader: &mut impl ClickHouseBytesRead,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        // if mask[i] == 0, item is present
-        let mut mask = vec![0u8; rows];
-        reader.try_copy_to_slice(&mut mask)?;
-
-        let mut out = type_.strip_null().deserialize_column_sync(reader, rows, state)?;
-
-        for (i, mask) in mask.iter().enumerate() {
-            if *mask != 0 {
-                out[i] = Value::Null;
-            }
-        }
-
-        Ok(out)
-    }
+    // sync nullable deserialization removed
 }

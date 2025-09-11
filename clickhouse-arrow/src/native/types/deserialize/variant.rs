@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use tokio::io::AsyncReadExt;
 
 use crate::Result;
-use crate::io::{ClickHouseBytesRead, ClickHouseRead};
+use crate::io::ClickHouseRead;
 use crate::native::types::deserialize::{ClickHouseNativeDeserializer, DeserializerState};
 use crate::native::types::{Type, Value};
 
@@ -150,47 +150,6 @@ impl VariantDeserializer {
         Self::reconstruct_values(&discriminators, &offsets, &columns)
     }
 
-    /// Read Variant data (sync version)
-    fn read_internal_sync<R: ClickHouseBytesRead>(
-        type_: &Type,
-        reader: &mut R,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        // Sanity check
-        if rows > MAX_VARIANT_ROWS {
-            return Err(crate::Error::DeserializeError(format!(
-                "Variant row count too large: {rows} (likely corrupt data)"
-            )));
-        }
-
-        let variant_types = type_.unwrap_variant()?;
-        let discriminator_map = DiscriminatorMap::new(variant_types);
-
-        // Read discriminators
-        let mut discriminators = vec![0u8; rows];
-        reader.try_copy_to_slice(&mut discriminators)?;
-
-        // Build offsets and count rows per type
-        let (offsets, row_count_by_type) = Self::build_offsets_and_counts(&discriminators, rows);
-
-        // Read column data for each type
-        let mut columns = HashMap::new();
-
-        for &discriminator in discriminator_map.discriminators() {
-            if let Some(&count) = row_count_by_type.get(&discriminator)
-                && count > 0
-                && let Some(inner_type) = discriminator_map.get_type(discriminator)
-            {
-                let column_values = inner_type.deserialize_column_sync(reader, count, state)?;
-                let old = columns.insert(discriminator, column_values);
-                debug_assert!(old.is_none(), "Duplicate discriminator column");
-            }
-        }
-
-        // Reconstruct values in original order
-        Self::reconstruct_values(&discriminators, &offsets, &columns)
-    }
 
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
         type_: &Type,
@@ -219,30 +178,6 @@ impl VariantDeserializer {
         Self::read_internal_async(type_, reader, rows, state).await
     }
 
-    pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
-        type_: &Type,
-        reader: &mut R,
-    ) -> Result<()> {
-        // Always read version here; callers only skip if they explicitly mark JSON data context.
-        let version = reader.get_u64_le();
-        check_version!(version);
-
-        // Read prefixes for nested types
-        for inner_type in type_.unwrap_variant()? {
-            inner_type.deserialize_prefix(reader, &mut DeserializerState::default())?;
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn read_sync<R: ClickHouseBytesRead>(
-        type_: &Type,
-        reader: &mut R,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        Self::read_internal_sync(type_, reader, rows, state)
-    }
 }
 
 #[cfg(test)]
@@ -250,7 +185,6 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
-    use crate::native::types::deserialize::ClickHouseNativeDeserializer;
 
     // Macro for variant value assertions
     macro_rules! assert_variant {
@@ -272,7 +206,7 @@ mod tests {
         result
     }
 
-    /// Macro to test variant deserialization for both sync and async paths
+    /// Macro to test variant deserialization for async path
     macro_rules! variant_deserialization_test {
         (
             $name:ident,
@@ -289,20 +223,6 @@ mod tests {
                 let expected_values = $expected_values;
 
                 let test_data = create_test_data(discriminators, data);
-
-                // Test sync path
-                let mut sync_reader = Cursor::new(test_data.clone());
-                let mut sync_state = DeserializerState::default();
-                variant_type
-                    .deserialize_prefix(&mut sync_reader, &mut DeserializerState::default())
-                    .unwrap();
-                let sync_values = VariantDeserializer::read_sync(
-                    &variant_type,
-                    &mut sync_reader,
-                    discriminators.len(),
-                    &mut sync_state,
-                )
-                .unwrap();
 
                 // Test async path
                 let mut async_reader = Cursor::new(test_data);
@@ -322,14 +242,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
-
-                // Assert both paths produce the same results
-                assert_eq!(sync_values.len(), expected_values.len());
+                // Assert results
                 assert_eq!(async_values.len(), expected_values.len());
-                assert_eq!(sync_values, async_values, "Sync and async results should match");
 
                 for (i, (expected_disc, expected_val)) in expected_values.iter().enumerate() {
-                    assert_variant!(&sync_values[i], *expected_disc, expected_val.clone());
                     assert_variant!(&async_values[i], *expected_disc, expected_val.clone());
                 }
             }
@@ -426,8 +342,8 @@ mod tests {
         &[(0, Value::String(b"hello".to_vec())), (0xFF, Value::Null), (1, Value::UInt64(42))]
     );
 
-    #[test]
-    fn test_variant_complex_array_deserialization() {
+    #[tokio::test]
+    async fn test_variant_complex_array_deserialization() {
         let variant_type =
             Type::variant(vec![Type::Array(Box::new(Type::String)), Type::UInt64, Type::Date]);
         let date_bytes = 19723u16.to_le_bytes();
@@ -457,9 +373,13 @@ mod tests {
         ]);
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader, &mut state).unwrap();
+        VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state)
+            .await
+            .unwrap();
         let values =
-            VariantDeserializer::read_sync(&variant_type, &mut reader, 3, &mut state).unwrap();
+            VariantDeserializer::read_async(&variant_type, &mut reader, 3, &mut state)
+                .await
+                .unwrap();
         assert_eq!(values.len(), 3);
 
         // Check array value
@@ -479,14 +399,18 @@ mod tests {
     }
 
     // Multitype sorting tests
-    #[test]
-    fn test_variant_multitype_discriminator_order() {
+    #[tokio::test]
+    async fn test_variant_multitype_discriminator_order() {
         let (variant_type, data) = create_multitype_test_data();
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader, &mut state).unwrap();
+        VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state)
+            .await
+            .unwrap();
         let values =
-            VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
+            VariantDeserializer::read_async(&variant_type, &mut reader, 5, &mut state)
+                .await
+                .unwrap();
         assert_eq!(values.len(), 5);
 
         // Verify discriminator assignments match expected sort order
@@ -495,14 +419,18 @@ mod tests {
         assert_variant!(&values[2], 1, Value::Date(crate::native::values::Date(100))); // Date -> discriminator 1
     }
 
-    #[test]
-    fn test_variant_multitype_array_handling() {
+    #[tokio::test]
+    async fn test_variant_multitype_array_handling() {
         let (variant_type, data) = create_multitype_test_data();
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader, &mut state).unwrap();
+        VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state)
+            .await
+            .unwrap();
         let values =
-            VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
+            VariantDeserializer::read_async(&variant_type, &mut reader, 5, &mut state)
+                .await
+                .unwrap();
 
         // Check array (discriminator 0)
         match &values[3] {
@@ -516,14 +444,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_variant_multitype_datetime_handling() {
+    #[tokio::test]
+    async fn test_variant_multitype_datetime_handling() {
         let (variant_type, data) = create_multitype_test_data();
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
-        variant_type.deserialize_prefix(&mut reader, &mut state).unwrap();
+        VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state)
+            .await
+            .unwrap();
         let values =
-            VariantDeserializer::read_sync(&variant_type, &mut reader, 5, &mut state).unwrap();
+            VariantDeserializer::read_async(&variant_type, &mut reader, 5, &mut state)
+                .await
+                .unwrap();
 
         // Check DateTime (discriminator 2)
         match &values[4] {

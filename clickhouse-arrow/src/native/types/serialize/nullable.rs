@@ -1,7 +1,7 @@
 use tokio::io::AsyncWriteExt;
 
 use super::{ClickHouseNativeSerializer, Serializer, SerializerState, Type};
-use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
+use crate::io::ClickHouseWrite;
 use crate::{Error, Result, Value};
 
 pub(crate) struct NullableSerializer;
@@ -44,24 +44,4 @@ impl Serializer for NullableSerializer {
         Ok(())
     }
 
-    fn write_sync(
-        type_: &Type,
-        values: Vec<Value>,
-        writer: &mut impl ClickHouseBytesWrite,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        let inner_type = if let Type::Nullable(n) = type_ {
-            &**n
-        } else {
-            return Err(Error::SerializeError(format!(
-                "NullableSerializer called with non-nullable type: {type_:?}"
-            )));
-        };
-
-        let mask = values.iter().map(|value| u8::from(value == &Value::Null)).collect::<Vec<u8>>();
-        writer.put_slice(&mask);
-
-        inner_type.serialize_column_sync(values, writer, state)?;
-        Ok(())
-    }
 }

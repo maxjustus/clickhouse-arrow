@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tokio::io::AsyncWriteExt;
 
 use crate::Result;
-use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
+use crate::io::ClickHouseWrite;
 use crate::native::types::serialize::{ClickHouseNativeSerializer, SerializerState};
 use crate::native::types::{Type, Value};
 
@@ -57,26 +57,6 @@ impl VariantSerializer {
         Ok(())
     }
 
-    /// Write column data for each discriminator (sync version)
-    fn write_columns_internal_sync<W: ClickHouseBytesWrite>(
-        discriminator_map: &crate::native::types::deserialize::variant::DiscriminatorMap,
-        grouped_values: &HashMap<u8, Vec<Value>>,
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        for &discriminator in discriminator_map.discriminators() {
-            if discriminator == NULL_DISCRIMINATOR {
-                continue; // Skip NULL discriminator - no data to write
-            }
-
-            if let Some(values_for_disc) = grouped_values.get(&discriminator)
-                && let Some(inner_type) = discriminator_map.get_type(discriminator)
-            {
-                inner_type.serialize_column_sync(values_for_disc.clone(), writer, state)?;
-            }
-        }
-        Ok(())
-    }
 
     /// Write column data for each discriminator in ascending order
     async fn write_columns<W: ClickHouseWrite>(
@@ -88,15 +68,6 @@ impl VariantSerializer {
         Self::write_columns_internal_async(discriminator_map, grouped_values, writer, state).await
     }
 
-    /// Write column data sync version
-    fn write_columns_sync<W: ClickHouseBytesWrite>(
-        discriminator_map: &crate::native::types::deserialize::variant::DiscriminatorMap,
-        grouped_values: &HashMap<u8, Vec<Value>>,
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        Self::write_columns_internal_sync(discriminator_map, grouped_values, writer, state)
-    }
 
     pub(crate) async fn write_prefix<W: ClickHouseWrite>(
         type_: &Type,
@@ -115,22 +86,6 @@ impl VariantSerializer {
         Ok(())
     }
 
-    pub(crate) fn write_prefix_sync<W: ClickHouseBytesWrite>(
-        type_: &Type,
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        // Write version. JSON FLATTENED relies on nested serializer prefixes for typed paths.
-        // We call these with a fresh SerializerState (no type-specific state) to avoid
-        // state leakage across paths.
-        writer.put_u64_le(VERSION);
-
-        // Write prefixes for nested types
-        for inner_type in type_.unwrap_variant()? {
-            inner_type.serialize_prefix(writer, state);
-        }
-        Ok(())
-    }
 
     pub(crate) async fn write<W: ClickHouseWrite>(
         type_: &Type,
@@ -152,25 +107,6 @@ impl VariantSerializer {
         Self::write_columns(&discriminator_map, &grouped_values, writer, state).await
     }
 
-    pub(crate) fn write_sync<W: ClickHouseBytesWrite>(
-        type_: &Type,
-        values: &[Value],
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        let variant_types = type_.unwrap_variant()?;
-        let discriminator_map =
-            crate::native::types::deserialize::variant::DiscriminatorMap::new(variant_types);
-
-        // Extract discriminators and group values
-        let (discriminators, grouped_values) = Self::extract_discriminators_and_values(values)?;
-
-        // Write discriminators
-        writer.put_slice(&discriminators);
-
-        // Write column data
-        Self::write_columns_sync(&discriminator_map, &grouped_values, writer, state)
-    }
 }
 
 #[cfg(test)]
@@ -182,45 +118,13 @@ mod tests {
     use crate::native::types::deserialize::variant::VariantDeserializer;
     use crate::native::values::Date;
 
-    /// Macro to test variant serialization roundtrip for both sync and async paths
+    /// Macro to test variant serialization roundtrip for async path
     macro_rules! variant_roundtrip_test {
         ($name:ident, $variant_type:expr, $values:expr) => {
             #[tokio::test]
             async fn $name() {
                 let variant_type = $variant_type;
                 let values = $values;
-
-                // Test sync path
-                let mut sync_buffer = Vec::new();
-                let mut sync_state = SerializerState::default();
-                VariantSerializer::write_prefix_sync(
-                    &variant_type,
-                    &mut sync_buffer,
-                    &mut sync_state,
-                )
-                .unwrap();
-                VariantSerializer::write_sync(
-                    &variant_type,
-                    &values,
-                    &mut sync_buffer,
-                    &mut sync_state,
-                )
-                .unwrap();
-
-                let mut sync_reader = Cursor::new(&sync_buffer);
-                let mut sync_deser_state = DeserializerState::default();
-                let _ = {
-                    use bytes::Buf;
-                    sync_reader.get_u64_le()
-                }; // Skip version
-                let sync_deserialized = VariantDeserializer::read_sync(
-                    &variant_type,
-                    &mut sync_reader,
-                    values.len(),
-                    &mut sync_deser_state,
-                )
-                .unwrap();
-
                 // Test async path
                 let mut async_buffer = Vec::new();
                 let mut async_state = SerializerState::default();
@@ -251,13 +155,8 @@ mod tests {
                 .await
                 .unwrap();
 
-                // Assert both paths produce the same results
-                assert_eq!(sync_deserialized, values);
+                // Assert async path produces expected values
                 assert_eq!(async_deserialized, values);
-                assert_eq!(
-                    sync_deserialized, async_deserialized,
-                    "Sync and async results should match"
-                );
             }
         };
     }
@@ -303,8 +202,8 @@ mod tests {
         ]
     );
 
-    #[test]
-    fn test_variant_homogeneous() {
+    #[tokio::test]
+    async fn test_variant_homogeneous() {
         use bytes::Buf;
 
         let variant_type = Type::variant(vec![Type::String, Type::UInt64, Type::Float64]);
@@ -314,8 +213,12 @@ mod tests {
 
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
-        VariantSerializer::write_prefix_sync(&variant_type, &mut buffer, &mut state).unwrap();
-        VariantSerializer::write_sync(&variant_type, &values, &mut buffer, &mut state).unwrap();
+        VariantSerializer::write_prefix(&variant_type, &mut buffer, &mut state)
+            .await
+            .unwrap();
+        VariantSerializer::write(&variant_type, values.clone(), &mut buffer, &mut state)
+            .await
+            .unwrap();
 
         // Verify discriminators
         let mut reader = Cursor::new(&buffer);
@@ -369,24 +272,27 @@ mod tests {
         vec![]
     );
 
-    #[test]
-    fn test_variant_all_nulls() {
-        use bytes::Buf;
-
+    #[tokio::test]
+    async fn test_variant_all_nulls() {
+        use tokio::io::AsyncReadExt;
         let variant_type = Type::variant(vec![Type::String, Type::UInt64, Type::Date]);
         let values = vec![variant!(0xFF, Value::Null); 4];
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
-        VariantSerializer::write_prefix_sync(&variant_type, &mut buffer, &mut state).unwrap();
-        VariantSerializer::write_sync(&variant_type, &values, &mut buffer, &mut state).unwrap();
+        VariantSerializer::write_prefix(&variant_type, &mut buffer, &mut state)
+            .await
+            .unwrap();
+        VariantSerializer::write(&variant_type, values.clone(), &mut buffer, &mut state)
+            .await
+            .unwrap();
 
         // Verify wire format
         let mut reader = Cursor::new(&buffer);
-        assert_eq!(reader.get_u64_le(), 0); // Version
+        assert_eq!(reader.read_u64_le().await.unwrap(), 0); // Version
         for _ in 0..4 {
-            assert_eq!(reader.get_u8(), 0xFF); // All NULL discriminators
+            assert_eq!(reader.read_u8().await.unwrap(), 0xFF); // All NULL discriminators
         }
-        assert_eq!(reader.remaining(), 0); // No column data
+        assert_eq!(reader.get_ref().len() as u64 - reader.position(), 0); // No column data
     }
 
     #[test]

@@ -92,9 +92,11 @@ pub(crate) async fn read_sparse_async<R: ClickHouseRead>(
 
     // Skip prior values
     if skipped_values_rows > 0 {
-        let _ = type_
-            .deserialize_column(reader, skipped_values_rows, state)
-            .await?;
+        drop(
+            type_
+                .deserialize_column(reader, skipped_values_rows, state)
+                .await?
+        );
     }
     // Read current values
     let values = if !indices.is_empty() {

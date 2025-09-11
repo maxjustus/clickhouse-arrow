@@ -5,7 +5,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::trace;
 
 use crate::formats::{DynamicState, SerializerState, TypeSpecificState};
-use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
+use crate::io::ClickHouseWrite;
 use crate::native::types::serialize::ClickHouseNativeSerializer;
 use crate::native::types::{Type, Value};
 use crate::{Result, write_discriminator};
@@ -38,23 +38,6 @@ impl DynamicSerializer {
         Ok(())
     }
 
-    /// Write Dynamic column data only - sync version
-    pub(crate) fn write_dynamic_data_sync<W: ClickHouseBytesWrite>(
-        values: &[Value],
-        writer: &mut W,
-        state: &mut SerializerState,
-        dynamic_state: TypeSpecificState,
-    ) -> Result<()> {
-        // Temporarily swap state to use provided Dynamic state
-        let original_state = std::mem::replace(&mut state.type_specific, dynamic_state);
-
-        // Write the actual data
-        Self::write_internal_sync(&Type::Dynamic { max_types: None }, values, writer, state)?;
-
-        // Restore original state
-        state.type_specific = original_state;
-        Ok(())
-    }
 
     /// Check if server supports Dynamic v3
     fn check_server_version(state: &SerializerState) -> Result<()> {
@@ -156,25 +139,6 @@ impl DynamicSerializer {
         Ok(())
     }
 
-    /// Write column data for each type (sync version)
-    fn write_columns_internal_sync<W: ClickHouseBytesWrite>(
-        type_names: &[String],
-        type_map: &HashMap<String, (usize, Type)>,
-        rows_by_type: &HashMap<usize, Vec<Value>>,
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        for (type_idx, type_name) in type_names.iter().enumerate() {
-            let (_, typ) = &type_map[type_name];
-
-            // Get values for this type (empty if no rows)
-            let type_values = rows_by_type.get(&type_idx).cloned().unwrap_or_default();
-
-            // Write the column data (even if empty)
-            typ.serialize_column_sync(type_values, writer, state)?;
-        }
-        Ok(())
-    }
 
     /// Write complete Dynamic data (async version)
     pub(crate) async fn write_internal_async<W: ClickHouseWrite>(
@@ -211,39 +175,6 @@ impl DynamicSerializer {
             .await
     }
 
-    /// Write complete Dynamic data (sync version)
-    pub(crate) fn write_internal_sync<W: ClickHouseBytesWrite>(
-        _: &Type,
-        values: &[Value],
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        // Get metadata from state
-        let (type_names, type_map, total_types) =
-            if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-                let total = usize::try_from(dynamic_state.total_types).unwrap_or(usize::MAX);
-                (dynamic_state.type_names.clone(), dynamic_state.type_map.clone(), total)
-            } else {
-                return Err(crate::Error::SerializeError(
-                    "Dynamic serialization state not found. `analyze_values` must be called \
-                     before `write`."
-                        .to_string(),
-                ));
-            };
-
-        // v3 uses variable-sized discriminators
-        // Build discriminators and count rows per type
-        let (discriminators, rows_by_type) =
-            Self::build_discriminators_and_groups(values, &type_map, total_types);
-
-        // Write discriminators
-        for &disc in &discriminators {
-            write_discriminator!(sync writer, disc, total_types);
-        }
-
-        // Write column data for each type
-        Self::write_columns_internal_sync(&type_names, &type_map, &rows_by_type, writer, state)
-    }
 
     #[allow(clippy::used_underscore_binding)]
     pub(crate) async fn write_prefix<W: ClickHouseWrite>(
@@ -317,58 +248,7 @@ impl DynamicSerializer {
         Self::write_internal_async(_type, values, writer, state).await
     }
 
-    #[allow(clippy::used_underscore_binding)]
-    pub(crate) fn write_prefix_sync<W: ClickHouseBytesWrite>(
-        _type: &Type,
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        // Check server version support
-        Self::check_server_version(state)?;
 
-        let version = Self::get_version(state);
-        // Always write version; JSON FLATTENED expects a per-path Dynamic header version.
-        writer.put_u64_le(version);
-
-        // Check if we have metadata from previous analysis
-        if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-            // v3 format: total_types, then type names, then nested prefixes
-            writer.put_var_uint(dynamic_state.total_types)?;
-
-            // Write type names
-            for type_name in &dynamic_state.type_names {
-                writer.put_string(type_name)?;
-            }
-
-            // Clone type_names and type_map to avoid borrowing issues
-            let type_names = dynamic_state.type_names.clone();
-            let type_map = dynamic_state.type_map.clone();
-
-            // Write nested type prefixes
-            for type_name in &type_names {
-                let (_, typ) = &type_map[type_name];
-                typ.serialize_prefix(writer, state);
-            }
-        } else {
-            return Err(crate::Error::SerializeError(
-                "Dynamic serialization state not found. `analyze_values` must be called before \
-                 `write_prefix`."
-                    .to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-
-    #[allow(clippy::used_underscore_binding)]
-    pub(crate) fn write_sync<W: ClickHouseBytesWrite>(
-        _type: &Type,
-        values: &[Value],
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        Self::write_internal_sync(_type, values, writer, state)
-    }
 }
 
 #[cfg(test)]
@@ -406,7 +286,7 @@ mod tests {
         }
     }
 
-    // Assert version compatibility behavior for both sync and async
+    // Assert version compatibility behavior for async only
     macro_rules! version_compatibility_test {
         ($name:ident, $major:expr, $minor:expr, $patch:expr, $should_succeed:expr) => {
             #[tokio::test]
@@ -416,7 +296,6 @@ mod tests {
                 let mut state = create_test_state(&values);
                 state.server_version = Some(($major, $minor, $patch));
 
-                // Test async
                 let mut async_buffer = Vec::new();
                 let async_result = DynamicSerializer::write_prefix(
                     &Type::Dynamic { max_types: None },
@@ -424,14 +303,6 @@ mod tests {
                     &mut state,
                 )
                 .await;
-
-                // Test sync
-                let mut sync_buffer = Vec::new();
-                let sync_result = DynamicSerializer::write_prefix_sync(
-                    &Type::Dynamic { max_types: None },
-                    &mut sync_buffer,
-                    &mut state,
-                );
 
                 if $should_succeed {
                     assert!(
@@ -441,14 +312,6 @@ mod tests {
                         $minor,
                         $patch
                     );
-                    assert!(
-                        sync_result.is_ok(),
-                        "Sync version {}.{}.{} should succeed",
-                        $major,
-                        $minor,
-                        $patch
-                    );
-                    assert_eq!(async_buffer, sync_buffer, "Async and sync outputs should match");
                 } else {
                     assert!(
                         async_result.is_err(),
@@ -457,17 +320,8 @@ mod tests {
                         $minor,
                         $patch
                     );
-                    assert!(
-                        sync_result.is_err(),
-                        "Sync version {}.{}.{} should fail",
-                        $major,
-                        $minor,
-                        $patch
-                    );
                     let async_err = async_result.unwrap_err().to_string();
-                    let sync_err = sync_result.unwrap_err().to_string();
                     assert!(async_err.contains("requires ClickHouse server version >= 25.6"));
-                    assert!(sync_err.contains("requires ClickHouse server version >= 25.6"));
                 }
             }
         };
@@ -483,21 +337,12 @@ mod tests {
         Ok(())
     }
 
-    // Assert discriminator size matches expectations for given total_types (sync and async)
+    // Assert discriminator size matches expectations for given total_types (async only)
     macro_rules! discriminator_test {
         ($name:ident, $total_types:expr, $expected_bytes:expr, $description:expr) => {
             #[tokio::test]
             async fn $name() {
                 println!("Testing scenario: {}", stringify!($name));
-                // Test sync discriminator
-                let mut sync_buffer = Vec::new();
-                write_discriminator!(sync &mut sync_buffer, 0, $total_types);
-                assert_eq!(
-                    sync_buffer.len(),
-                    $expected_bytes,
-                    "Sync failed for total_types={} ({})", $total_types, $description
-                );
-
                 // Test async discriminator
                 let mut async_buffer = Vec::new();
                 write_discriminator_async(&mut async_buffer, 0, $total_types).await.unwrap();
@@ -506,9 +351,6 @@ mod tests {
                     $expected_bytes,
                     "Async failed for total_types={} ({})", $total_types, $description
                 );
-
-                assert_eq!(sync_buffer, async_buffer, "Sync and async discriminators should match");
-
                 // Test both min and max discriminator values for this size
                 let max_disc = std::cmp::min($total_types - 1, match $expected_bytes {
                     1 => 255,
@@ -516,29 +358,18 @@ mod tests {
                     4 => 4_294_967_295_usize,
                     _ => $total_types - 1,
                 }) as u64;
-
-                sync_buffer.clear();
                 async_buffer.clear();
-
-                write_discriminator!(sync &mut sync_buffer, max_disc, $total_types);
                 write_discriminator_async(&mut async_buffer, max_disc, $total_types).await.unwrap();
-
-                assert_eq!(
-                    sync_buffer.len(),
-                    $expected_bytes,
-                    "Sync max discriminator failed for total_types={}", $total_types
-                );
                 assert_eq!(
                     async_buffer.len(),
                     $expected_bytes,
                     "Async max discriminator failed for total_types={}", $total_types
                 );
-                assert_eq!(sync_buffer, async_buffer, "Sync and async max discriminators should match");
             }
         };
     }
 
-    // Create a unified test for prefix writing that tests both sync and async
+    // Create an async-only test for prefix writing
     macro_rules! prefix_integration_test {
         ($name:ident, $values:expr, $expected_type_count:expr) => {
             #[tokio::test]
@@ -546,7 +377,6 @@ mod tests {
                 println!("Testing scenario: {}", stringify!($name));
                 let values = $values;
 
-                // Test async path
                 let type_specific_state = DynamicSerializer::analyze_values(&values);
                 let mut async_buffer = Vec::new();
                 let mut async_state = SerializerState {
@@ -560,23 +390,8 @@ mod tests {
                 )
                 .await
                 .unwrap();
-
-                // Test sync path
-                let mut sync_buffer = Vec::new();
-                let mut sync_state =
-                    SerializerState { type_specific: type_specific_state, ..Default::default() };
-                DynamicSerializer::write_prefix_sync(
-                    &Type::Dynamic { max_types: None },
-                    &mut sync_buffer,
-                    &mut sync_state,
-                )
-                .unwrap();
-
-                // Verify both produce the same output
-                assert_eq!(async_buffer, sync_buffer, "Async and sync outputs should match");
-
                 // Verify version and type count
-                let mut reader = &sync_buffer[..];
+                let mut reader = &async_buffer[..];
                 assert_eq!(reader.get_u64_le(), DYNAMIC_VERSION_FLATTENED);
                 assert_eq!(reader.try_get_var_uint().unwrap(), $expected_type_count);
             }
@@ -704,16 +519,7 @@ mod tests {
         .await;
         assert!(async_result.is_ok(), "Async: No version info should succeed");
 
-        // Test sync
-        let mut sync_buffer = Vec::new();
-        let sync_result = DynamicSerializer::write_prefix_sync(
-            &Type::Dynamic { max_types: None },
-            &mut sync_buffer,
-            &mut state,
-        );
-        assert!(sync_result.is_ok(), "Sync: No version info should succeed");
-
-        assert_eq!(async_buffer, sync_buffer, "Async and sync outputs should match");
+        // No sync path assertion; async-only
     }
 
     // Discriminator size tests using new macro
@@ -728,17 +534,10 @@ mod tests {
     async fn test_discriminator_u64_range() {
         let total_types = 4_294_967_296_usize;
 
-        // Test sync
-        let mut sync_buffer = Vec::new();
-        write_discriminator!(sync &mut sync_buffer, 0, total_types);
-        assert_eq!(sync_buffer.len(), 8, "Sync: Should use u64 for very large total_types");
-
         // Test async
         let mut async_buffer = Vec::new();
         write_discriminator_async(&mut async_buffer, 0, total_types).await.unwrap();
         assert_eq!(async_buffer.len(), 8, "Async: Should use u64 for very large total_types");
-
-        assert_eq!(sync_buffer, async_buffer, "Sync and async u64 discriminators should match");
     }
 
     // Tests for nested and heterogeneous arrays

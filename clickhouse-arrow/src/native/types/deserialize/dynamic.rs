@@ -123,57 +123,7 @@ impl DynamicDeserializer {
         Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
     }
 
-    /// Read Dynamic data (sync version)
-    fn read_internal_sync<R: ClickHouseBytesRead>(
-        _: &Type,
-        reader: &mut R,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        let (version, total_types, types) =
-            if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-                (
-                    dynamic_state.version.unwrap_or(DYNAMIC_VERSION_FLATTENED),
-                    dynamic_state.total_types,
-                    dynamic_state.types.clone(),
-                )
-            } else {
-                return Err(crate::Error::DeserializeError(
-                    "Dynamic metadata not set in state".to_string(),
-                ));
-            };
-
-        if version != DYNAMIC_VERSION_FLATTENED {
-            return Err(crate::Error::DeserializeError(format!(
-                "Dynamic type requires version 3, got version {version}. Please use ClickHouse \
-                 server >= 25.6"
-            )));
-        }
-
-        // v3 format: variable-sized discriminators
-        let mut discriminators = Vec::with_capacity(rows);
-        for _ in 0..rows {
-            discriminators.push(read_discriminator!(sync reader, total_types));
-        }
-
-        // Build offsets and count rows
-        let (offsets, row_count_by_type) = Self::build_offsets(&discriminators, total_types);
-
-        // Read column data for each type
-        let mut columns = HashMap::new();
-        for (idx, (_, typ)) in types.iter().enumerate() {
-            let type_idx = idx as u64;
-            if let Some(&count) = row_count_by_type.get(&type_idx)
-                && count > 0
-            {
-                let column_values = typ.deserialize_column_sync(reader, count, state)?;
-                let old = columns.insert(type_idx, column_values);
-                debug_assert!(old.is_none(), "Duplicate type index");
-            }
-        }
-
-        Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
-    }
+    // sync Dynamic internal read removed
 
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
         _type: &Type,
@@ -275,15 +225,7 @@ impl DynamicDeserializer {
         Ok(())
     }
 
-    #[allow(clippy::used_underscore_binding)]
-    pub(crate) fn read_sync<R: ClickHouseBytesRead>(
-        _type: &Type,
-        reader: &mut R,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        Self::read_internal_sync(_type, reader, rows, state)
-    }
+    // sync Dynamic read removed
 }
 
 #[cfg(test)]

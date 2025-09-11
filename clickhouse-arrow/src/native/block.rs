@@ -8,7 +8,7 @@ use super::protocol::DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION;
 use crate::deserialize::ClickHouseNativeDeserializer;
 use crate::formats::protocol_data::ProtocolData;
 use crate::formats::{DeserializerState, SerializerState, TypeSpecificState};
-use crate::io::{ClickHouseBytesRead, ClickHouseBytesWrite, ClickHouseRead, ClickHouseWrite};
+use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::types::serialize::dynamic::DynamicSerializer;
 use crate::native::types::serialize::json::JsonSerializer;
 use crate::native::values::Value;
@@ -327,75 +327,6 @@ impl ProtocolData<Self, ()> for Block {
         Ok(())
     }
 
-    fn write<W: ClickHouseBytesWrite>(
-        mut self,
-        writer: &mut W,
-        revision: u64,
-        _header: Option<&[(String, Type)]>,
-        options: Self::Options,
-    ) -> Result<()> {
-        if revision > 0 {
-            self.info.write(writer)?;
-        }
-
-        let columns = self.column_types.len();
-
-        #[allow(clippy::cast_possible_truncation)]
-        let rows = self.rows as usize;
-
-        writer.put_var_uint(columns as u64)?;
-        writer.put_var_uint(self.rows)?;
-        tracing::trace!(columns, rows=%self.rows, "block.write: dims");
-
-        for (name, col_type) in self.column_types {
-            let mut values = Vec::with_capacity(rows);
-            values.extend(self.column_data.drain(..rows));
-
-            if values.len() != rows {
-                return Err(Error::Protocol(format!(
-                    "row and column length mismatch. {} != {}",
-                    values.len(),
-                    rows
-                )));
-            }
-
-            // EncodeStart
-            let ty_str = format_type_for_header(&col_type, &options);
-            tracing::trace!(col=%name, ty=%ty_str, "block.write: column header");
-            writer.put_string(&name)?;
-            writer.put_string(ty_str)?;
-
-            if self.rows > 0 {
-                // NOTE: We currently do NOT implement client-side sparse/custom serialization
-                // for sized primitives. Always emit 0 (no custom serialization) for writes.
-                // The server may still choose sparse on read responses; our reader supports it.
-                if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
-                    writer.put_u8(0);
-                }
-
-                let mut state = SerializerState::default();
-                if let Some(metadata) = options
-                    && let Some(version) = metadata.server_version
-                {
-                    state = state.with_server_version(version);
-                }
-
-                // For Dynamic/JSON types, analyze values before writing prefix
-                state.type_specific = if matches!(col_type, Type::Dynamic { .. }) {
-                    DynamicSerializer::analyze_values(&values)
-                } else if matches!(col_type, Type::JSON { .. }) {
-                    JsonSerializer::analyze_values(&values, &col_type)?
-                } else {
-                    TypeSpecificState::None
-                };
-
-                col_type.serialize_prefix(writer, &mut state);
-                col_type.serialize_column_sync(values, writer, &mut state)?;
-            }
-        }
-        Ok(())
-    }
-
     async fn read_async<R: ClickHouseRead>(
         reader: &mut R,
         revision: u64,
@@ -445,6 +376,8 @@ impl ProtocolData<Self, ()> for Block {
                 // Seed state with sparse/custom flag for this column so prefix can consume it
                 use crate::formats::{SparseState, TypeSpecificState};
                 state.type_specific = if _has_custom_serialization {
+                    // Server indicates this column may use custom/sparse serialization.
+                    // Leave selection to the per-type prefix toggle.
                     TypeSpecificState::Sparse(SparseState { has_custom: true, use_custom: None, num_trailing_defaults: 0, has_value_after_defaults: false })
                 } else {
                     TypeSpecificState::None
@@ -470,81 +403,7 @@ impl ProtocolData<Self, ()> for Block {
         Ok(block)
     }
 
-    fn read<R: ClickHouseBytesRead + 'static>(
-        reader: &mut R,
-        revision: u64,
-        _options: Self::Options,
-        state: &mut DeserializerState,
-    ) -> Result<Self> {
-        let info = if revision > 0 { BlockInfo::read(reader)? } else { BlockInfo::default() };
-
-        #[allow(clippy::cast_possible_truncation)]
-        let columns = reader.try_get_var_uint()? as usize;
-        let rows = reader.try_get_var_uint()?;
-
-        let mut block = Block {
-            info,
-            rows,
-            column_types: Vec::with_capacity(columns),
-            column_data: Vec::with_capacity(columns),
-        };
-
-        for i in 0..columns {
-            let name = String::from_utf8(
-                reader
-                    .try_get_string()
-                    .inspect_err(|e| error!("reading column name (index {i}): {e}"))?
-                    .to_vec(),
-            )?;
-
-            let type_name = String::from_utf8(
-                reader
-                    .try_get_string()
-                    .inspect_err(|e| error!("reading column type (name {name}): {e}"))?
-                    .to_vec(),
-            )?;
-
-            // Custom/Sparse serialization detection (server-side flag)
-            let mut _has_custom_serialization = false;
-            if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
-                _has_custom_serialization = reader.try_get_u8()? != 0;
-                if _has_custom_serialization { tracing::debug!(col = %name, ty = %type_name, "server custom/sparse serialization detected (sync)"); }
-            }
-
-            let type_ = Type::from_str(&type_name).inspect_err(|error| {
-                error!(?error, "Type deserialize failed: name={name}, type={type_name}");
-            })?;
-
-            #[allow(clippy::cast_possible_truncation)]
-            let mut row_data = if rows > 0 {
-                // Seed state with sparse/custom flag for this column so the column reader can act on it
-                use crate::formats::{SparseState, TypeSpecificState};
-                state.type_specific = if _has_custom_serialization {
-                    TypeSpecificState::Sparse(SparseState { has_custom: true, use_custom: None, num_trailing_defaults: 0, has_value_after_defaults: false })
-                } else {
-                    TypeSpecificState::None
-                };
-                // Use state-aware prefix reader to support metadata in sync mode
-                let before_rem = reader.remaining();
-                tracing::debug!(message = "sync column start", index = i, col = %name, ty = %type_name, rows, before_remaining = before_rem, has_custom = _has_custom_serialization);
-                type_.deserialize_prefix(reader, state)?;
-                type_
-                    .deserialize_column_sync(reader, rows as usize, state)
-                    .inspect_err(|e| error!("deserialize (name {name}): {e}"))?
-            } else {
-                vec![]
-            };
-
-            block.column_types.push((name, type_));
-            block.column_data.append(&mut row_data);
-
-            // No per-column sparse state persistence across blocks
-            let after_rem = reader.remaining();
-            tracing::debug!(message = "sync column end", index = i, rows, after_remaining = after_rem);
-        }
-
-        Ok(block)
-    }
+    // Sync read removed; async-only path is supported
 }
 
 fn format_type_for_header(
