@@ -348,40 +348,50 @@ impl ProtocolData<Self, ()> for Block {
         };
 
         for i in 0..columns {
-            let name = reader
-                .read_utf8_string()
-                .await
-                .inspect_err(|e| error!("reading column name (index {i}): {e}"))?;
+            let name_bytes = reader.read_string().await.inspect_err(|e| error!("reading column name bytes (index {i}): {e}"))?;
+            let name = match String::from_utf8(name_bytes.clone()) {
+                Ok(s) => s,
+                Err(e) => {
+                    let hex: String = name_bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+                    error!(?e, hex = %hex, len = name_bytes.len(), index = i, "reading column name (invalid utf-8)");
+                    return Err(crate::Error::from(e));
+                }
+            };
 
-            let type_name = reader
-                .read_utf8_string()
-                .await
-                .inspect_err(|e| error!("reading column type (name {name}): {e}"))?;
-
-            // Custom/Sparse serialization detection (server-side flag)
-            // If non-zero, the server intends to use custom/sparse serialization for this column.
-            // We currently do not implement sparse decoding for primitives; emit a diagnostic log.
-            let mut _has_custom_serialization = false;
-            if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
-                _has_custom_serialization = reader.read_u8().await? != 0;
-                // Log presence of server-side custom/sparse for this column
-                if _has_custom_serialization { tracing::debug!(col = %name, ty = %type_name, "server custom/sparse serialization detected"); }
-            }
+            let type_bytes = reader.read_string().await.inspect_err(|e| error!("reading column type bytes (name {name}): {e}"))?;
+            let type_name = match String::from_utf8(type_bytes.clone()) {
+                Ok(s) => s,
+                Err(e) => {
+                    let hex: String = type_bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+                    error!(?e, hex = %hex, len = type_bytes.len(), name = %name, "reading column type (invalid utf-8)");
+                    return Err(crate::Error::from(e));
+                }
+            };
 
             let type_ = Type::from_str(&type_name).inspect_err(|error| {
                 error!(?error, "Type deserialize failed: name={name}, type={type_name}");
             })?;
 
+            // Custom/Sparse serialization detection (server-side flag)
+            // If non-zero, the server intends to use custom/sparse serialization for this column.
+            let mut _has_custom_serialization = false;
+            if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
+                _has_custom_serialization = reader.read_u8().await? != 0;
+            }
+
             let mut row_data = if rows > 0 {
-                // Seed state with sparse/custom flag for this column so prefix can consume it
+                // Initialize sparse state based on column-level kind for direct (non-composite) types only.
                 use crate::formats::{SparseState, TypeSpecificState};
-                state.type_specific = if _has_custom_serialization {
-                    // Server indicates this column may use custom/sparse serialization.
-                    // Leave selection to the per-type prefix toggle.
-                    TypeSpecificState::Sparse(SparseState { has_custom: true, use_custom: None, num_trailing_defaults: 0, has_value_after_defaults: false })
-                } else {
-                    TypeSpecificState::None
-                };
+                state.type_specific = TypeSpecificState::None;
+                if _has_custom_serialization {
+                    tracing::debug!(col = %name, ty = %type_name, "server custom/sparse serialization detected");
+                    state.type_specific = TypeSpecificState::Sparse(SparseState {
+                        has_custom: true,
+                        use_custom: None, // Will be populated by prefix deserializers
+                        num_trailing_defaults: 0,
+                        has_value_after_defaults: false,
+                    });
+                }
 
                 type_.deserialize_prefix_async(reader, state).await?;
 

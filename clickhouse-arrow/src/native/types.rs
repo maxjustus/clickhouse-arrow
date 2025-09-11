@@ -470,7 +470,20 @@ impl Type {
                 )));
             }
 
-            if matches!(state.type_specific, crate::formats::TypeSpecificState::Sparse(crate::formats::SparseState { has_custom: true, .. })) {
+            // If server indicated custom/sparse serialization, only switch to the
+            // generic sparse reader for complex types when the per-column toggle
+            // explicitly enabled it (use_custom = true). This prevents misaligned
+            // reads when the server advertises capability but chooses dense mode.
+            if matches!(
+                state.type_specific,
+                crate::formats::TypeSpecificState::Sparse(
+                    crate::formats::SparseState {
+                        has_custom: true,
+                        use_custom: Some(true),
+                        ..
+                    }
+                )
+            ) {
                 match self {
                     Type::Int8
                     | Type::Int16

@@ -33,7 +33,14 @@ impl<T: ArrayDeserializerGeneric + 'static> Deserializer for T {
         reader: &mut R,
         state: &mut DeserializerState,
     ) -> Result<()> {
-        Self::inner_type(type_)?.deserialize_prefix_async(reader, state).await
+        // Use sub-state for inner to isolate sparse state
+        let mut sub_state = DeserializerState::default();
+        if matches!(state.type_specific, crate::formats::TypeSpecificState::Sparse(_)) {
+            sub_state.type_specific = crate::formats::TypeSpecificState::Sparse(
+                crate::formats::SparseState { has_custom: true, use_custom: None, num_trailing_defaults: 0, has_value_after_defaults: false },
+            );
+        }
+        Self::inner_type(type_)?.deserialize_prefix_async(reader, &mut sub_state).await
     }
 
     async fn read<R: ClickHouseRead>(
@@ -52,8 +59,14 @@ impl<T: ArrayDeserializerGeneric + 'static> Deserializer for T {
         }
 
         #[expect(clippy::cast_possible_truncation)]
+        let mut sub_state = DeserializerState::default();
+        if matches!(state.type_specific, crate::formats::TypeSpecificState::Sparse(_)) {
+            sub_state.type_specific = crate::formats::TypeSpecificState::Sparse(
+                crate::formats::SparseState { has_custom: true, use_custom: None, num_trailing_defaults: 0, has_value_after_defaults: false },
+            );
+        }
         let mut items = Self::inner_type(type_)?
-            .deserialize_column(reader, offsets[offsets.len() - 1] as usize, state)
+            .deserialize_column(reader, offsets[offsets.len() - 1] as usize, &mut sub_state)
             .await?
             .into_iter()
             .map(Self::item_mapping);

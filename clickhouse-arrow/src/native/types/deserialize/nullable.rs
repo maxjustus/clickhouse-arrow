@@ -19,8 +19,13 @@ impl Deserializer for NullableDeserializer {
                 return Err(Error::DeserializeError("Expected Nullable type".to_string()));
             }
         };
-        // Delegate to inner type
-        inner_type.deserialize_prefix_async(reader, state).await
+        let mut sub_state = DeserializerState::default();
+        if matches!(state.type_specific, crate::formats::TypeSpecificState::Sparse(_)) {
+            sub_state.type_specific = crate::formats::TypeSpecificState::Sparse(
+                crate::formats::SparseState { has_custom: true, use_custom: None, num_trailing_defaults: 0, has_value_after_defaults: false },
+            );
+        }
+        inner_type.deserialize_prefix_async(reader, &mut sub_state).await
     }
 
     async fn read<R: ClickHouseRead>(
@@ -33,7 +38,13 @@ impl Deserializer for NullableDeserializer {
         let mut mask = vec![0u8; rows];
         let _ = reader.read_exact(&mut mask).await?;
 
-        let mut out = type_.strip_null().deserialize_column(reader, rows, state).await?;
+        let mut sub_state = DeserializerState::default();
+        if matches!(state.type_specific, crate::formats::TypeSpecificState::Sparse(_)) {
+            sub_state.type_specific = crate::formats::TypeSpecificState::Sparse(
+                crate::formats::SparseState { has_custom: true, use_custom: None, num_trailing_defaults: 0, has_value_after_defaults: false },
+            );
+        }
+        let mut out = type_.strip_null().deserialize_column(reader, rows, &mut sub_state).await?;
 
         for (i, mask) in mask.iter().enumerate() {
             if *mask != 0 {

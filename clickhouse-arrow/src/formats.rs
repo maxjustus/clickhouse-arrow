@@ -158,6 +158,8 @@ pub enum TypeSpecificState {
     Json(JsonState),
     // Indicates server-side custom/sparse serialization for current column
     Sparse(SparseState),
+    // Composite node with per-child states captured during prefix
+    Composite(Vec<DeserializerState>),
 }
 
 /// State for custom/sparse serialization

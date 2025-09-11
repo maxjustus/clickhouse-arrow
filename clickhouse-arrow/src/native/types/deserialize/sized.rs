@@ -120,12 +120,27 @@ impl SizedDeserializer {
                 Type::Int16 => { let _ = reader.read_i16_le().await?; }
                 Type::Int32 => { let _ = reader.read_i32_le().await?; }
                 Type::Int64 => { let _ = reader.read_i64_le().await?; }
+                Type::Int128 => { let _ = reader.read_i128_le().await?; }
+                Type::Int256 => { let mut buf = [0u8; 32]; let _ = reader.read_exact(&mut buf[..]).await?; }
                 Type::UInt8 => { let _ = reader.read_u8().await?; }
                 Type::UInt16 => { let _ = reader.read_u16_le().await?; }
                 Type::UInt32 => { let _ = reader.read_u32_le().await?; }
                 Type::UInt64 => { let _ = reader.read_u64_le().await?; }
+                Type::UInt128 => { let _ = reader.read_u128_le().await?; }
+                Type::UInt256 => { let mut buf = [0u8; 32]; let _ = reader.read_exact(&mut buf[..]).await?; }
                 Type::Float32 => { let _ = reader.read_u32_le().await?; }
                 Type::Float64 => { let _ = reader.read_u64_le().await?; }
+                Type::Decimal32(_) => { let _ = reader.read_i32_le().await?; }
+                Type::Decimal64(_) => { let _ = reader.read_i64_le().await?; }
+                Type::Decimal128(_) => { let _ = reader.read_i128_le().await?; }
+                Type::Decimal256(_) => { let mut buf = [0u8; 32]; let _ = reader.read_exact(&mut buf[..]).await?; }
+                Type::Date => { let _ = reader.read_u16_le().await?; }
+                Type::Date32 => { let _ = reader.read_i32_le().await?; }
+                Type::DateTime(_) => { let _ = reader.read_u32_le().await?; }
+                Type::DateTime64(_, _) => { let _ = reader.read_u64_le().await?; }
+                Type::Ipv4 => { let _ = reader.read_u32_le().await?; }
+                Type::Ipv6 => { let mut buf = [0u8; 16]; let _ = reader.read_exact(&mut buf[..]).await?; }
+                Type::Uuid => { let _ = reader.read_u64_le().await?; let _ = reader.read_u64_le().await?; }
                 _ => return Err(crate::Error::DeserializeError(format!("Sparse skip not implemented for type: {type_:?}"))),
             }
         }
@@ -138,12 +153,53 @@ impl SizedDeserializer {
                 Type::Int16 => Value::Int16(reader.read_i16_le().await?),
                 Type::Int32 => Value::Int32(reader.read_i32_le().await?),
                 Type::Int64 => Value::Int64(reader.read_i64_le().await?),
+                Type::Int128 => Value::Int128(reader.read_i128_le().await?),
+                Type::Int256 => {
+                    let mut buf = [0u8; 32];
+                    let _ = reader.read_exact(&mut buf[..]).await?;
+                    buf.reverse();
+                    Value::Int256(i256(buf))
+                }
                 Type::UInt8 => Value::UInt8(reader.read_u8().await?),
                 Type::UInt16 => Value::UInt16(reader.read_u16_le().await?),
                 Type::UInt32 => Value::UInt32(reader.read_u32_le().await?),
                 Type::UInt64 => Value::UInt64(reader.read_u64_le().await?),
+                Type::UInt128 => Value::UInt128(reader.read_u128_le().await?),
+                Type::UInt256 => {
+                    let mut buf = [0u8; 32];
+                    let _ = reader.read_exact(&mut buf[..]).await?;
+                    buf.reverse();
+                    Value::UInt256(u256(buf))
+                }
                 Type::Float32 => Value::Float32(f32::from_bits(reader.read_u32_le().await?)),
                 Type::Float64 => Value::Float64(f64::from_bits(reader.read_u64_le().await?)),
+                Type::Decimal32(s) => Value::Decimal32(*s, reader.read_i32_le().await?),
+                Type::Decimal64(s) => Value::Decimal64(*s, reader.read_i64_le().await?),
+                Type::Decimal128(s) => Value::Decimal128(*s, reader.read_i128_le().await?),
+                Type::Decimal256(s) => {
+                    let mut buf = [0u8; 32];
+                    let _ = reader.read_exact(&mut buf[..]).await?;
+                    buf.reverse();
+                    Value::Decimal256(*s, i256(buf))
+                }
+                Type::Date => Value::Date(Date(reader.read_u16_le().await?)),
+                Type::Date32 => Value::Date32(Date32(reader.read_i32_le().await?)),
+                Type::DateTime(tz) => Value::DateTime(DateTime(*tz, reader.read_u32_le().await?)),
+                Type::Ipv4 => Value::Ipv4(Ipv4Addr::from(reader.read_u32_le().await?).into()),
+                Type::Ipv6 => {
+                    let mut octets = [0u8; 16];
+                    let _ = reader.read_exact(&mut octets[..]).await?;
+                    Value::Ipv6(Ipv6Addr::from(octets).into())
+                }
+                Type::DateTime64(precision, tz) => {
+                    let raw = reader.read_u64_le().await?;
+                    Value::DateTime64(DynDateTime64(*tz, raw, *precision))
+                }
+                Type::Uuid => {
+                    let n1 = reader.read_u64_le().await?;
+                    let n2 = reader.read_u64_le().await?;
+                    Value::Uuid(Uuid::from_u128((u128::from(n1) << 64) | u128::from(n2)))
+                }
                 _ => return Err(crate::Error::DeserializeError(format!("Sparse deserialization not implemented for type: {type_:?}"))),
             });
         }
@@ -172,10 +228,14 @@ impl Deserializer for SizedDeserializer {
             if let TypeSpecificState::Sparse(SparseState { has_custom: true, use_custom, .. }) =
                 &mut state.type_specific
             {
-                let toggle = reader.read_var_uint().await?;
-                let use_flag = toggle != 0;
-                *use_custom = Some(use_flag);
-                tracing::debug!(toggle, use_custom = use_flag, ty = ?_type_, "sized sparse prefix toggle (async)");
+                if use_custom.is_none() {
+                    let toggle = reader.read_u8().await?;
+                    let use_flag = toggle != 0;
+                    *use_custom = Some(use_flag);
+                    tracing::debug!(toggle, use_custom = use_flag, ty = ?_type_, "sized sparse prefix toggle (async)");
+                } else {
+                    tracing::trace!(ty = ?_type_, "sized sparse toggle provided at column-level; skipping read");
+                }
             }
             Ok(())
         }
@@ -286,10 +346,12 @@ impl SizedDeserializer {
         if let TypeSpecificState::Sparse(SparseState { has_custom: true, use_custom, .. }) =
             &mut state.type_specific
         {
-            let toggle = reader.try_get_var_uint()?;
-            let use_flag = toggle != 0;
-            *use_custom = Some(use_flag);
-            tracing::debug!(toggle, use_custom = use_flag, ty = ?_type_, "sized sparse prefix toggle (sync)");
+            if use_custom.is_none() {
+                let toggle = reader.try_get_var_uint()?;
+                let use_flag = toggle != 0;
+                *use_custom = Some(use_flag);
+                tracing::debug!(toggle, use_custom = use_flag, ty = ?_type_, "sized sparse prefix toggle (sync)");
+            }
         }
         Ok(())
     }
