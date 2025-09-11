@@ -18,13 +18,9 @@ impl Deserializer for MapDeserializer {
             Type::Map(key, value) => {
                 let nested =
                     Type::Array(Box::new(Type::Tuple(vec![(**key).clone(), (**value).clone()])));
-                let mut sub_state = DeserializerState::default();
-                if matches!(state.type_specific, crate::formats::TypeSpecificState::Sparse(_)) {
-                    sub_state.type_specific = crate::formats::TypeSpecificState::Sparse(
-                        crate::formats::SparseState { has_custom: true, use_custom: None, num_trailing_defaults: 0, has_value_after_defaults: false },
-                    );
-                }
-                nested.deserialize_prefix_async(reader, &mut sub_state).await?;
+                state.cur_path.push(0);
+                nested.deserialize_prefix_async(reader, state).await?;
+                let _ = state.cur_path.pop();
             }
             _ => {
                 return Err(Error::DeserializeError(
@@ -64,21 +60,13 @@ impl Deserializer for MapDeserializer {
         #[expect(clippy::cast_possible_truncation)]
         let total_length = *offsets.last().unwrap() as usize;
 
-        let mut sub_state_keys = DeserializerState::default();
-        if matches!(state.type_specific, crate::formats::TypeSpecificState::Sparse(_)) {
-            sub_state_keys.type_specific = crate::formats::TypeSpecificState::Sparse(
-                crate::formats::SparseState { has_custom: true, use_custom: None, num_trailing_defaults: 0, has_value_after_defaults: false },
-            );
-        }
-        let keys = key.deserialize_column(reader, total_length, &mut sub_state_keys).await?;
+        state.cur_path.push(0);
+        let keys = key.deserialize_column(reader, total_length, state).await?;
+        let _ = state.cur_path.pop();
         assert_eq!(keys.len(), total_length);
-        let mut sub_state_values = DeserializerState::default();
-        if matches!(state.type_specific, crate::formats::TypeSpecificState::Sparse(_)) {
-            sub_state_values.type_specific = crate::formats::TypeSpecificState::Sparse(
-                crate::formats::SparseState { has_custom: true, use_custom: None, num_trailing_defaults: 0, has_value_after_defaults: false },
-            );
-        }
-        let values = value.deserialize_column(reader, total_length, &mut sub_state_values).await?;
+        state.cur_path.push(0);
+        let values = value.deserialize_column(reader, total_length, state).await?;
+        let _ = state.cur_path.pop();
         assert_eq!(values.len(), total_length);
 
         let mut keys = keys.into_iter();

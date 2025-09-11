@@ -1,7 +1,7 @@
 // no extra imports
 
 use super::{DeserializerState, Type};
-use crate::formats::{SparseState, TypeSpecificState};
+// no need for SparseState/TypeSpecificState with plan-based sparse
 use crate::io::ClickHouseRead;
 use crate::native::values::Value;
 use crate::Result;
@@ -21,12 +21,13 @@ pub(crate) async fn read_sparse_async<R: ClickHouseRead>(
     let mut skipped_values_rows: usize = 0;
     let mut first = true;
 
-    let (mut trailing_defaults, mut has_value_after_defaults) = match &state.type_specific {
-        TypeSpecificState::Sparse(SparseState { num_trailing_defaults, has_value_after_defaults, .. }) => {
-            (*num_trailing_defaults, *has_value_after_defaults)
-        }
-        _ => (0, false),
-    };
+    // Per-leaf runtime state based on current path
+    let key = state.cur_path.clone();
+    let (mut trailing_defaults, mut has_value_after_defaults) = state
+        .sparse_runtime
+        .get(&key)
+        .copied()
+        .unwrap_or((0, false));
 
     total_rows = trailing_defaults;
 
@@ -40,7 +41,6 @@ pub(crate) async fn read_sparse_async<R: ClickHouseRead>(
             skipped_values_rows += 1;
             tmp_offset = tmp_offset.saturating_sub(trailing_defaults + 1);
         }
-        has_value_after_defaults = false;
         trailing_defaults = 0;
         total_rows += 1;
     }
@@ -75,42 +75,41 @@ pub(crate) async fn read_sparse_async<R: ClickHouseRead>(
                 tmp_offset = tmp_offset.saturating_sub(group_size + 1);
             }
             trailing_defaults = 0;
-            has_value_after_defaults = false;
             next_total_rows += 1;
         }
         total_rows = next_total_rows;
     }
 
     // Update state for any potential continued reads within this column (rare)
-    if let TypeSpecificState::Sparse(s) = &mut state.type_specific {
-        s.num_trailing_defaults = trailing_defaults;
-        s.has_value_after_defaults = has_value_after_defaults;
-    }
+    state
+        .sparse_runtime
+        .insert(key.clone(), (trailing_defaults, has_value_after_defaults));
 
     // Temporarily disable sparse while reading elements
-    let saved = std::mem::replace(&mut state.type_specific, TypeSpecificState::None);
+    // No need to mutate type_specific; use plan to avoid recursion loops
 
-    // Skip prior values
+    // Skip prior values (ensure nested reads do not recurse into sparse again)
     if skipped_values_rows > 0 {
-        drop(
-            type_
-                .deserialize_column(reader, skipped_values_rows, state)
-                .await?
-        );
+        state.cur_path.push(u16::MAX);
+        let _ = type_
+            .deserialize_column(reader, skipped_values_rows, state)
+            .await?;
+        state.cur_path.pop();
     }
     // Read current values
     let values = if !indices.is_empty() {
-        type_.deserialize_column(reader, indices.len(), state).await?
+        state.cur_path.push(u16::MAX);
+        let vals = type_.deserialize_column(reader, indices.len(), state).await?;
+        state.cur_path.pop();
+        vals
     } else {
         Vec::new()
     };
 
     // Restore sparse state with updated fields
-    state.type_specific = saved;
-    if let TypeSpecificState::Sparse(s) = &mut state.type_specific {
-        s.num_trailing_defaults = trailing_defaults;
-        s.has_value_after_defaults = has_value_after_defaults;
-    }
+    state
+        .sparse_runtime
+        .insert(key, (trailing_defaults, has_value_after_defaults));
 
     // Reconstruct dense
     let mut out = vec![type_.default_value(); rows];
@@ -173,12 +172,7 @@ mod tests {
         let mut reader = BytesReader(bytes.freeze());
         let ty = Type::String;
         let mut state = DeserializerState::default();
-        state.type_specific = TypeSpecificState::Sparse(SparseState {
-            has_custom: true,
-            use_custom: None,
-            num_trailing_defaults: 0,
-            has_value_after_defaults: false,
-        });
+        // No plan needed when calling read_sparse_async directly; runtime state starts empty
 
         let out = read_sparse_async(&ty, &mut reader, 10, &mut state).await.unwrap();
         assert_eq!(out.len(), 10);

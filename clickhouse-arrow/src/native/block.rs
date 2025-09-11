@@ -372,27 +372,40 @@ impl ProtocolData<Self, ()> for Block {
                 error!(?error, "Type deserialize failed: name={name}, type={type_name}");
             })?;
 
-            // Custom/Sparse serialization detection (server-side flag)
-            // If non-zero, the server intends to use custom/sparse serialization for this column.
+            // Custom/Sparse serialization plan (server-side flag + kinds plan)
             let mut _has_custom_serialization = false;
             if revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CUSTOM_SERIALIZATION {
                 _has_custom_serialization = reader.read_u8().await? != 0;
             }
 
             let mut row_data = if rows > 0 {
-                // Initialize sparse state based on column-level kind for direct (non-composite) types only.
-                use crate::formats::{SparseState, TypeSpecificState};
-                state.type_specific = TypeSpecificState::None;
+                // Build a kind plan by consuming kind bytes for this column's type tree.
+                // We parse one kind per node; for Tuple we also parse element kinds recursively.
+                state.kind_plan = None;
+                state.cur_path.clear();
+                state.sparse_runtime.clear();
                 if _has_custom_serialization {
                     tracing::debug!(col = %name, ty = %type_name, "server custom/sparse serialization detected");
-                    state.type_specific = TypeSpecificState::Sparse(SparseState {
-                        has_custom: true,
-                        use_custom: None, // Will be populated by prefix deserializers
-                        num_trailing_defaults: 0,
-                        has_value_after_defaults: false,
-                    });
+                    let mut plan = std::collections::BTreeMap::<Vec<u16>, u8>::new();
+
+                    // Iterative DFS: node first, then children (Tuple only)
+                    let mut stack: Vec<(Vec<u16>, &Type)> = vec![(Vec::new(), &type_)];
+                    while let Some((path, ty)) = stack.pop() {
+                        let kind = reader.read_u8().await?;
+                        let _ = plan.insert(path.clone(), kind);
+                        if let Type::Tuple(children) = ty {
+                            for (idx, child) in children.iter().enumerate().rev() {
+                                let mut next = path.clone();
+                                #[allow(clippy::cast_possible_truncation)]
+                                next.push(idx as u16);
+                                stack.push((next, child));
+                            }
+                        }
+                    }
+                    state.kind_plan = Some(plan);
                 }
 
+                // Let types read any non-sparse prefixes as usual (e.g., LC, variant, dynamic, json)
                 type_.deserialize_prefix_async(reader, state).await?;
 
                 #[allow(clippy::cast_possible_truncation)]
@@ -407,7 +420,10 @@ impl ProtocolData<Self, ()> for Block {
             block.column_types.push((name, type_));
             block.column_data.append(&mut row_data);
 
-            // No per-column sparse state persistence across blocks
+            // Clear per-column plan/state before the next column
+            state.kind_plan = None;
+            state.cur_path.clear();
+            state.sparse_runtime.clear();
         }
 
         Ok(block)

@@ -8,6 +8,8 @@ pub mod progress;
 pub(crate) mod protocol;
 pub mod types;
 pub mod values;
+#[cfg(test)]
+pub(crate) mod test_helpers;
 
 pub use self::error_codes::{ServerError, Severity};
 pub use self::protocol::CompressionMethod;

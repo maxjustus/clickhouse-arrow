@@ -40,3 +40,5 @@ Confirm that we don't already have an API like this that we're duplicating
 
 - [ ] add a random structure round trip test that compares output / input against clickhouse client
 - [ ] add golden file type tests
+
+- we now have sparse state paths for deserialization. Does it make sense to somehow unify that with type specific state?

@@ -7,6 +7,7 @@ pub use arrow::ArrowFormat;
 pub use native::NativeFormat;
 
 use crate::ArrowOptions;
+// BTreeMap is imported later with HashMap
 
 /// Marker trait for various client formats.
 ///
@@ -62,9 +63,17 @@ pub(crate) mod sealed {
 /// Context maintained during deserialization
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct DeserializerState<T: Default = ()> {
-    pub(crate) options:       Option<ArrowOptions>,
-    pub(crate) deserializer:  T,
-    pub(crate) type_specific: TypeSpecificState,
+    pub(crate) options:        Option<ArrowOptions>,
+    pub(crate) deserializer:   T,
+    pub(crate) type_specific:  TypeSpecificState,
+    // Sparse/custom plan and traversal state
+    // When present, maps a type-path (sequence of child indexes from column root)
+    // to a kind byte (0 = DEFAULT, non-zero = SPARSE).
+    pub(crate) kind_plan:      Option<BTreeMap<Vec<u16>, u8>>,
+    // Current position in the type tree while deserializing values
+    pub(crate) cur_path:       Vec<u16>,
+    // Runtime sparse state per leaf path: (num_trailing_defaults, has_value_after_defaults)
+    pub(crate) sparse_runtime: BTreeMap<Vec<u16>, (usize, bool)>,
 }
 
 impl<T: Default> DeserializerState<T> {
@@ -158,16 +167,14 @@ pub enum TypeSpecificState {
     Json(JsonState),
     // Indicates server-side custom/sparse serialization for current column
     Sparse(SparseState),
-    // Composite node with per-child states captured during prefix
-    Composite(Vec<DeserializerState>),
 }
 
 /// State for custom/sparse serialization
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SparseState {
-    pub has_custom: bool,
-    pub use_custom: Option<bool>,
-    pub num_trailing_defaults: usize,
+    pub has_custom:               bool,
+    pub use_custom:               Option<bool>,
+    pub num_trailing_defaults:    usize,
     pub has_value_after_defaults: bool,
     // Future: we could add thresholds or stats here
 }
