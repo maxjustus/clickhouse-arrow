@@ -847,7 +847,7 @@ impl JsonSerializer {
         JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED
     }
 
-    // sync JSON paths header writer removed
+    
 
     /// Write paths header based on version (async)
     async fn write_paths_header_async<W: ClickHouseWrite>(
@@ -871,7 +871,7 @@ impl JsonSerializer {
         Ok(())
     }
 
-    // sync JSON write_prefix removed
+    
 }
 
 impl Serializer for JsonSerializer {
@@ -1053,7 +1053,7 @@ impl Serializer for JsonSerializer {
         Ok(())
     }
 
-    // sync JSON write removed
+    
 }
 
 #[cfg(test)]

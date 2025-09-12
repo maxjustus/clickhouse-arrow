@@ -137,7 +137,7 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
         Ok(())
     }
 
-    // Sync write removed from ProtocolData; async-only
+    
 
     #[instrument(level = "trace", name = "clickhouse.deserialize.arrow" skip_all)]
     async fn read_async<R: ClickHouseRead>(
@@ -213,7 +213,7 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
         Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)?)
     }
 
-    // Sync read removed from ProtocolData; async-only
+    
 }
 
 #[cfg(test)]

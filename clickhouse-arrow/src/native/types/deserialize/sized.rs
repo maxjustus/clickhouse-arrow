@@ -31,7 +31,7 @@ impl Deserializer for SizedDeserializer {
         read_with_path(type_, reader, rows, state, &mut path).await
     }
 
-    // sync sized deserialization removed
+    
 }
 
 pub(crate) async fn read_with_path<R: ClickHouseRead>(
@@ -158,7 +158,7 @@ mod tests {
         buf.extend_from_slice(&tmp[..pos]);
     }
 
-    // sync-only sparse test removed
+    
 
     // toggle-based sparse prefix is not used for sized types; offsets terminate at end-of-granule flag
 }

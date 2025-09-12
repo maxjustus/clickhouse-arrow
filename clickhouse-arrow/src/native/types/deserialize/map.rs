@@ -80,7 +80,7 @@ impl Deserializer for MapDeserializer {
         Ok(out)
     }
 
-    // sync map deserialization removed
+    
 }
 
 pub(crate) async fn read_with_path<R: ClickHouseRead>(

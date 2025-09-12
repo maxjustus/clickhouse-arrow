@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-clickhouse-arrow = { path = "../clickhouse-arrow", features = ["test-utils", "derive"] }
+clickhouse-arrow = { path = "../clickhouse-arrow", features = ["test-utils", "derive", "serde"] }
 anyhow = "1.0"
 bytes = "1.0"
 clap = { version = "4.0", features = ["derive"] }

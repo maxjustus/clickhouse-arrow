@@ -56,6 +56,8 @@ impl ClickHouseClient {
         Ok(Self { client, tcp_dump_config })
     }
 
+    pub fn native_client(&self) -> &Client<NativeFormat> { &self.client }
+
     /// Execute a query and return results as JSON
     pub async fn execute_query(
         &self,

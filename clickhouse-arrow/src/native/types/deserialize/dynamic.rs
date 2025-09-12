@@ -123,7 +123,7 @@ impl DynamicDeserializer {
         Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
     }
 
-    // sync Dynamic internal read removed
+    
 
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
         _type: &Type,
@@ -225,7 +225,7 @@ impl DynamicDeserializer {
         Ok(())
     }
 
-    // sync Dynamic read removed
+    
 }
 
 #[cfg(test)]

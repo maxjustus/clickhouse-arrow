@@ -46,7 +46,7 @@ impl Serializer for ObjectSerializer {
         Ok(())
     }
 
-    // sync object serialization removed
+    
 }
 
 impl ObjectSerializer {

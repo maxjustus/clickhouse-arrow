@@ -1749,8 +1749,7 @@ impl InsertInto<'_> {
     pub async fn finish(mut self) -> Result<()> { self.flush().await }
 }
 
-// fetch_table_columns removed: header-driven serialization is now the source of truth
-// escape_ident removed
+
 
 fn map_cell_to_value(
     cell: Option<&serde_json::Value>,

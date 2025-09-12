@@ -43,7 +43,7 @@ impl Deserializer for NullableDeserializer {
         Ok(out)
     }
 
-    // sync nullable deserialization removed
+    
 }
 
 pub(crate) async fn read_with_path<R: ClickHouseRead>(

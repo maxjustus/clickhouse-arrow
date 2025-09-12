@@ -90,7 +90,7 @@ impl Serializer for LowCardinalitySerializer {
         Ok(())
     }
 
-    // sync low-cardinality serialization removed
+    
 }
 
 impl LowCardinalitySerializer {

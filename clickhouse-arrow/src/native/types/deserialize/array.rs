@@ -70,7 +70,7 @@ impl<T: ArrayDeserializerGeneric + 'static> Deserializer for T {
         Ok(out)
     }
 
-    // sync array deserialization removed
+    
 }
 
 pub(crate) async fn read_with_path<R: ClickHouseRead>(

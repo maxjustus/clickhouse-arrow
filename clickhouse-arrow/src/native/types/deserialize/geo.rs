@@ -39,7 +39,7 @@ impl Deserializer for PointDeserializer {
         Ok(points)
     }
 
-    // sync geo deserialization removed
+    
 }
 macro_rules! array_deser {
     ($name:ident, $item:ty) => {

@@ -110,7 +110,7 @@ impl JsonDeserializer {
         }
     }
 
-    // sync JSON internal read removed
+    
 
     /// Set a value at a nested path in a JSON object map
     fn set_nested_value(
@@ -345,7 +345,7 @@ impl Deserializer for JsonDeserializer {
         Self::read_json_internal_async(reader, rows, state).await
     }
 
-    // sync JSON read removed
+    
 }
 
 impl JsonDeserializer {

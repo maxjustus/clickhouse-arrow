@@ -52,5 +52,5 @@ impl Deserializer for ObjectDeserializer {
         }
     }
 
-    // sync object deserialization removed
+    
 }

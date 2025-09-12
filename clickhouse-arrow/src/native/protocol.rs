@@ -320,12 +320,12 @@ impl LogData {
 /// Emitted by `ClickHouse` during operations.
 #[derive(Debug, Clone, Default)]
 pub struct ProfileEvent {
-    pub(crate) host_name:    String,
-    pub(crate) current_time: String,
-    pub(crate) thread_id:    u64,
-    pub(crate) type_code:    i8,
-    pub(crate) name:         String,
-    pub(crate) value:        i64,
+    pub host_name:    String,
+    pub current_time: String,
+    pub thread_id:    u64,
+    pub type_code:    i8,
+    pub name:         String,
+    pub value:        i64,
 }
 
 impl ProfileEvent {

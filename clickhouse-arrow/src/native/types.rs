@@ -542,7 +542,6 @@ impl Type {
         .boxed()
     }
 
-    // sync column deserialization removed — use async deserialize_column()
 
     pub(crate) fn serialize_column<'a, W: ClickHouseWrite>(
         &'a self,
@@ -628,7 +627,6 @@ impl Type {
         .boxed()
     }
 
-    // sync column serialization removed — use async serialize_column()
 
     #[expect(clippy::too_many_lines)]
     pub(crate) fn validate(&self) -> Result<()> {

@@ -8,7 +8,6 @@ use crate::native::types::deserialize::{ClickHouseNativeDeserializer, Deserializ
 use crate::native::types::{Type, Value};
 
 const NULL_DISCRIMINATOR: u8 = 0xFF;
-const MAX_VARIANT_ROWS: usize = 1_000_000;
 
 /// Represents a mapping from discriminator values to types and their string representations
 #[derive(Debug, Clone)]

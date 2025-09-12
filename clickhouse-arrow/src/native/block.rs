@@ -451,7 +451,7 @@ impl ProtocolData<Self, ()> for Block {
         Ok(block)
     }
 
-    // Sync read removed; async-only path is supported
+    
 }
 
 fn format_type_for_header(

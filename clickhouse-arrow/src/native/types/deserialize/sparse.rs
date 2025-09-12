@@ -110,15 +110,7 @@ async fn read_n_dense<R: ClickHouseRead>(
     Ok(out)
 }
 
-pub(crate) async fn read_sparse_async<R: ClickHouseRead>(
-    type_: &Type,
-    reader: &mut R,
-    rows: usize,
-    state: &mut DeserializerState,
-) -> Result<Vec<Value>> {
-    let mut path = Vec::new();
-    read_sparse_with_path(type_, reader, rows, state, &mut path).await
-}
+//
 
 pub(crate) async fn read_sparse_with_path<R: ClickHouseRead>(
     type_: &Type,
@@ -270,7 +262,10 @@ mod tests {
         let mut state = DeserializerState::default();
         // No plan needed when calling read_sparse_async directly; runtime state starts empty
 
-        let out = read_sparse_async(&ty, &mut reader, 10, &mut state).await.unwrap();
+        let mut path = Vec::new();
+        let out = read_sparse_with_path(&ty, &mut reader, 10, &mut state, &mut path)
+            .await
+            .unwrap();
         assert_eq!(out.len(), 10);
         let get_str = |v: &Value| match v { Value::String(s) => String::from_utf8_lossy(s).to_string(), _ => panic!("expected String") };
         assert_eq!(get_str(&out[0]), "");

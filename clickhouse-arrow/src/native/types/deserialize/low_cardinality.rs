@@ -178,5 +178,5 @@ impl Deserializer for LowCardinalityDeserializer {
         })
     }
 
-    // sync low-cardinality deserialization removed
+    
 }

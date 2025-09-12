@@ -27,7 +27,7 @@ impl Deserializer for StringDeserializer {
         read_with_path(type_, reader, rows, state, &mut path).await
     }
 
-    // sync string deserialization removed
+    
 }
 
 pub(crate) async fn read_with_path<R: ClickHouseRead>(
