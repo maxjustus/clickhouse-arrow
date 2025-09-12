@@ -63,7 +63,7 @@ impl super::sealed::ClientFormatImpl<RecordBatch> for ArrowFormat {
                 .await
                 .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "serialize"))?;
             // Flush frames but do not shutdown the underlying socket
-            let _ = sc.flush().await;
+            drop(sc.flush().await);
         }
 
         Ok(())

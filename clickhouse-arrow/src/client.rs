@@ -40,7 +40,7 @@ use crate::constants::*;
 use crate::formats::{ClientFormat, NativeFormat};
 use crate::native::block::Block;
 use crate::native::block_info::BlockInfo;
-use crate::native::protocol::{CompressionMethod, ProfileEvent};
+use crate::native::protocol::{CompressionMethod, LogData, ProfileEvent, ProfileInfo};
 use crate::prelude::*;
 use crate::query::{ParsedQuery, QueryParams};
 use crate::schema::CreateOptions;
@@ -92,6 +92,8 @@ pub struct Event {
 pub enum ClickHouseEvent {
     Progress(Progress),
     Profile(Vec<ProfileEvent>),
+    Log(Vec<LogData>),
+    ProfileInfo(ProfileInfo),
 }
 
 /// A thread-safe handle for interacting with a `ClickHouse` database over its native protocol.

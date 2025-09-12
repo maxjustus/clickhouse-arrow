@@ -117,3 +117,12 @@ e2e_test!(
     TRACING_DIRECTIVES,
     None
 );
+
+// Sparse/custom nested Tuple e2e
+#[cfg(feature = "derive")]
+e2e_test!(
+    e2e_sparse_tuple_nested,
+    tests::sparse::test_sparse_tuple_nested_e2e,
+    TRACING_DIRECTIVES,
+    None
+);

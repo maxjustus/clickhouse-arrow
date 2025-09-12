@@ -244,7 +244,7 @@ impl<'a, R: ClickHouseRead> DecompressionReader<'a, R> {
     /// - Decompression errors
     /// - I/O errors reading from the underlying stream
     /// - Memory safety violations (chunk sizes exceeding limits)
-    #[cfg_attr(not(test), expect(unused))]
+    #[cfg_attr(not(test), allow(unused))]
     pub(crate) async fn new(mode: CompressionMethod, inner: &'a mut R) -> Result<Self> {
         // Decompress intial block
         let decompressed = decompress_data_async(inner, mode).await.inspect_err(|error| {
@@ -326,7 +326,7 @@ pub(crate) struct StreamingCompressor<W: AsyncWrite + Unpin> {
 }
 
 impl<W: AsyncWrite + Unpin> StreamingCompressor<W> {
-    pub fn new(inner: W, method: CompressionMethod, max_uncompressed_chunk: usize) -> Self {
+    pub(crate) fn new(inner: W, method: CompressionMethod, max_uncompressed_chunk: usize) -> Self {
         Self {
             inner,
             method,

@@ -366,6 +366,10 @@ impl<T: ClientFormat> InternalConn<T> {
                 let event = ClickHouseEvent::Profile(info);
                 let _ = self.events.send(Event { event, qid, client_id }).ok();
             }
+            ServerPacket::Log(logs) => {
+                let event = ClickHouseEvent::Log(logs);
+                let _ = self.events.send(Event { event, qid, client_id }).ok();
+            }
             ServerPacket::Progress(progress) => {
                 let event = ClickHouseEvent::Progress(progress);
                 let _ = self.events.send(Event { event, qid, client_id }).ok();
@@ -388,10 +392,10 @@ impl<T: ClientFormat> InternalConn<T> {
             ServerPacket::Hello(_) => {
                 return Err(Error::Protocol("Unexpected Server Hello".to_string()));
             }
-            // Ignored
-            // TODO: Should profile info be returned to caller?
+            // Publish as event
             ServerPacket::ProfileInfo(info) => {
-                debug!(?info, "Profile info");
+                let event = ClickHouseEvent::ProfileInfo(info);
+                let _ = self.events.send(Event { event, qid, client_id }).ok();
             }
             ServerPacket::Ignore(ignored) => trace!(ignored = ignored.as_ref(), "Ignored packet"),
 

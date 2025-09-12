@@ -73,6 +73,16 @@ impl<R: ClickHouseRead + 'static> Reader<R> {
             ServerPacketId::Progress => {
                 Self::read_progress(reader, revision).await.map(ServerPacket::Progress)
             }
+            // Accept pre-header events/logs/info as some servers may emit them early
+            ServerPacketId::ProfileEvents => Self::read_profile_events(reader, revision, metadata)
+                .await
+                .map(ServerPacket::ProfileEvents),
+            ServerPacketId::Log => {
+                Self::read_log_data(reader, revision, metadata).await.map(ServerPacket::Log)
+            }
+            ServerPacketId::ProfileInfo => {
+                Self::read_profile_info(reader, revision).await.map(ServerPacket::ProfileInfo)
+            }
             ServerPacketId::TableColumns => {
                 Self::read_table_columns(reader).await.map(ServerPacket::TableColumns)
             }

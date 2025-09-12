@@ -7,6 +7,7 @@ pub use arrow::ArrowFormat;
 pub use native::NativeFormat;
 
 use crate::ArrowOptions;
+// no futures needed after refactor
 // BTreeMap is imported later with HashMap
 
 /// Marker trait for various client formats.
@@ -70,11 +71,13 @@ pub(crate) struct DeserializerState<T: Default = ()> {
     // When present, maps a type-path (sequence of child indexes from column root)
     // to a kind byte (0 = DEFAULT, non-zero = SPARSE).
     pub(crate) kind_plan:      Option<BTreeMap<Vec<u16>, u8>>,
-    // Current position in the type tree while deserializing values
-    pub(crate) cur_path:       Vec<u16>,
     // Runtime sparse state per leaf path: (num_trailing_defaults, has_value_after_defaults)
     pub(crate) sparse_runtime: BTreeMap<Vec<u16>, (usize, bool)>,
 }
+
+/// RAII helper to push an index onto a path stack and ensure it is popped
+/// even on early returns or panics.
+// No path guard utilities needed with explicit path parameter design
 
 impl<T: Default> DeserializerState<T> {
     #[must_use]
@@ -165,16 +168,4 @@ pub enum TypeSpecificState {
     None,
     Dynamic(DynamicState),
     Json(JsonState),
-    // Indicates server-side custom/sparse serialization for current column
-    Sparse(SparseState),
-}
-
-/// State for custom/sparse serialization
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SparseState {
-    pub has_custom:               bool,
-    pub use_custom:               Option<bool>,
-    pub num_trailing_defaults:    usize,
-    pub has_value_after_defaults: bool,
-    // Future: we could add thresholds or stats here
 }

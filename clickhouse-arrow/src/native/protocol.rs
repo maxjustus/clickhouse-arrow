@@ -242,17 +242,16 @@ impl ServerException {
     pub(crate) fn emit(self) -> ServerError { map_exception_to_error(self) }
 }
 
-#[expect(unused)]
-#[derive(Debug, Clone)]
-pub(crate) struct ProfileInfo {
-    pub(crate) rows:                         u64,
-    pub(crate) blocks:                       u64,
-    pub(crate) bytes:                        u64,
-    pub(crate) applied_limit:                bool,
-    pub(crate) rows_before_limit:            u64,
-    pub(crate) calculated_rows_before_limit: bool,
-    pub(crate) applied_aggregation:          bool,
-    pub(crate) rows_before_aggregation:      u64,
+#[derive(Debug, Clone, Copy)]
+pub struct ProfileInfo {
+    pub rows:                         u64,
+    pub blocks:                       u64,
+    pub bytes:                        u64,
+    pub applied_limit:                bool,
+    pub rows_before_limit:            u64,
+    pub calculated_rows_before_limit: bool,
+    pub applied_aggregation:          bool,
+    pub rows_before_aggregation:      u64,
 }
 
 #[expect(unused)]
@@ -275,15 +274,15 @@ pub(crate) struct TablesStatusResponse {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct LogData {
-    pub(crate) time:       String,
-    pub(crate) time_micro: u32,
-    pub(crate) host_name:  String,
-    pub(crate) query_id:   String,
-    pub(crate) thread_id:  u64,
-    pub(crate) priority:   i8,
-    pub(crate) source:     String,
-    pub(crate) text:       String,
+pub struct LogData {
+    pub time:       String,
+    pub time_micro: u32,
+    pub host_name:  String,
+    pub query_id:   String,
+    pub thread_id:  u64,
+    pub priority:   i8,
+    pub source:     String,
+    pub text:       String,
 }
 
 impl LogData {

@@ -13,3 +13,4 @@ pub(crate) mod test_helpers;
 
 pub use self::error_codes::{ServerError, Severity};
 pub use self::protocol::CompressionMethod;
+pub use self::protocol::{LogData, ProfileInfo};

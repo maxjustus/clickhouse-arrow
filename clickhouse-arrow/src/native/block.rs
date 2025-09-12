@@ -382,24 +382,47 @@ impl ProtocolData<Self, ()> for Block {
                 // Build a kind plan by consuming kind bytes for this column's type tree.
                 // We parse one kind per node; for Tuple we also parse element kinds recursively.
                 state.kind_plan = None;
-                state.cur_path.clear();
                 state.sparse_runtime.clear();
                 if _has_custom_serialization {
                     tracing::debug!(col = %name, ty = %type_name, "server custom/sparse serialization detected");
                     let mut plan = std::collections::BTreeMap::<Vec<u16>, u8>::new();
 
-                    // Iterative DFS: node first, then children (Tuple only)
+                    // Iterative DFS: node first, then children
+                    // Tuple emits a kind for itself and all children; for Array/Map/Nullable,
+                    // servers may include child kinds as well — handle them recursively.
                     let mut stack: Vec<(Vec<u16>, &Type)> = vec![(Vec::new(), &type_)];
                     while let Some((path, ty)) = stack.pop() {
                         let kind = reader.read_u8().await?;
                         let _ = plan.insert(path.clone(), kind);
-                        if let Type::Tuple(children) = ty {
-                            for (idx, child) in children.iter().enumerate().rev() {
-                                let mut next = path.clone();
-                                #[allow(clippy::cast_possible_truncation)]
-                                next.push(idx as u16);
-                                stack.push((next, child));
+                        match ty {
+                            Type::Tuple(children) => {
+                                for (idx, child) in children.iter().enumerate().rev() {
+                                    let mut next = path.clone();
+                                    #[allow(clippy::cast_possible_truncation)]
+                                    next.push(idx as u16);
+                                    stack.push((next, child));
+                                }
                             }
+                            Type::Array(inner) => {
+                                let mut next = path.clone();
+                                next.push(0);
+                                stack.push((next, inner));
+                            }
+                            Type::Map(key, value) => {
+                                let mut kpath = path.clone();
+                                kpath.push(0);
+                                stack.push((kpath, key));
+                                let mut vpath = path.clone();
+                                vpath.push(1);
+                                stack.push((vpath, value));
+                            }
+                            Type::Nullable(inner) => {
+                                let mut next = path.clone();
+                                next.push(0);
+                                stack.push((next, inner));
+                            }
+                            // Do not descend into LowCardinality/Variant/JSON/Dynamic/Object
+                            _ => {}
                         }
                     }
                     state.kind_plan = Some(plan);
@@ -422,7 +445,6 @@ impl ProtocolData<Self, ()> for Block {
 
             // Clear per-column plan/state before the next column
             state.kind_plan = None;
-            state.cur_path.clear();
             state.sparse_runtime.clear();
         }
 

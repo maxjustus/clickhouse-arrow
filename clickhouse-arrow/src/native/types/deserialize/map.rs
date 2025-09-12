@@ -18,9 +18,7 @@ impl Deserializer for MapDeserializer {
             Type::Map(key, value) => {
                 let nested =
                     Type::Array(Box::new(Type::Tuple(vec![(**key).clone(), (**value).clone()])));
-                state.cur_path.push(0);
                 nested.deserialize_prefix_async(reader, state).await?;
-                let _ = state.cur_path.pop();
             }
             _ => {
                 return Err(Error::DeserializeError(
@@ -60,13 +58,9 @@ impl Deserializer for MapDeserializer {
         #[expect(clippy::cast_possible_truncation)]
         let total_length = *offsets.last().unwrap() as usize;
 
-        state.cur_path.push(0);
         let keys = key.deserialize_column(reader, total_length, state).await?;
-        let _ = state.cur_path.pop();
         assert_eq!(keys.len(), total_length);
-        state.cur_path.push(0);
         let values = value.deserialize_column(reader, total_length, state).await?;
-        let _ = state.cur_path.pop();
         assert_eq!(values.len(), total_length);
 
         let mut keys = keys.into_iter();
@@ -87,4 +81,67 @@ impl Deserializer for MapDeserializer {
     }
 
     // sync map deserialization removed
+}
+
+pub(crate) async fn read_with_path<R: ClickHouseRead>(
+    type_: &Type,
+    reader: &mut R,
+    rows: usize,
+    state: &mut DeserializerState,
+    path: &mut Vec<u16>,
+) -> Result<Vec<Value>> {
+    use crate::native::protocol::MAX_STRING_SIZE;
+    use crate::native::values::Value;
+    if rows > MAX_STRING_SIZE {
+        return Err(Error::Protocol(format!(
+            "read_n response size too large for map. {rows} > {MAX_STRING_SIZE}"
+        )));
+    }
+    if rows == 0 {
+        return Ok(vec![]);
+    }
+
+    let Type::Map(key, value) = type_ else {
+        return Err(Error::DeserializeError(
+            "MapDeserializer called with non-map type".to_string(),
+        ));
+    };
+
+    let mut offsets: Vec<u64> = Vec::with_capacity(rows);
+    for _ in 0..rows {
+        offsets.push(reader.read_u64_le().await?);
+    }
+    let total_length = *offsets.last().unwrap() as usize;
+
+    // Read keys under path [0]
+    path.push(0);
+    let keys = key
+        .deserialize_column_with_path(reader, total_length, state, path)
+        .await?;
+    let _ = path.pop();
+    assert_eq!(keys.len(), total_length);
+
+    // Read values under path [1]
+    path.push(1);
+    let values = value
+        .deserialize_column_with_path(reader, total_length, state, path)
+        .await?;
+    let _ = path.pop();
+    assert_eq!(values.len(), total_length);
+
+    let mut keys = keys.into_iter();
+    let mut values = values.into_iter();
+    let mut out = Vec::with_capacity(rows);
+    let mut last_offset = 0u64;
+    for offset in offsets {
+        let mut key_out = vec![];
+        let mut value_out = vec![];
+        while last_offset < offset {
+            key_out.push(keys.next().unwrap());
+            value_out.push(values.next().unwrap());
+            last_offset += 1;
+        }
+        out.push(Value::Map(key_out, value_out));
+    }
+    Ok(out)
 }

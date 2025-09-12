@@ -42,3 +42,4 @@ Confirm that we don't already have an API like this that we're duplicating
 - [ ] add golden file type tests
 
 - we now have sparse state paths for deserialization. Does it make sense to somehow unify that with type specific state?
+- kind_plan is maybe not a great name. serialization_type_by_path is more descriptive?

@@ -27,7 +27,6 @@ use super::values::{
 use crate::formats::{DeserializerState, SerializerState};
 use crate::io::{ClickHouseBytesWrite, ClickHouseRead, ClickHouseWrite};
 use crate::{Date32, Error, Result};
-use crate::native::types::deserialize::sparse::read_sparse_async;
 
 /// A raw `ClickHouse` type.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -456,13 +455,14 @@ impl Display for Type {
 }
 
 impl Type {
-    pub(crate) fn deserialize_column<'a, R: ClickHouseRead>(
+    pub(crate) fn deserialize_column_with_path<'a, R: ClickHouseRead>(
         &'a self,
         reader: &'a mut R,
         rows: usize,
         state: &'a mut DeserializerState,
+        path: &'a mut Vec<u16>,
     ) -> impl Future<Output = Result<Vec<Value>>> + Send + 'a {
-        use deserialize::*;
+        // dispatch handled explicitly below (path-aware)
         async move {
             if rows > MAX_STRING_SIZE {
                 return Err(Error::Protocol(format!(
@@ -470,55 +470,8 @@ impl Type {
                 )));
             }
 
-            // If server indicated custom/sparse serialization, only switch to the
-            // generic sparse reader for complex types when the per-column toggle
-            // explicitly enabled it (use_custom = true). This prevents misaligned
-            // reads when the server advertises capability but chooses dense mode.
-            if matches!(
-                state.type_specific,
-                crate::formats::TypeSpecificState::Sparse(
-                    crate::formats::SparseState {
-                        has_custom: true,
-                        use_custom: Some(true),
-                        ..
-                    }
-                )
-            ) {
-                match self {
-                    Type::Int8
-                    | Type::Int16
-                    | Type::Int32
-                    | Type::Int64
-                    | Type::Int128
-                    | Type::Int256
-                    | Type::UInt8
-                    | Type::UInt16
-                    | Type::UInt32
-                    | Type::UInt64
-                    | Type::UInt128
-                    | Type::UInt256
-                    | Type::Float32
-                    | Type::Float64
-                    | Type::Decimal32(_)
-                    | Type::Decimal64(_)
-                    | Type::Decimal128(_)
-                    | Type::Decimal256(_)
-                    | Type::Uuid
-                    | Type::Date
-                    | Type::Date32
-                    | Type::DateTime(_)
-                    | Type::DateTime64(_, _)
-                    | Type::Ipv4
-                    | Type::Ipv6
-                    | Type::Enum8(_)
-                    | Type::Enum16(_) => {}
-                    _ => {
-                        return read_sparse_async(self, reader, rows, state).await;
-                    }
-                }
-            }
-
             Ok(match self {
+                // Sized primitives
                 Type::Int8
                 | Type::Int16
                 | Type::Int32
@@ -546,41 +499,45 @@ impl Type {
                 | Type::Ipv6
                 | Type::Enum8(_)
                 | Type::Enum16(_) => {
-                    sized::SizedDeserializer::read(self, reader, rows, state).await?
+                    deserialize::sized::read_with_path(self, reader, rows, state, path).await?
                 }
+                // Strings
                 Type::String
                 | Type::FixedSizedString(_)
                 | Type::Binary
                 | Type::FixedSizedBinary(_) => {
-                    string::StringDeserializer::read(self, reader, rows, state).await?
+                    deserialize::string::read_with_path(self, reader, rows, state, path).await?
                 }
-                Type::Array(_) => array::ArrayDeserializer::read(self, reader, rows, state).await?,
-                Type::Ring => geo::RingDeserializer::read(self, reader, rows, state).await?,
-                Type::Polygon => geo::PolygonDeserializer::read(self, reader, rows, state).await?,
-                Type::MultiPolygon => {
-                    geo::MultiPolygonDeserializer::read(self, reader, rows, state).await?
-                }
-                Type::Tuple(_) => tuple::TupleDeserializer::read(self, reader, rows, state).await?,
-                Type::Point => geo::PointDeserializer::read(self, reader, rows, state).await?,
-                Type::Nullable(_) => {
-                    nullable::NullableDeserializer::read(self, reader, rows, state).await?
-                }
-                Type::Map(_, _) => map::MapDeserializer::read(self, reader, rows, state).await?,
-                Type::LowCardinality(_) => {
-                    low_cardinality::LowCardinalityDeserializer::read(self, reader, rows, state)
-                        .await?
-                }
-                Type::Object => object::ObjectDeserializer::read(self, reader, rows, state).await?,
-                Type::Variant(_) => {
-                    variant::VariantDeserializer::read_async(self, reader, rows, state).await?
-                }
-                Type::Dynamic { .. } => {
-                    dynamic::DynamicDeserializer::read_async(self, reader, rows, state).await?
-                }
-                Type::JSON { .. } => {
-                    json::JsonDeserializer::read(self, reader, rows, state).await?
-                }
+                // Composites (path-aware)
+                Type::Array(_) => deserialize::array::read_with_path(self, reader, rows, state, path).await?,
+                Type::Tuple(_) => deserialize::tuple::read_with_path(self, reader, rows, state, path).await?,
+                Type::Nullable(_) => deserialize::nullable::read_with_path(self, reader, rows, state, path).await?,
+                Type::Map(_, _) => deserialize::map::read_with_path(self, reader, rows, state, path).await?,
+
+                // Existing implementations unaffected
+                Type::Ring => deserialize::geo::RingDeserializer::read(self, reader, rows, state).await?,
+                Type::Polygon => deserialize::geo::PolygonDeserializer::read(self, reader, rows, state).await?,
+                Type::MultiPolygon => deserialize::geo::MultiPolygonDeserializer::read(self, reader, rows, state).await?,
+                Type::LowCardinality(_) => deserialize::low_cardinality::LowCardinalityDeserializer::read(self, reader, rows, state).await?,
+                Type::Point => deserialize::geo::PointDeserializer::read(self, reader, rows, state).await?,
+                Type::Variant(_) => deserialize::variant::VariantDeserializer::read_async(self, reader, rows, state).await?,
+                Type::Dynamic { .. } => deserialize::dynamic::DynamicDeserializer::read_async(self, reader, rows, state).await?,
+                Type::JSON { .. } => deserialize::json::JsonDeserializer::read(self, reader, rows, state).await?,
+                Type::Object => deserialize::object::ObjectDeserializer::read(self, reader, rows, state).await?,
             })
+        }
+        .boxed()
+    }
+
+    pub(crate) fn deserialize_column<'a, R: ClickHouseRead>(
+        &'a self,
+        reader: &'a mut R,
+        rows: usize,
+        state: &'a mut DeserializerState,
+    ) -> impl Future<Output = Result<Vec<Value>>> + Send + 'a {
+        async move {
+            let mut path = Vec::<u16>::new();
+            self.deserialize_column_with_path(reader, rows, state, &mut path).await
         }
         .boxed()
     }
