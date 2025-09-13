@@ -72,36 +72,7 @@ pub(crate) async fn compress_data<W: ClickHouseWrite>(
     Ok(())
 }
 
-#[expect(clippy::cast_possible_truncation)]
-pub(crate) async fn compress_data_sync<W: ClickHouseWrite>(
-    writer: &mut W,
-    raw: bytes::Bytes,
-    compression: CompressionMethod,
-) -> Result<()> {
-    let decompressed_size = raw.len();
-    let mut out = match compression {
-        // ZSTD with default compression level (1)
-        CompressionMethod::ZSTD => zstd::bulk::compress(&raw, 1)
-            .map_err(|e| Error::SerializeError(format!("ZSTD compress error: {e}")))?,
-        // LZ4
-        CompressionMethod::LZ4 => lz4_flex::compress(&raw),
-        // None
-        CompressionMethod::None => return Ok(()),
-    };
-
-    let mut new_out = Vec::with_capacity(out.len() + 13);
-    new_out.push(compression.byte());
-    new_out.extend_from_slice(&(out.len() as u32 + 9).to_le_bytes()[..]);
-    new_out.extend_from_slice(&(decompressed_size as u32).to_le_bytes()[..]);
-    new_out.append(&mut out);
-
-    let hash = cityhash_rs::cityhash_102_128(&new_out[..]);
-    writer.write_u64_le((hash >> 64) as u64).await?;
-    writer.write_u64_le(hash as u64).await?;
-    writer.write_all(&new_out[..]).await?;
-
-    Ok(())
-}
+// removed unused compress_data_sync (async compress_data covers usage)
 
 /// Reads and decompresses a single compression chunk.
 ///

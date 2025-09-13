@@ -23,15 +23,6 @@ use crate::io::ClickHouseRead;
 use crate::{Error, Result, Type};
 
 macro_rules! primitive_bulk {
-    ($reader:expr, $rows:expr, $buf:expr, $type:ty) => {{
-        let byte_count = $rows * std::mem::size_of::<$type>();
-        if $buf.capacity() < byte_count {
-            $buf.reserve(byte_count - $buf.capacity());
-        }
-        $buf.resize(byte_count, 0);
-        $reader.try_copy_to_slice(&mut $buf[..byte_count])?;
-        byte_count
-    }};
     (tokio; $reader:expr, $rows:expr, $buf:expr, $type:ty) => {{
         let byte_count = $rows * std::mem::size_of::<$type>();
         if $buf.capacity() < byte_count {
@@ -87,7 +78,6 @@ macro_rules! primitive {
         }
     }};
 }
-pub(crate) use primitive;
 
 // NOTE: Some of these are unused and tbe bulk variation above is used. But useful to keep around
 #[expect(unused)]

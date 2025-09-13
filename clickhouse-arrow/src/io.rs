@@ -92,12 +92,14 @@ impl<T: AsyncWrite + Unpin + Send + Sync> ClickHouseWrite for T {
     }
 }
 
+#[cfg(any(test))]
 pub(crate) trait ClickHouseBytesRead: bytes::Buf {
     fn try_get_var_uint(&mut self) -> Result<u64>;
 
     fn try_get_string(&mut self) -> Result<bytes::Bytes>;
 }
 
+#[cfg(any(test))]
 impl<T: bytes::Buf> ClickHouseBytesRead for T {
     #[inline]
     fn try_get_var_uint(&mut self) -> Result<u64> {
@@ -147,12 +149,14 @@ impl<T: bytes::Buf> ClickHouseBytesRead for T {
     }
 }
 
+#[cfg(any(test))]
 pub(crate) trait ClickHouseBytesWrite: bytes::BufMut {
     fn put_var_uint(&mut self, value: u64) -> Result<()>;
 
     fn put_string<V: AsRef<[u8]>>(&mut self, value: V) -> Result<()>;
 }
 
+#[cfg(any(test))]
 impl<T: bytes::BufMut> ClickHouseBytesWrite for T {
     fn put_var_uint(&mut self, mut value: u64) -> Result<()> {
         let mut buf = [0u8; 9]; // Max 9 bytes for u64

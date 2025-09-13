@@ -2,7 +2,7 @@ use indexmap::IndexSet;
 use tokio::io::AsyncWriteExt;
 
 use super::{Serializer, SerializerState, Type};
-use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
+use crate::io::ClickHouseWrite;
 use crate::native::types::low_cardinality::*;
 use crate::{Result, Value};
 
@@ -87,22 +87,6 @@ impl Serializer for LowCardinalitySerializer {
                 writer.write_u8(index as u8).await?;
             }
         }
-        Ok(())
-    }
-
-    
-}
-
-impl LowCardinalitySerializer {
-    #[allow(clippy::unnecessary_wraps)]
-    pub(crate) fn write_prefix_sync<W: ClickHouseBytesWrite>(
-        _type_: &Type,
-        writer: &mut W,
-        state: &mut SerializerState,
-    ) -> Result<()> {
-        // Always write LC version in prefix (see async version comment).
-        let _ = state; // state is unused for prefix version
-        writer.put_u64_le(LOW_CARDINALITY_VERSION);
         Ok(())
     }
 }

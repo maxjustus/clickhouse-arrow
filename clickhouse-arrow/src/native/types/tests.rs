@@ -778,35 +778,7 @@ fn test_type_validate() {
 
 // Removed sync enum tests
 
-#[test]
-fn test_json_deserialize_prefix_sync_integration() {
-    // This test ensures that JSON types properly call their sync prefix deserializer
-    // in the main dispatch logic in deserialize.rs
-    use std::io::Cursor;
-
-    let json_type = Type::JSON {
-        max_dynamic_paths: None,
-        max_dynamic_types: None,
-        typed_paths:       Vec::default(),
-        skip_exact:        Vec::default(),
-        skip_regex:        Vec::default(),
-    };
-
-    // Create a minimal valid JSON prefix buffer
-    let mut buffer = Vec::new();
-
-    // Write JSON_OBJECT_VERSION_3 = 3
-    buffer.extend_from_slice(&3u64.to_le_bytes());
-
-    // Write total_paths (0 paths for simplicity)
-    buffer.extend_from_slice(&[0u8]); // varint 0
-
-    let mut reader = Cursor::new(buffer);
-
-    // This should call json::JsonDeserializer::read_prefix_sync via the dispatcher
-    let result = json_type.deserialize_prefix(&mut reader, &mut DeserializerState::default());
-    assert!(result.is_ok(), "JSON deserialize_prefix_sync should succeed through dispatcher");
-}
+// Removed legacy sync prefix integration test; async-only path is tested elsewhere.
 
 // Removed sync LowCardinality test; async-only
 /*
@@ -835,7 +807,7 @@ fn roundtrip_low_cardinality_string_sync() {
     // Deserialize (sync) including prefix
     let mut reader = Cursor::new(buf);
     let mut d_state = DeserializerState::default();
-    type_.deserialize_prefix(&mut reader, &mut d_state).unwrap();
+    // removed sync prefix API; async tests cover behavior
     let out = type_.deserialize_column_sync(&mut reader, values.len(), &mut d_state).unwrap();
 
     assert_eq!(out, values);
@@ -868,7 +840,7 @@ fn roundtrip_low_cardinality_nullable_string_sync() {
     // Deserialize (sync) including prefix
     let mut reader = Cursor::new(buf);
     let mut d_state = DeserializerState::default();
-    type_.deserialize_prefix(&mut reader, &mut d_state).unwrap();
+    // removed sync prefix API; async tests cover behavior
     let out = type_.deserialize_column_sync(&mut reader, values.len(), &mut d_state).unwrap();
 
     assert_eq!(out, values);

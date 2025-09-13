@@ -1,16 +1,14 @@
 mod client;
-mod tcp_dump;
 
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use client::ClickHouseClient;
+use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tcp_dump::{DumpFormat, TcpDumpConfig};
 use tokio::io::{AsyncBufReadExt, BufReader as AsyncBufReader};
-use futures::StreamExt as _;
 
 #[derive(Parser, Debug)]
 #[command(name = "clickhouse-test-client")]
@@ -80,22 +78,6 @@ struct Args {
     /// Output format: json, pretty
     #[arg(long, default_value = "json")]
     format: String,
-
-    /// Enable TCP dump output to stdout
-    #[arg(long)]
-    tcp_dump: bool,
-
-    /// Write TCP dump to file instead of stdout
-    #[arg(long)]
-    tcp_dump_file: Option<String>,
-
-    /// TCP dump format: hex, binary, json, pcap
-    #[arg(long, default_value = "hex")]
-    tcp_dump_format: String,
-
-    /// Include verbose TCP dump analysis
-    #[arg(long)]
-    tcp_dump_verbose: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -183,29 +165,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Validate TCP dump format
-    let tcp_dump_format = match args.tcp_dump_format.as_str() {
-        "hex" => DumpFormat::Hex,
-        "binary" => DumpFormat::Binary,
-        "json" => DumpFormat::Json,
-        "pcap" => DumpFormat::Pcap,
-        _ => {
-            output_json(&JsonOutput::error(format!(
-                "Invalid TCP dump format: {}. Supported: hex, binary, json, pcap",
-                args.tcp_dump_format
-            )));
-            std::process::exit(1);
-        }
-    };
-
-    // Create TCP dump config
-    let tcp_dump_config = TcpDumpConfig {
-        enabled:   args.tcp_dump,
-        format:    tcp_dump_format,
-        file_path: args.tcp_dump_file,
-        verbose:   args.tcp_dump_verbose,
-    };
-
     // Initialize ClickHouse client
     let client = match ClickHouseClient::new(
         &args.host,
@@ -215,7 +174,6 @@ async fn main() -> Result<()> {
         &args.database,
         args.secure,
         &args.compression,
-        tcp_dump_config,
     )
     .await
     {
@@ -247,29 +205,30 @@ async fn execute_query(
     settings: Option<String>,
     format: &str,
 ) -> Result<()> {
-    // Parse parameters
-    let params: HashMap<String, Value> = if let Some(params_str) = params {
+    // Parse parameters - TODO: unused
+    let _params: HashMap<String, Value> = if let Some(params_str) = params {
         serde_json::from_str(&params_str).context("Failed to parse query parameters as JSON")?
     } else {
         HashMap::new()
     };
 
-    // Parse settings
-    let settings: HashMap<String, Value> = if let Some(settings_str) = settings {
+    // Parse settings - TODO: unused
+    let _settings: HashMap<String, Value> = if let Some(settings_str) = settings {
         serde_json::from_str(&settings_str).context("Failed to parse query settings as JSON")?
     } else {
         HashMap::new()
     };
 
-    // Split query into statements (basic approach)
+    // Split query into statements (basic approach) - should def be more robust
     let statements: Vec<&str> =
         query.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
 
-    use clickhouse_arrow::{Qid, native::block::Block};
+    use clickhouse_arrow::Qid;
+    use clickhouse_arrow::native::block::Block;
 
     let ch = client.native_client();
     let mut events = ch.subscribe_events();
-    let fmt = format.to_string();
+    let _fmt = format.to_string();
     let _ev_task = tokio::spawn(async move {
         while let Ok(evt) = events.recv().await {
             match evt.event {
@@ -346,7 +305,8 @@ async fn execute_query(
 
             // Split column-major data into per-column row vectors
             let mut data = block.column_data.clone();
-            let mut columns: Vec<(String, clickhouse_arrow::Type, Vec<clickhouse_arrow::Value>)> = Vec::with_capacity(block.column_types.len());
+            let mut columns: Vec<(String, clickhouse_arrow::Type, Vec<clickhouse_arrow::Value>)> =
+                Vec::with_capacity(block.column_types.len());
             for (name, ty) in &block.column_types {
                 let mut col_vals = Vec::with_capacity(rows);
                 for _ in 0..rows {
@@ -360,7 +320,9 @@ async fn execute_query(
                 let mut obj = serde_json::Map::new();
                 for (name, _ty, col_vals) in &columns {
                     let val = &col_vals[row_idx];
-                    let json = val.to_json().unwrap_or_else(|_| serde_json::Value::String(val.to_string()));
+                    let json = val
+                        .to_json()
+                        .unwrap_or_else(|_| serde_json::Value::String(val.to_string()));
                     obj.insert(name.clone(), json);
                 }
                 let v = serde_json::Value::Object(obj);

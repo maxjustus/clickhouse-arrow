@@ -25,7 +25,7 @@ use super::values::{
     u256,
 };
 use crate::formats::{DeserializerState, SerializerState};
-use crate::io::{ClickHouseBytesWrite, ClickHouseRead, ClickHouseWrite};
+use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::{Date32, Error, Result};
 
 /// A raw `ClickHouse` type.
@@ -509,21 +509,53 @@ impl Type {
                     deserialize::string::read_with_path(self, reader, rows, state, path).await?
                 }
                 // Composites (path-aware)
-                Type::Array(_) => deserialize::array::read_with_path(self, reader, rows, state, path).await?,
-                Type::Tuple(_) => deserialize::tuple::read_with_path(self, reader, rows, state, path).await?,
-                Type::Nullable(_) => deserialize::nullable::read_with_path(self, reader, rows, state, path).await?,
-                Type::Map(_, _) => deserialize::map::read_with_path(self, reader, rows, state, path).await?,
+                Type::Array(_) => {
+                    deserialize::array::read_with_path(self, reader, rows, state, path).await?
+                }
+                Type::Tuple(_) => {
+                    deserialize::tuple::read_with_path(self, reader, rows, state, path).await?
+                }
+                Type::Nullable(_) => {
+                    deserialize::nullable::read_with_path(self, reader, rows, state, path).await?
+                }
+                Type::Map(_, _) => {
+                    deserialize::map::read_with_path(self, reader, rows, state, path).await?
+                }
 
                 // Existing implementations unaffected
-                Type::Ring => deserialize::geo::RingDeserializer::read(self, reader, rows, state).await?,
-                Type::Polygon => deserialize::geo::PolygonDeserializer::read(self, reader, rows, state).await?,
-                Type::MultiPolygon => deserialize::geo::MultiPolygonDeserializer::read(self, reader, rows, state).await?,
-                Type::LowCardinality(_) => deserialize::low_cardinality::LowCardinalityDeserializer::read(self, reader, rows, state).await?,
-                Type::Point => deserialize::geo::PointDeserializer::read(self, reader, rows, state).await?,
-                Type::Variant(_) => deserialize::variant::VariantDeserializer::read_async(self, reader, rows, state).await?,
-                Type::Dynamic { .. } => deserialize::dynamic::DynamicDeserializer::read_async(self, reader, rows, state).await?,
-                Type::JSON { .. } => deserialize::json::JsonDeserializer::read(self, reader, rows, state).await?,
-                Type::Object => deserialize::object::ObjectDeserializer::read(self, reader, rows, state).await?,
+                Type::Ring => {
+                    deserialize::geo::RingDeserializer::read(self, reader, rows, state).await?
+                }
+                Type::Polygon => {
+                    deserialize::geo::PolygonDeserializer::read(self, reader, rows, state).await?
+                }
+                Type::MultiPolygon => {
+                    deserialize::geo::MultiPolygonDeserializer::read(self, reader, rows, state)
+                        .await?
+                }
+                Type::LowCardinality(_) => {
+                    deserialize::low_cardinality::LowCardinalityDeserializer::read(
+                        self, reader, rows, state,
+                    )
+                    .await?
+                }
+                Type::Point => {
+                    deserialize::geo::PointDeserializer::read(self, reader, rows, state).await?
+                }
+                Type::Variant(_) => {
+                    deserialize::variant::VariantDeserializer::read_async(self, reader, rows, state)
+                        .await?
+                }
+                Type::Dynamic { .. } => {
+                    deserialize::dynamic::DynamicDeserializer::read_async(self, reader, rows, state)
+                        .await?
+                }
+                Type::JSON { .. } => {
+                    deserialize::json::JsonDeserializer::read(self, reader, rows, state).await?
+                }
+                Type::Object => {
+                    deserialize::object::ObjectDeserializer::read(self, reader, rows, state).await?
+                }
             })
         }
         .boxed()
@@ -541,7 +573,6 @@ impl Type {
         }
         .boxed()
     }
-
 
     pub(crate) fn serialize_column<'a, W: ClickHouseWrite>(
         &'a self,
@@ -626,7 +657,6 @@ impl Type {
         }
         .boxed()
     }
-
 
     #[expect(clippy::too_many_lines)]
     pub(crate) fn validate(&self) -> Result<()> {
@@ -987,61 +1017,9 @@ impl Type {
         }
         Ok(())
     }
-
-    pub(crate) fn put_default<W: ClickHouseBytesWrite>(&self, writer: &mut W) -> Result<()> {
-        match self.strip_null() {
-            Type::String | Type::Binary => {
-                writer.put_string("")?;
-            }
-            Type::FixedSizedString(n) | Type::FixedSizedBinary(n) => {
-                writer.put_slice(&vec![0u8; *n]);
-            }
-            Type::Int8 | Type::Enum8(_) => writer.put_i8(0),
-            Type::Int16 => writer.put_i16_le(0),
-            Type::Int32 | Type::Date32 | Type::Decimal32(_) => writer.put_i32_le(0),
-            Type::Int64 | Type::Decimal64(_) => writer.put_i64_le(0),
-            Type::Int128 | Type::UInt128 | Type::Uuid | Type::Ipv6 | Type::Decimal128(_) => {
-                writer.put_slice(&[0; 16]);
-            }
-            Type::Int256 | Type::UInt256 | Type::Decimal256(_) => writer.put_slice(&[0; 32]),
-            Type::UInt8 => writer.put_u8(0),
-            Type::UInt16 | Type::Date => writer.put_u16_le(0),
-            Type::UInt32 | Type::Ipv4 | Type::DateTime(_) => writer.put_u32_le(0),
-            Type::UInt64 => writer.put_u64_le(0),
-            Type::Float32 => writer.put_f32_le(0.0),
-            Type::Float64 => writer.put_f64_le(0.0),
-            Type::DateTime64(precision, _) => {
-                let bytes = (0_i64).to_le_bytes();
-                writer.put_slice(&bytes[..*precision]);
-            }
-            Type::Array(_) | Type::Map(_, _) => writer.put_var_uint(0)?, // Empty collection
-            Type::Enum16(_) => writer.put_i16(0),
-            // Recursive
-            Type::LowCardinality(inner) => inner.put_default(writer)?,
-            Type::Tuple(inner) => {
-                for t in inner {
-                    t.put_default(writer)?;
-                }
-            }
-            _ => {
-                return Err(Error::SerializeError(format!("No default value for type: {self:?}")));
-            }
-        }
-        Ok(())
-    }
 }
 
 pub(crate) trait Deserializer {
-    // TODO:
-    // Add custom serialization here. Will need to pass in state or via arg.
-    // Example from python:
-    // ```
-    //  def read_state_prefix(self, buf):
-    //     if self.has_custom_serialization:
-    //         use_custom_serialization = read_varint(buf)
-    //         if use_custom_serialization:
-    //             self.serialization = SparseSerialization(self)
-    // ```
     fn read_prefix<R: ClickHouseRead>(
         _type_: &Type,
         _reader: &mut R,

@@ -1026,17 +1026,34 @@ impl<'a> NativeRoundtripTestHarness<'a> {
 /// This reduces boilerplate for common test scenarios
 macro_rules! native_roundtrip_test {
     ($test_name:ident, $block_generator:expr,v3) => {
-        #[tokio::test]
-        async fn $test_name() -> Result<()> {
+        #[tokio::test(flavor = "multi_thread")]
+        async fn $test_name() {
             use std::sync::Arc;
 
-            use clickhouse_arrow::test_utils::{ClickHouseContainer, get_shared_container};
+            use clickhouse_arrow::test_utils::ClickHouseContainer;
 
-            let container: Arc<ClickHouseContainer> = get_shared_container().await;
-            let harness = NativeRoundtripTestHarness::new(&container).with_v3_format();
-            let block = $block_generator;
+            // Use the per-test container harness to ensure cleanup
+            use crate::tests::run_test_with_cleanup;
 
-            harness.run_native_roundtrip_test(stringify!($test_name), &block).await
+            let result = run_test_with_cleanup(
+                stringify!($test_name),
+                |container: Arc<ClickHouseContainer>| async move {
+                    let harness =
+                        NativeRoundtripTestHarness::new(&container).with_v3_format();
+                    let block = $block_generator;
+                    harness
+                        .run_native_roundtrip_test(stringify!($test_name), &block)
+                        .await
+                        .unwrap();
+                },
+                None,
+                None,
+            )
+            .await;
+
+            if let Err(panic) = result {
+                std::panic::resume_unwind(panic);
+            }
         }
     };
 }

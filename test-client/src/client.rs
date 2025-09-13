@@ -1,18 +1,12 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow};
-use clickhouse_arrow::{
-    Client, ClientBuilder, CompressionMethod, InsertOptions, NativeFormat, Qid,
-};
-use futures::StreamExt;
+use clickhouse_arrow::{Client, ClientBuilder, CompressionMethod, InsertOptions, NativeFormat};
 use serde_json::Value;
-
-use crate::tcp_dump::TcpDumpConfig;
 
 /// ClickHouse client wrapper for testing the native format implementation
 pub struct ClickHouseClient {
-    client:          Client<NativeFormat>,
-    tcp_dump_config: TcpDumpConfig,
+    client: Client<NativeFormat>,
 }
 
 impl ClickHouseClient {
@@ -25,15 +19,7 @@ impl ClickHouseClient {
         database: &str,
         secure: bool,
         compression: &str,
-        tcp_dump_config: TcpDumpConfig,
     ) -> Result<Self> {
-        // TCP dump configuration warning
-        if tcp_dump_config.enabled {
-            eprintln!("WARNING: TCP dump support requires deep integration with clickhouse-arrow.");
-            eprintln!("Current implementation captures application-level data only.");
-            eprintln!("For complete raw TCP capture, use the Python script: ./scripts/chc-tcp.py");
-        }
-
         let endpoint =
             if secure { format!("https://{host}:{port}") } else { format!("{host}:{port}") };
 
@@ -53,7 +39,7 @@ impl ClickHouseClient {
 
         let client = builder.build_native().await.context("Failed to build ClickHouse client")?;
 
-        Ok(Self { client, tcp_dump_config })
+        Ok(Self { client })
     }
 
     pub fn native_client(&self) -> &Client<NativeFormat> { &self.client }
@@ -67,24 +53,12 @@ impl ClickHouseClient {
     ) -> Result<Vec<Value>> {
         tracing::debug!("Executing query: {}", query);
 
-        // Log query at application level if TCP dump is enabled
-        if self.tcp_dump_config.enabled {
-            self.log_application_data("QUERY", query.as_bytes());
-        }
-
         // Use high-level JSON query API to get serde_json::Value rows directly
         let rows = self
             .client
             .query_json(query.to_string(), None)
             .await
             .context("Failed to execute query")?;
-
-        // Log response data if enabled
-        if self.tcp_dump_config.enabled {
-            let response_data =
-                serde_json::to_vec(&rows).unwrap_or_else(|_| b"<failed to serialize>".to_vec());
-            self.log_application_data("RESPONSE", &response_data);
-        }
 
         // Convert Vec<Map<..>> into Vec<Value::Object>
         Ok(rows.into_iter().map(Value::Object).collect())
@@ -126,112 +100,5 @@ impl ClickHouseClient {
             .await
             .context("Failed to get server info")?;
         Ok(rows.into_iter().next().map(Value::Object).unwrap_or(Value::Null))
-    }
-
-    /// Log application-level data for TCP dump
-    fn log_application_data(&self, direction: &str, data: &[u8]) {
-        use crate::tcp_dump::DumpFormat;
-
-        match self.tcp_dump_config.format {
-            DumpFormat::Hex => {
-                println!();
-                println!("=== APPLICATION LEVEL {} ({} bytes) ===", direction, data.len());
-
-                // Print hex dump with ASCII sidebar
-                for (i, chunk) in data.chunks(16).enumerate() {
-                    print!("{:08x}  ", i * 16);
-
-                    // Print hex bytes
-                    for (j, byte) in chunk.iter().enumerate() {
-                        if j == 8 {
-                            print!(" ");
-                        }
-                        print!("{:02x} ", byte);
-                    }
-
-                    // Pad if chunk is less than 16 bytes
-                    if chunk.len() < 16 {
-                        for j in chunk.len()..16 {
-                            if j == 8 {
-                                print!(" ");
-                            }
-                            print!("   ");
-                        }
-                    }
-
-                    print!(" |");
-
-                    // Print ASCII representation
-                    for &byte in chunk {
-                        if byte >= 32 && byte <= 126 {
-                            print!("{}", byte as char);
-                        } else {
-                            print!(".");
-                        }
-                    }
-
-                    println!("|");
-                }
-            }
-            DumpFormat::Json => {
-                let json_data = serde_json::json!({
-                    "level": "application",
-                    "direction": direction,
-                    "size": data.len(),
-                    "data_hex": hex::encode(data),
-                    "data_utf8": String::from_utf8_lossy(data)
-                });
-                println!("{}", serde_json::to_string(&json_data).unwrap());
-            }
-            DumpFormat::Binary => {
-                use std::io::Write;
-                let _ = std::io::stdout().write_all(data);
-            }
-            DumpFormat::Pcap => {
-                // PCAP format not implemented for application level
-                eprintln!("PCAP format not supported for application-level data");
-            }
-        }
-    }
-}
-
-// Removed custom block conversion and VALUES-based insert in favor of high-level serde APIs
-
-/// Simple base64 encoding helper
-#[cfg(test)]
-fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-
-    for chunk in data.chunks(3) {
-        let mut buf = [0u8; 3];
-        for (i, &byte) in chunk.iter().enumerate() {
-            buf[i] = byte;
-        }
-
-        let b = ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | buf[2] as u32;
-
-        result.push(ALPHABET[((b >> 18) & 63) as usize] as char);
-        result.push(ALPHABET[((b >> 12) & 63) as usize] as char);
-        result.push(if chunk.len() > 1 { ALPHABET[((b >> 6) & 63) as usize] as char } else { '=' });
-        result.push(if chunk.len() > 2 { ALPHABET[(b & 63) as usize] as char } else { '=' });
-    }
-
-    result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Removed VALUES-literal generator in favor of native serde insert; keep base64 test.
-
-    #[test]
-    fn test_base64_encode() {
-        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
     }
 }

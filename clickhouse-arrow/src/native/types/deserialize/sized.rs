@@ -1,26 +1,16 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use tokio::io::AsyncReadExt;
-use std::future::Future;
 use uuid::Uuid;
 
 use super::{Deserializer, DeserializerState, Type};
-use crate::io::{ClickHouseBytesRead, ClickHouseRead};
+use crate::io::ClickHouseRead;
 use crate::native::values::Value;
 use crate::{Date, Date32, DateTime, DynDateTime64, Result, i256, u256};
 
 pub(crate) struct SizedDeserializer;
 
-impl SizedDeserializer {
-    // No sparse toggle parsing here; header plan is parsed in block.rs
-}
-
 impl Deserializer for SizedDeserializer {
-    fn read_prefix<R: ClickHouseRead>(
-        _type_: &Type,
-        _reader: &mut R,
-        _state: &mut DeserializerState,
-    ) -> impl Future<Output = Result<()>> { async move { Ok(()) } }
     async fn read<R: ClickHouseRead>(
         type_: &Type,
         reader: &mut R,
@@ -30,8 +20,6 @@ impl Deserializer for SizedDeserializer {
         let mut path = Vec::new();
         read_with_path(type_, reader, rows, state, &mut path).await
     }
-
-    
 }
 
 pub(crate) async fn read_with_path<R: ClickHouseRead>(
@@ -42,12 +30,8 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
     path: &mut Vec<u16>,
 ) -> Result<Vec<Value>> {
     // If plan says SPARSE for current path, use generic sparse path
-    let sparse_enabled = state
-        .kind_plan
-        .as_ref()
-        .and_then(|p| p.get(path))
-        .map(|&k| k != 0)
-        .unwrap_or(false);
+    let sparse_enabled =
+        state.kind_plan.as_ref().and_then(|p| p.get(path)).map(|&k| k != 0).unwrap_or(false);
 
     if sparse_enabled {
         return super::sparse::read_sparse_with_path(type_, reader, rows, state, path).await;
@@ -110,16 +94,18 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
             }
             Type::Enum8(pairs) => {
                 let idx = reader.read_i8().await?;
-                let value = pairs.iter().find(|(_, i)| *i == idx).ok_or(
-                    crate::Error::DeserializeError(format!("Invalid enum8 index: {idx}")),
-                )?;
+                let value = pairs
+                    .iter()
+                    .find(|(_, i)| *i == idx)
+                    .ok_or(crate::Error::DeserializeError(format!("Invalid enum8 index: {idx}")))?;
                 Value::Enum8(value.0.clone(), idx)
             }
             Type::Enum16(pairs) => {
                 let idx = reader.read_i16_le().await?;
-                let value = pairs.iter().find(|(_, i)| *i == idx).ok_or(
-                    crate::Error::DeserializeError(format!("Invalid enum8 index: {idx}")),
-                )?;
+                let value = pairs
+                    .iter()
+                    .find(|(_, i)| *i == idx)
+                    .ok_or(crate::Error::DeserializeError(format!("Invalid enum8 index: {idx}")))?;
                 Value::Enum16(value.0.clone(), idx)
             }
             _ => {
@@ -130,35 +116,4 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
         });
     }
     Ok(out)
-}
-
-impl SizedDeserializer {
-    pub(crate) fn read_prefix_sync(_type_: &Type, _reader: &mut impl ClickHouseBytesRead, _state: &mut DeserializerState) -> Result<()> { Ok(()) }
-}
-
-#[cfg(test)]
-mod tests {
-    use bytes::BytesMut;
-    // Prefix methods come via trait in other modules; not needed here.
-
-    // Helper to write ClickHouse varUInt into a BytesMut
-    fn put_var_uint(buf: &mut BytesMut, mut value: u64) {
-        let mut tmp = [0u8; 9];
-        let mut pos = 0;
-        while pos < 9 {
-            let mut byte = (value & 0x7F) as u8;
-            value >>= 7;
-            if value > 0 {
-                byte |= 0x80;
-            }
-            tmp[pos] = byte;
-            pos += 1;
-            if value == 0 { break; }
-        }
-        buf.extend_from_slice(&tmp[..pos]);
-    }
-
-    
-
-    // toggle-based sparse prefix is not used for sized types; offsets terminate at end-of-granule flag
 }

@@ -6,7 +6,7 @@ use super::{
     ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type, read_discriminator,
 };
 use crate::formats::{JsonState as JsonStateData, TypeSpecificState};
-use crate::io::{ClickHouseBytesRead, ClickHouseRead};
+use crate::io::ClickHouseRead;
 use crate::native::values::Value;
 use crate::{Error, Result};
 
@@ -109,8 +109,6 @@ impl JsonDeserializer {
             ))),
         }
     }
-
-    
 
     /// Set a value at a nested path in a JSON object map
     fn set_nested_value(
@@ -344,106 +342,10 @@ impl Deserializer for JsonDeserializer {
     ) -> Result<Vec<Value>> {
         Self::read_json_internal_async(reader, rows, state).await
     }
-
-    
 }
 
-impl JsonDeserializer {
-    pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
-        type_: &Type,
-        reader: &mut R,
-        state: &mut DeserializerState,
-    ) -> Result<()> {
-        let version = reader.get_u64_le();
-        if version != JSON_OBJECT_VERSION_FLATTENED {
-            return Err(Error::DeserializeError(format!(
-                "JSON type requires FLATTENED format (version 3), got version {version}. Please \
-                 use ClickHouse server >= 25.6"
-            )));
-        }
+impl JsonDeserializer { /* sync prefix removed; async-only */ }
 
-        // In v3 format, typed paths are NOT in ObjectStructure
-        // They are implicit from the schema passed to the deserializer
-        let typed_paths = match type_ {
-            Type::JSON { typed_paths, .. } => typed_paths
-                .iter()
-                .map(|(name, boxed_type)| (name.clone(), *boxed_type.clone()))
-                .collect(),
-            _ => vec![],
-        };
-
-        // Read flattened (dynamic) paths from ObjectStructure (v3 FLATTENED)
-        let total_paths = reader.try_get_var_uint()?;
-
-        // Read path names
-        let mut all_path_names = Vec::with_capacity(total_paths.try_into().unwrap_or(usize::MAX));
-        for _ in 0..total_paths {
-            let path_bytes = reader.try_get_string()?;
-            let path_name = String::from_utf8(path_bytes.to_vec())
-                .map_err(|e| Error::DeserializeError(format!("Invalid UTF-8 in path: {e}")))?;
-            all_path_names.push(path_name);
-        }
-
-        // Separate typed and dynamic paths (typed are not listed in FLATTENED header)
-        let typed_path_names: std::collections::HashSet<String> =
-            typed_paths.iter().map(|(name, _)| name.clone()).collect();
-        let dynamic_path_names: Vec<String> = all_path_names
-            .iter()
-            .filter(|name| !typed_path_names.contains(*name))
-            .cloned()
-            .collect();
-
-        // Read typed path prefixes using their native serializers (always present)
-        for (_path_name, type_) in &typed_paths {
-            type_.deserialize_prefix(reader, state)?;
-        }
-
-        // Read Dynamic headers for dynamic paths only
-        let mut dynamic_data = Vec::with_capacity(dynamic_path_names.len());
-        for path_name in &dynamic_path_names {
-            // Read Dynamic version
-            let dyn_version = reader.get_u64_le();
-            if dyn_version != 3 {
-                return Err(Error::DeserializeError(format!(
-                    "Expected Dynamic v3 for path '{path_name}', got {dyn_version}"
-                )));
-            }
-
-            // Read types
-            let total_types = reader.try_get_var_uint()?;
-            let mut type_list = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
-            for _ in 0..total_types {
-                type_list.push(Self::parse_type_entry(reader.try_get_string()?.to_vec())?);
-            }
-
-            // Read prefixes for nested types
-            for (_, typ) in &type_list {
-                typ.deserialize_prefix(reader, state)?;
-            }
-
-            dynamic_data.push((total_types, type_list));
-        }
-
-        // Store metadata in state
-        state.type_specific = TypeSpecificState::Json(JsonStateData {
-            version: Some(version),
-            dynamic_paths: dynamic_path_names.clone(),
-            typed_paths,
-            dynamic_path_columns: None,
-            typed_path_columns: None,
-            rows: None,
-            dynamic_data: Some(dynamic_data),
-            path_dynamic_states: BTreeMap::new(),
-            typed_path_states: BTreeMap::new(), // Not used in deserialization
-            // Deprecated fields - leave as default
-            #[allow(deprecated)]
-            paths: vec![],
-            #[allow(deprecated)]
-            path_columns: None,
-        });
-        Ok(())
-    }
-}
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -653,98 +555,7 @@ mod tests {
         ]) => serde_json::json!([["a", 1], ["b", 2]]),
     );
 
-    #[test]
-    fn test_json_read_prefix_sync() {
-        use std::io::Cursor;
-
-        use super::*;
-        use crate::formats::{DeserializerState, TypeSpecificState};
-
-        // Test data matching the async version
-        let mut buffer = Vec::new();
-
-        // Write JSON_OBJECT_VERSION_FLATTENED
-        buffer.extend_from_slice(&JSON_OBJECT_VERSION_FLATTENED.to_le_bytes());
-
-        // Write total_paths (1 path)
-        buffer.extend_from_slice(&[1u8]); // varint 1
-
-        // Write path name "user.name"
-        let path_name = b"user.name";
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            buffer.extend_from_slice(&[path_name.len() as u8]); // varint length
-        }
-        buffer.extend_from_slice(path_name);
-
-        // Write Dynamic version (3)
-        buffer.extend_from_slice(&3u64.to_le_bytes());
-
-        // Write total_types (1 type)
-        buffer.extend_from_slice(&[1u8]); // varint 1
-
-        // Write type name "String"
-        let type_name = b"String";
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            buffer.extend_from_slice(&[type_name.len() as u8]); // varint length
-        }
-        buffer.extend_from_slice(type_name);
-
-        let mut reader = Cursor::new(buffer);
-        let mut state = DeserializerState::default();
-        let json_type = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       Vec::default(),
-            skip_exact:        Vec::default(),
-            skip_regex:        Vec::default(),
-        };
-
-        // Test the sync prefix reading
-        let result = JsonDeserializer::read_prefix_sync(&json_type, &mut reader, &mut state);
-        assert!(result.is_ok(), "read_prefix_sync should succeed");
-
-        // Validate state was properly set
-        match &state.type_specific {
-            TypeSpecificState::Json(json_state) => {
-                assert_eq!(json_state.version, Some(JSON_OBJECT_VERSION_FLATTENED));
-                assert_eq!(json_state.dynamic_paths, vec!["user.name"]);
-                assert!(json_state.dynamic_data.is_some());
-                let dynamic_data = json_state.dynamic_data.as_ref().unwrap();
-                assert_eq!(dynamic_data.len(), 1);
-                assert_eq!(dynamic_data[0].0, 1); // total_types
-                assert_eq!(dynamic_data[0].1.len(), 1); // types vec
-                assert_eq!(dynamic_data[0].1[0].0, "String"); // type name
-            }
-            _ => panic!("Expected Json state"),
-        }
-    }
-
-    #[test]
-    fn test_json_read_prefix_sync_invalid_version() {
-        use std::io::Cursor;
-
-        use super::*;
-        use crate::formats::DeserializerState;
-
-        let mut buffer = Vec::new();
-        buffer.extend_from_slice(&2u64.to_le_bytes()); // Invalid version
-
-        let mut reader = Cursor::new(buffer);
-        let mut state = DeserializerState::default();
-        let json_type = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       Vec::default(),
-            skip_exact:        Vec::default(),
-            skip_regex:        Vec::default(),
-        };
-
-        let result = JsonDeserializer::read_prefix_sync(&json_type, &mut reader, &mut state);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("version 3"));
-    }
+    // Removed sync prefix tests.
 
     // Note: JSON sync roundtrip testing is handled by the integration test
     // in src/native/types/tests.rs (roundtrip_complex_types_sync)

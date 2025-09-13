@@ -11,12 +11,12 @@ pub(crate) mod string;
 pub(crate) mod tuple;
 pub(crate) mod variant;
 
-use super::low_cardinality::LOW_CARDINALITY_VERSION;
+// use super::low_cardinality::LOW_CARDINALITY_VERSION; // no longer used in async-only path
 use crate::native::types::deserialize::sized::SizedDeserializer;
 pub(crate) mod sparse;
 // no direct use here; imported where needed
 use super::*;
-use crate::io::ClickHouseBytesRead;
+// Removed sync bytes reader after eliminating sync deserialization paths.
 
 /// Macro to read discriminator based on size
 /// Used by Dynamic and JSON deserializers for variable-sized discriminators
@@ -40,11 +40,6 @@ pub(crate) trait ClickHouseNativeDeserializer {
         state: &'a mut DeserializerState,
     ) -> impl Future<Output = Result<()>> + Send + 'a;
 
-    fn deserialize_prefix<R: ClickHouseBytesRead>(
-        &self,
-        reader: &mut R,
-        state: &mut DeserializerState,
-    ) -> Result<()>;
 }
 
 impl ClickHouseNativeDeserializer for Type {
@@ -131,93 +126,7 @@ impl ClickHouseNativeDeserializer for Type {
         .boxed()
     }
 
-    fn deserialize_prefix<R: ClickHouseBytesRead>(
-        &self,
-        reader: &mut R,
-        state: &mut DeserializerState,
-    ) -> Result<()> {
-        match self {
-            // Sized primitives: allow reading sparse/custom toggle in sync prefix
-            Type::Int8
-            | Type::Int16
-            | Type::Int32
-            | Type::Int64
-            | Type::Int128
-            | Type::Int256
-            | Type::UInt8
-            | Type::UInt16
-            | Type::UInt32
-            | Type::UInt64
-            | Type::UInt128
-            | Type::UInt256
-            | Type::Float32
-            | Type::Float64
-            | Type::Decimal32(_)
-            | Type::Decimal64(_)
-            | Type::Decimal128(_)
-            | Type::Decimal256(_)
-            | Type::Uuid
-            | Type::Date
-            | Type::Date32
-            | Type::DateTime(_)
-            | Type::DateTime64(_, _)
-            | Type::Ipv4
-            | Type::Ipv6
-            | Type::Enum8(_)
-            | Type::Enum16(_) => {
-                SizedDeserializer::read_prefix_sync(self, reader, state)?;
-            }
-            Type::Array(inner) | Type::Nullable(inner) => {
-                inner.deserialize_prefix(reader, state)?;
-            }
-            Type::Tuple(inner) => {
-                for inner_type in inner {
-                    inner_type.deserialize_prefix(reader, state)?;
-                }
-            }
-            Type::Map(key, value) => {
-                let nested = super::map::normalize_map_type(key, value);
-                nested.deserialize_prefix(reader, state)?;
-            }
-            Type::Point => {
-                for _ in 0..2 {
-                    Type::Float64.deserialize_prefix(reader, state)?;
-                }
-            }
-            Type::LowCardinality(_) => {
-                let version = reader.try_get_u64_le()?;
-                if version != LOW_CARDINALITY_VERSION {
-                    return Err(Error::DeserializeError(format!(
-                        "LowCardinality: invalid low cardinality version: {version}"
-                    )));
-                }
-            }
-            Type::Object => {
-                let _ = reader.try_get_i8()?;
-            }
-            Type::Variant(_) => {
-                // Inline sync variant prefix: read version and nested prefixes
-                let version = reader.try_get_u64_le()?;
-                if version != 0 {
-                    return Err(Error::DeserializeError(format!(
-                        "Unsupported Variant serialization version: {}",
-                        version
-                    )));
-                }
-                for inner_type in self.unwrap_variant()? {
-                    inner_type.deserialize_prefix(reader, &mut DeserializerState::default())?;
-                }
-            }
-            Type::Dynamic { .. } => {
-                dynamic::DynamicDeserializer::read_prefix_sync(self, reader, state)?;
-            }
-            Type::JSON { .. } => {
-                json::JsonDeserializer::read_prefix_sync(self, reader, state)?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
+    // Removed sync deserialize_prefix; async-only prefix is used.
 }
 
 // ---

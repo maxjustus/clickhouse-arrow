@@ -49,7 +49,7 @@ use arrow::array::*;
 use arrow::datatypes::*;
 use tokio::io::AsyncWriteExt;
 
-use crate::io::{ClickHouseBytesWrite, ClickHouseWrite};
+use crate::io::ClickHouseWrite;
 use crate::{Error, Result, Type};
 
 /// Serializes an Arrow array to `ClickHouse`’s native format for `Enum8` or `Enum16` types.
@@ -94,21 +94,7 @@ pub(super) async fn serialize_async<W: ClickHouseWrite>(
     Ok(())
 }
 
-pub(super) fn serialize<W: ClickHouseBytesWrite>(
-    type_hint: &Type,
-    writer: &mut W,
-    values: &ArrayRef,
-) -> Result<()> {
-    match type_hint.strip_null() {
-        Type::Enum8(pairs) => put_enum8_values(values, writer, pairs)?,
-        Type::Enum16(pairs) => put_enum16_values(values, writer, pairs)?,
-        _ => {
-            return Err(Error::ArrowSerialize(format!("Unsupported data type: {type_hint:?}")));
-        }
-    }
-
-    Ok(())
-}
+// Removed sync serializer; async-only path is supported.
 
 /// Macro to generate serialization functions for `Enum8` and `Enum16` types.
 ///
@@ -323,6 +309,8 @@ macro_rules! write_enum_values {
     };
 }
 
+#[cfg(any(test))]
+#[allow(unused_macros)]
 macro_rules! put_enum_values {
     // Enum8 and Enum16
     ($name:ident, enum $pt:ty, $write_fn:ident, [$($kt:ty),*], [$($at:ty),*], [$($st:ty),*]) => {
@@ -333,7 +321,7 @@ macro_rules! put_enum_values {
         #[allow(clippy::cast_possible_wrap)]
         #[allow(clippy::cast_possible_truncation)]
         #[allow(trivial_numeric_casts)]
-        fn $name<W: $crate::io::ClickHouseBytesWrite>(
+        fn $name<W: $crate::io::ClickHouseWrite>(
             column: &::arrow::array::ArrayRef,
             writer: &mut W,
             enum_values: &[(String, $pt)], // From Type::Enum8 or Enum16
@@ -513,22 +501,7 @@ write_enum_values!(
     [i32, i64]
 );
 
-put_enum_values!(
-    put_enum8_values,
-    enum i8,
-    put_i8,
-    [Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type],
-    [Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type],
-    [i32, i64]
-);
-put_enum_values!(
-    put_enum16_values,
-    enum i16,
-    put_i16_le,
-    [Int16Type, Int8Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type],
-    [Int16Type, Int8Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type],
-    [i32, i64]
-);
+// Removed sync put_* invocations.
 
 #[cfg(test)]
 mod tests {
@@ -718,197 +691,6 @@ mod tests {
             &(Arc::new(StringArray::from(Vec::<String>::new())) as ArrayRef),
         )
         .await;
-        assert!(matches!(result, Err(Error::ArrowSerialize(_))));
-    }
-}
-
-#[cfg(test)]
-mod tests_sync {
-    use std::sync::Arc;
-
-    use arrow::array::{DictionaryArray, Int8Array, Int16Array, StringArray};
-    use arrow::datatypes::{Int8Type, Int16Type};
-
-    use super::*;
-
-    type MockWriter = Vec<u8>;
-
-    #[test]
-    fn test_serialize_enum8_dictionary() {
-        let pairs = vec![("a".to_string(), 1_i8), ("b".to_string(), 2_i8)];
-        let keys = Int8Array::from(vec![0, 1, 0]);
-        let values = StringArray::from(vec!["a", "b"]);
-        let array = Arc::new(DictionaryArray::<Int8Type>::try_new(keys, Arc::new(values)).unwrap())
-            as ArrayRef;
-        let mut writer = MockWriter::new();
-        serialize(&Type::Enum8(pairs), &mut writer, &array).unwrap();
-        assert_eq!(writer, vec![1, 2, 1]);
-    }
-
-    #[test]
-    fn test_serialize_enum8_primitive() {
-        let pairs = vec![("a".to_string(), 1_i8), ("b".to_string(), 2_i8)];
-        let array = Arc::new(Int8Array::from(vec![1, 2, 1])) as ArrayRef;
-        let mut writer = MockWriter::new();
-        serialize(&Type::Enum8(pairs), &mut writer, &array).unwrap();
-        assert_eq!(writer, vec![1, 2, 1]);
-    }
-
-    #[test]
-    fn test_serialize_enum8_string() {
-        let pairs = vec![("a".to_string(), 1_i8), ("b".to_string(), 2_i8)];
-        let array = Arc::new(StringArray::from(vec!["a", "b", "a"])) as ArrayRef;
-        let mut writer = MockWriter::new();
-        serialize(&Type::Enum8(pairs), &mut writer, &array).unwrap();
-        assert_eq!(writer, vec![1, 2, 1]);
-    }
-
-    #[test]
-    fn test_serialize_enum8_nullable() {
-        let pairs = vec![("a".to_string(), 1_i8), ("b".to_string(), 2_i8)];
-        let array = Arc::new(StringArray::from(vec![Some("a"), None, Some("a")])) as ArrayRef;
-        let mut writer = MockWriter::new();
-        serialize(&Type::Enum8(pairs), &mut writer, &array).unwrap();
-        assert_eq!(writer, vec![1, 0, 1]);
-    }
-
-    #[test]
-    fn test_serialize_enum16_dictionary() {
-        let pairs = vec![("x".to_string(), 10_i16), ("y".to_string(), 20_i16)];
-        let keys = Int16Array::from(vec![0, 1, 0]);
-        let values = StringArray::from(vec!["x", "y"]);
-        let array = Arc::new(DictionaryArray::<Int16Type>::try_new(keys, Arc::new(values)).unwrap())
-            as ArrayRef;
-        let mut writer = MockWriter::new();
-        serialize(&Type::Enum16(pairs), &mut writer, &array).unwrap();
-        assert_eq!(writer, vec![10, 0, 20, 0, 10, 0]); // Little-endian
-    }
-
-    #[test]
-    fn test_serialize_enum8_empty() {
-        let pairs = vec![("a".to_string(), 1_i8), ("b".to_string(), 2_i8)];
-        let array = Arc::new(Int8Array::from(Vec::<i8>::new())) as ArrayRef;
-        let mut writer = MockWriter::new();
-        serialize(&Type::Enum8(pairs), &mut writer, &array).unwrap();
-        assert!(writer.is_empty());
-    }
-
-    #[test]
-    fn test_serialize_enum8_invalid_value() {
-        let pairs = vec![("a".to_string(), 1_i8), ("b".to_string(), 2_i8)];
-        let array = Arc::new(Int8Array::from(vec![3])) as ArrayRef;
-        let mut writer = MockWriter::new();
-        let result = serialize(&Type::Enum8(pairs), &mut writer, &array);
-        assert!(matches!(
-            result,
-            Err(Error::ArrowSerialize(msg))
-            if msg.contains("Value 3 not found in enum")
-        ));
-    }
-
-    #[test]
-    fn test_serialize_enum8_dictionary_invalid_array() {
-        let array = Arc::new(TimestampSecondArray::from(Vec::<i64>::new())) as ArrayRef;
-        let mut writer = MockWriter::new();
-        let result = serialize(&Type::Enum8(vec![]), &mut writer, &array);
-        assert!(matches!(result, Err(Error::ArrowSerialize(_))));
-    }
-
-    #[test]
-    fn test_serialize_enum8_dictionary_invalid_value() {
-        let pairs = vec![("a".to_string(), 1_i8), ("b".to_string(), 2_i8)];
-        let keys = Int8Array::from(Vec::<i8>::new());
-        let values = TimestampSecondArray::from(Vec::<i64>::new());
-        let array = Arc::new(DictionaryArray::<Int8Type>::try_new(keys, Arc::new(values)).unwrap())
-            as ArrayRef;
-        let mut writer = MockWriter::new();
-        let result = serialize(&Type::Enum8(pairs), &mut writer, &array);
-        assert!(matches!(result, Err(Error::ArrowSerialize(_))));
-    }
-
-    #[test]
-    fn test_serialize_enum8_dictionary_invalid_value_length() {
-        let pairs = vec![("a".to_string(), 1_i8), ("b".to_string(), 2_i8)];
-        let keys = Int8Array::from(vec![0, 1, 0]);
-        let values = StringArray::from(vec!["a", "b", "c"]);
-        let array = Arc::new(DictionaryArray::<Int8Type>::try_new(keys, Arc::new(values)).unwrap())
-            as ArrayRef;
-        let mut writer = MockWriter::new();
-        let result = serialize(&Type::Enum8(pairs), &mut writer, &array);
-        assert!(matches!(result, Err(Error::ArrowSerialize(_))));
-    }
-
-    #[test]
-    fn test_serialize_enum16_uint_type_ok() {
-        let pairs = vec![("x".to_string(), 10_i16), ("y".to_string(), 20_i16)];
-        let array = Arc::new(UInt8Array::from(vec![10])) as ArrayRef;
-        let mut writer = MockWriter::new();
-        let result = serialize(&Type::Enum16(pairs), &mut writer, &array);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_serialize_enum8_negative_values() {
-        let pairs = vec![("neg".to_string(), -1_i8), ("pos".to_string(), 1_i8)];
-        let array = Arc::new(Int8Array::from(vec![-1, 1, -1])) as ArrayRef;
-        let mut writer = MockWriter::new();
-        serialize(&Type::Enum8(pairs), &mut writer, &array).unwrap();
-        assert_eq!(writer, vec![255, 1, 255]); // -1 as i8 = 255
-    }
-
-    #[test]
-    fn test_serialize_enum16_sparse_values() {
-        let pairs = vec![("a".to_string(), 100_i16), ("b".to_string(), 200_i16)];
-        let array = Arc::new(Int16Array::from(vec![100, 200, 100])) as ArrayRef;
-        let mut writer = MockWriter::new();
-        serialize(&Type::Enum16(pairs), &mut writer, &array).unwrap();
-        assert_eq!(writer, vec![100, 0, 200, 0, 100, 0]); // Little-endian
-    }
-
-    #[test]
-    fn test_serialize_enum8_dictionary_wrong_order() {
-        let pairs = vec![("a".to_string(), 1_i8), ("b".to_string(), 2_i8)];
-        let keys = Int8Array::from(vec![0, 1, 0]);
-        let values = StringArray::from(vec!["b", "a"]); // Wrong order
-        let array = Arc::new(DictionaryArray::<Int8Type>::try_new(keys, Arc::new(values)).unwrap())
-            as ArrayRef;
-        let mut writer = MockWriter::new();
-        let result = serialize(&Type::Enum8(pairs), &mut writer, &array);
-        assert!(matches!(
-            result,
-            Err(Error::ArrowSerialize(msg))
-            if msg.contains("Enum value mismatch")
-        ));
-    }
-
-    #[test]
-    fn test_write_enum8_string_like_values() {
-        let cases = vec![
-            Arc::new(StringArray::from(vec![Some("a"), Some("b"), None])) as ArrayRef,
-            Arc::new(StringViewArray::from(vec![Some("a"), Some("b"), None])) as ArrayRef,
-            Arc::new(LargeStringArray::from(vec![Some("a"), Some("b"), None])) as ArrayRef,
-            Arc::new(BinaryArray::from_opt_vec(vec![Some(b"a"), Some(b"b"), None])) as ArrayRef,
-            Arc::new(BinaryViewArray::from(vec![Some(b"a" as &[u8]), Some(b"b"), None]))
-                as ArrayRef,
-            Arc::new(LargeBinaryArray::from_opt_vec(vec![Some(b"a"), Some(b"b"), None]))
-                as ArrayRef,
-        ];
-        let enum_values = vec![("a".to_string(), 1), ("b".to_string(), 2)];
-        for array in cases {
-            let mut writer = MockWriter::new();
-            serialize(&Type::Enum8(enum_values.clone()), &mut writer, &array).unwrap();
-            assert_eq!(writer, vec![1, 2, 0]);
-        }
-    }
-
-    #[test]
-    fn test_serialize_enum_wrong_type() {
-        let mut writer = MockWriter::new();
-        let result = serialize(
-            &Type::String,
-            &mut writer,
-            &(Arc::new(StringArray::from(Vec::<String>::new())) as ArrayRef),
-        );
         assert!(matches!(result, Err(Error::ArrowSerialize(_))));
     }
 }

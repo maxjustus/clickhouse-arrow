@@ -4,7 +4,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::Result;
 use crate::formats::{DeserializerState, DynamicState, TypeSpecificState};
-use crate::io::{ClickHouseBytesRead, ClickHouseRead};
+use crate::io::ClickHouseRead;
 use crate::native::types::deserialize::{ClickHouseNativeDeserializer, read_discriminator};
 use crate::native::types::{Type, Value};
 
@@ -180,50 +180,7 @@ impl DynamicDeserializer {
         Self::read_internal_async(_type, reader, rows, state).await
     }
 
-    pub(crate) fn read_prefix_sync<R: ClickHouseBytesRead>(
-        _type: &Type,
-        reader: &mut R,
-        state: &mut DeserializerState,
-    ) -> Result<()> {
-        let version = reader.get_u64_le();
-
-        if version != DYNAMIC_VERSION_FLATTENED {
-            return Err(crate::Error::DeserializeError(format!(
-                "Dynamic type requires version 3, got version {version}. Please use ClickHouse \
-                 server >= 25.6"
-            )));
-        }
-
-        // v3 format: total_types, then type names, then nested prefixes
-        let total_types = reader.try_get_var_uint()?;
-        let mut types = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
-        for _ in 0..total_types {
-            types.push(Self::parse_type_entry(reader.try_get_string()?.to_vec())?);
-        }
-
-        // Read prefixes for nested types
-        for (_, typ) in &types {
-            typ.deserialize_prefix(reader, state)?;
-        }
-
-        // Store metadata in state for data phase
-        let mut type_names = Vec::with_capacity(types.len());
-        let mut type_map = HashMap::new();
-        for (idx, (name, typ)) in types.iter().enumerate() {
-            type_names.push(name.clone());
-            drop(type_map.insert(name.clone(), (idx, typ.clone())));
-        }
-
-        state.type_specific = TypeSpecificState::Dynamic(DynamicState {
-            version: Some(DYNAMIC_VERSION_FLATTENED),
-            total_types,
-            type_names,
-            type_map,
-            types,
-        });
-
-        Ok(())
-    }
+    // Removed sync read_prefix; async-only path is supported.
 
     
 }
