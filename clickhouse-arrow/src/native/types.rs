@@ -85,6 +85,8 @@ pub enum Type {
     LowCardinality(Box<Type>),
     Array(Box<Type>),
     Tuple(Vec<Type>),
+    /// Named tuple fields (Tuple with field names)
+    TupleNamed(Vec<(String, Type)>),
     Map(Box<Type>, Box<Type>),
     Variant(Vec<Type>),
     Dynamic {
@@ -307,6 +309,9 @@ impl Type {
             Type::LowCardinality(x) => x.default_value(),
             Type::Array(_) => Value::Array(vec![]),
             Type::Tuple(types) => Value::Tuple(types.iter().map(Type::default_value).collect()),
+            Type::TupleNamed(fields) => {
+                Value::Tuple(fields.iter().map(|(_, t)| t.default_value()).collect())
+            }
             Type::Nullable(_) | Type::Variant(_) | Type::Dynamic { .. } | Type::JSON { .. } => {
                 Value::Null
             }
@@ -417,6 +422,14 @@ impl Display for Type {
                 "Tuple({})",
                 items.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
             ),
+            Type::TupleNamed(items) => {
+                let parts = items
+                    .iter()
+                    .map(|(name, t)| format!("{name} {t}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "Tuple({parts})")
+            }
             Type::Nullable(inner) => write!(f, "Nullable({inner})"),
             Type::Map(key, value) => write!(f, "Map({key}, {value})"),
             Type::Variant(items) => write!(
@@ -512,7 +525,7 @@ impl Type {
                 Type::Array(_) => {
                     deserialize::array::read_with_path(self, reader, rows, state, path).await?
                 }
-                Type::Tuple(_) => {
+                Type::Tuple(_) | Type::TupleNamed(_) => {
                     deserialize::tuple::read_with_path(self, reader, rows, state, path).await?
                 }
                 Type::Nullable(_) => {
@@ -609,7 +622,7 @@ impl Type {
                 | Type::Ipv4
                 | Type::Ipv6
                 | Type::Enum8(_)
-                | Type::Enum16(_) => {
+            | Type::Enum16(_) => {
                     sized::SizedSerializer::write(self, values, writer, state).await?;
                 }
 
@@ -623,7 +636,7 @@ impl Type {
                 Type::Array(_) => {
                     array::ArraySerializer::write(self, values, writer, state).await?;
                 }
-                Type::Tuple(_) => {
+                Type::Tuple(_) | Type::TupleNamed(_) => {
                     tuple::TupleSerializer::write(self, values, writer, state).await?;
                 }
                 Type::Point => geo::PointSerializer::write(self, values, writer, state).await?,
@@ -731,11 +744,17 @@ impl Type {
                     inner.validate()?;
                 }
             }
+            Type::TupleNamed(fields) => {
+                for (_, inner) in fields {
+                    inner.validate()?;
+                }
+            }
             Type::Nullable(inner) => match &**inner {
                 Type::Array(_)
                 | Type::Map(_, _)
                 | Type::LowCardinality(_)
                 | Type::Tuple(_)
+                | Type::TupleNamed(_)
                 | Type::Nullable(_) => {
                     return Err(Error::TypeParseError(format!(
                         "nullable cannot contain composite type '{inner:?}'"
@@ -942,6 +961,7 @@ impl Type {
             }
             Type::Nullable(inner) => inner.estimate_capacity(),
             Type::Tuple(types) => types.iter().map(Type::estimate_capacity).sum(),
+            Type::TupleNamed(fields) => fields.iter().map(|(_, t)| t.estimate_capacity()).sum(),
             Type::Map(key, value) => {
                 let key_data = key.estimate_capacity();
                 let value_data = value.estimate_capacity();
@@ -1008,6 +1028,11 @@ impl Type {
             Type::LowCardinality(inner) => Box::pin(inner.write_default(writer)).await?,
             Type::Tuple(inner) => {
                 for t in inner {
+                    Box::pin(t.write_default(writer)).await?;
+                }
+            }
+            Type::TupleNamed(fields) => {
+                for (_, t) in fields {
                     Box::pin(t.write_default(writer)).await?;
                 }
             }

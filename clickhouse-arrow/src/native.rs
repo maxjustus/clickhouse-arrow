@@ -8,6 +8,7 @@ pub mod progress;
 pub(crate) mod protocol;
 pub mod types;
 pub mod values;
+pub mod streaming;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 

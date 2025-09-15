@@ -153,6 +153,8 @@ pub struct JsonState {
     pub path_dynamic_states:      BTreeMap<String, DynamicState>,
     /// Serialization states for each typed path (filled during `analyze_values`)
     pub(crate) typed_path_states: BTreeMap<String, SerializerState>,
+    /// Cached path segmentation for faster nested JSON assembly (path -> segments)
+    pub path_segments:            BTreeMap<String, Vec<String>>,
 
     // Deprecated - kept for compatibility during migration
     #[deprecated(note = "Use dynamic_paths instead")]

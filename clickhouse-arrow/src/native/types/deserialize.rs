@@ -91,7 +91,7 @@ impl ClickHouseNativeDeserializer for Type {
                 Type::Array(_) => {
                     array::ArrayDeserializer::read_prefix(self, reader, state).await?;
                 }
-                Type::Tuple(_) => {
+                Type::Tuple(_) | Type::TupleNamed(_) => {
                     tuple::TupleDeserializer::read_prefix(self, reader, state).await?;
                 }
                 Type::Point => geo::PointDeserializer::read_prefix(self, reader, state).await?,
@@ -542,6 +542,7 @@ impl FromStr for Type {
                     //   Tuple(id Int8, name String)
                     let args = parse_variable_args(following)?;
                     let mut inner: Vec<Type> = Vec::with_capacity(args.len());
+                    let mut named: Vec<(String, Type)> = Vec::new();
                     for arg in args {
                         // Try plain positional type first
                         match Type::from_str(arg) {
@@ -551,7 +552,7 @@ impl FromStr for Type {
                                 let (ident, rest) = eat_identifier(arg);
                                 let rest = rest.trim();
                                 if !ident.is_empty() && !rest.is_empty() {
-                                    inner.push(Type::from_str(rest)?);
+                                    named.push((ident.to_string(), Type::from_str(rest)?));
                                 } else {
                                     return Err(Error::TypeParseError(format!(
                                         "invalid type with arguments: '{arg}' (ident = {ident})"
@@ -560,7 +561,16 @@ impl FromStr for Type {
                             }
                         }
                     }
-                    Type::Tuple(inner)
+                    if !named.is_empty() {
+                        if !inner.is_empty() {
+                            return Err(Error::TypeParseError(
+                                "Cannot mix named and positional tuple fields".to_string(),
+                            ));
+                        }
+                        Type::TupleNamed(named)
+                    } else {
+                        Type::Tuple(inner)
+                    }
                 }
                 "Nullable" => {
                     let (args, count) = parse_fixed_args::<1>(following)?;
@@ -613,9 +623,46 @@ impl FromStr for Type {
                         skip_regex,
                     }
                 }
-                // Unsupported
+                // Nested is syntactic sugar for Array(Tuple(...))
                 "Nested" => {
-                    return Err(Error::TypeParseError("unsupported Nested type".to_string()));
+                    // Accept both named and positional inner fields:
+                    //   Nested(x Int32, y String) -> Array(Tuple(Int32, String))
+                    //   Nested(Int32, String)     -> Array(Tuple(Int32, String))
+                    let args = parse_variable_args(following)?;
+                    if args.is_empty() {
+                        return Err(Error::TypeParseError(
+                            "Nested expects at least one field".to_string(),
+                        ));
+                    }
+                    let mut inner: Vec<Type> = Vec::with_capacity(args.len());
+                    let mut named: Vec<(String, Type)> = Vec::new();
+                    for arg in args {
+                        match Type::from_str(arg) {
+                            Ok(t) => inner.push(t),
+                            Err(_) => {
+                                let (ident, rest) = eat_identifier(arg);
+                                let rest = rest.trim();
+                                if !ident.is_empty() && !rest.is_empty() {
+                                    named.push((ident.to_string(), Type::from_str(rest)?));
+                                } else {
+                                    return Err(Error::TypeParseError(format!(
+                                        "invalid Nested field spec: '{arg}'"
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    let tuple = if !named.is_empty() {
+                        if !inner.is_empty() {
+                            return Err(Error::TypeParseError(
+                                "Cannot mix named and positional tuple fields in Nested".to_string(),
+                            ));
+                        }
+                        Type::TupleNamed(named)
+                    } else {
+                        Type::Tuple(inner)
+                    };
+                    Type::Array(Box::new(tuple))
                 }
                 id => {
                     return Err(Error::TypeParseError(format!(
@@ -1090,9 +1137,32 @@ mod tests {
     fn test_from_str_general_errors() {
         assert!(Type::from_str("").is_err()); // Empty input
         assert!(Type::from_str("InvalidType").is_err()); // Unknown type
-        assert!(Type::from_str("Nested(String)").is_err()); // Unsupported Nested
+        // Nested is supported as syntactic sugar for Array(Tuple(...))
+        assert_eq!(
+            Type::from_str("Nested(String)").unwrap(),
+            Type::Array(Box::new(Type::Tuple(vec![Type::String])))
+        );
         assert!(Type::from_str("Int8(").is_err()); // Unclosed paren
         assert!(Type::from_str("Tuple(String,)").is_err()); // Trailing comma
+    }
+
+    /// Tests parsing of Nested as Array(Tuple(...)) including named fields
+    #[test]
+    fn test_from_str_nested_mapping() {
+        let ty = Type::from_str("Nested(UInt64, String)").unwrap();
+        assert_eq!(
+            ty,
+            Type::Array(Box::new(Type::Tuple(vec![Type::UInt64, Type::String])))
+        );
+
+        let ty2 = Type::from_str("Nested(id UInt64, name String)").unwrap();
+        assert_eq!(
+            ty2,
+            Type::Array(Box::new(Type::TupleNamed(vec![
+                ("id".into(), Type::UInt64),
+                ("name".into(), Type::String),
+            ])))
+        );
     }
 
     /// Tests parsing of parameterized Dynamic and JSON types.

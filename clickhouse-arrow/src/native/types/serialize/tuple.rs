@@ -16,6 +16,11 @@ impl Serializer for TupleSerializer {
                     item.serialize_prefix_async(writer, state).await?;
                 }
             }
+            Type::TupleNamed(fields) => {
+                for (_, item) in fields {
+                    item.serialize_prefix_async(writer, state).await?;
+                }
+            }
             _ => {
                 return Err(Error::SerializeError(format!(
                     "TupleSerializer called with non-tuple type: {type_:?}"
@@ -31,13 +36,21 @@ impl Serializer for TupleSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        let Type::Tuple(inner_types) = &type_ else {
-            return Err(Error::SerializeError(
-                "TupleSerializer called with non-tuple type".to_string(),
-            ));
+        let (mut columns, inner_types): (Vec<Vec<Value>>, Vec<&Type>) = match type_ {
+            Type::Tuple(inner) => (
+                vec![Vec::with_capacity(values.len()); inner.len()],
+                inner.iter().collect(),
+            ),
+            Type::TupleNamed(fields) => (
+                vec![Vec::with_capacity(values.len()); fields.len()],
+                fields.iter().map(|(_, t)| t).collect(),
+            ),
+            _ => {
+                return Err(Error::SerializeError(
+                    "TupleSerializer called with non-tuple type".to_string(),
+                ));
+            }
         };
-
-        let mut columns = vec![Vec::with_capacity(values.len()); inner_types.len()];
 
         for value in values {
             let tuple = value.unwrap_tuple()?;

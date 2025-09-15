@@ -26,6 +26,8 @@ use arrow::array::{ArrayRef, RecordBatch};
 use arrow::compute::take_record_batch;
 use arrow::datatypes::SchemaRef;
 use futures_util::{Stream, StreamExt, TryStreamExt, stream};
+#[cfg(feature = "serde")]
+use serde::ser::SerializeSeq;
 use strum::AsRefStr;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -1010,6 +1012,54 @@ impl<T: ClientFormat> Client<T> {
     }
 }
 
+#[cfg(feature = "serde")]
+impl Client<crate::formats::NativeFormat> {
+    /// Stream a query's rows directly into a serde Serializer as a sequence.
+    /// Named tuples serialize as objects (JSONEachRow semantics).
+    #[instrument(
+        name = "clickhouse.query_transcode",
+        skip_all,
+        fields(
+            db.system = "clickhouse",
+            db.operation = "query_transcode",
+            db.format = "native",
+            clickhouse.client.id = self.client_id,
+            clickhouse.query.id = %qid
+        ),
+    )]
+    pub async fn query_transcode<S, P>(
+        &self,
+        query: String,
+        params: Option<P>,
+        qid: Qid,
+        serializer: S,
+    ) -> Result<S::Ok>
+    where
+        S: serde::Serializer,
+        P: Into<QueryParams>,
+    {
+        use futures_util::StreamExt as _;
+
+        use crate::native::values::serde_impls::RowSer;
+
+        let mut stream = self.query_raw(query, params, qid).await?;
+        let mut seq =
+            serializer.serialize_seq(None).map_err(|e| Error::SerializeError(e.to_string()))?;
+
+        while let Some(item) = stream.next().await {
+            let mut block: Block = item?;
+            let cols = block.column_types.clone();
+            for row in block.take_iter_rows() {
+                let row_values: Vec<_> = row.into_iter().map(|(_n, _t, v)| v).collect();
+                seq.serialize_element(&RowSer { cols: &cols, row: &row_values })
+                    .map_err(|e| Error::SerializeError(e.to_string()))?;
+            }
+        }
+
+        seq.end().map_err(|e| Error::SerializeError(e.to_string()))
+    }
+}
+
 impl<T: ClientFormat> Client<T> {
     /// Get a reference to the underlying connection.
     ///
@@ -1436,6 +1486,8 @@ impl Client<NativeFormat> {
     ///     println!("ID: {}, Name: {}", row["id"], row["name"]);
     /// }
     /// ```
+    /// TODO: why bother with this AND query_json_params? Just rename query_json_params to
+    /// query_json.
     #[cfg(feature = "serde")]
     #[instrument(
         name = "clickhouse.query_json",
@@ -1474,7 +1526,9 @@ impl Client<NativeFormat> {
         tokio::pin!(raw);
 
         while let Some(block) = raw.next().await.transpose()? {
-            // Convert block to JSON rows
+            // Convert block to JSON rows - would nice if this was streaming? All these different
+            // ways to query json data are a total mess. I'd almost like to just keep it as
+            // reference and strip it all out and start fresh.
             let json_rows = block_to_json_rows(block)?;
             all_rows.extend(json_rows);
         }
@@ -1748,8 +1802,6 @@ impl InsertInto<'_> {
     /// Finish the insert operation by flushing any remaining rows.
     pub async fn finish(mut self) -> Result<()> { self.flush().await }
 }
-
-
 
 fn map_cell_to_value(
     cell: Option<&serde_json::Value>,

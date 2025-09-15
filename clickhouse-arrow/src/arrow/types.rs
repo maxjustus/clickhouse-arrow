@@ -430,6 +430,17 @@ pub fn ch_to_arrow_type(ch_type: &Type, options: Option<ArrowOptions>) -> Result
                 .collect::<Result<Vec<_>>>()?;
             DataType::Struct(fields.into())
         }
+        Type::TupleNamed(fields) => {
+            let fields: Vec<Field> = fields
+                .iter()
+                .map(|(name, t)| {
+                    ch_to_arrow_type(t, options).map(|(arrow_type, is_null)| {
+                        Field::new(name.clone(), arrow_type, is_null)
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            DataType::Struct(fields.into())
+        }
         Type::Map(key_type, value_type) => {
             let (key_arrow_type, _) = ch_to_arrow_type(key_type, options)?;
             let (value_arrow_type, is_null) = ch_to_arrow_type(value_type, options)?;

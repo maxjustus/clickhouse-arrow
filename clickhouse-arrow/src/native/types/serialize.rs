@@ -70,7 +70,9 @@ impl ClickHouseNativeSerializer for Type {
                 }
 
                 Type::Array(_) => array::ArraySerializer::write_prefix(self, writer, state).await?,
-                Type::Tuple(_) => tuple::TupleSerializer::write_prefix(self, writer, state).await?,
+                Type::Tuple(_) | Type::TupleNamed(_) => {
+                    tuple::TupleSerializer::write_prefix(self, writer, state).await?
+                }
                 Type::Point => geo::PointSerializer::write_prefix(self, writer, state).await?,
                 Type::Ring => geo::RingSerializer::write_prefix(self, writer, state).await?,
                 Type::Polygon => geo::PolygonSerializer::write_prefix(self, writer, state).await?,

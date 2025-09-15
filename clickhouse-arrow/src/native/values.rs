@@ -9,6 +9,10 @@ mod int256;
 mod ip;
 #[cfg(feature = "serde")]
 pub mod json;
+#[cfg(feature = "serde")]
+pub mod serde_impls;
+#[cfg(feature = "serde")]
+pub mod serde_de;
 pub mod vec_tuple;
 
 #[cfg(test)]
@@ -72,6 +76,8 @@ pub enum Value {
     Enum16(String, i16),
     Array(Vec<Value>),
 
+    // TODO: missing named tuples here? Or actually.. names come from the type, and are not
+    // inherent to the value
     Tuple(Vec<Value>),
 
     Null,
@@ -294,11 +300,11 @@ impl Value {
             }
             Value::Float64(f) => Number::from_f64(*f).map_or(JsonValue::Null, JsonValue::Number),
 
-            // String
-            Value::String(bytes) => JsonValue::String(
-                String::from_utf8(bytes.clone())
-                    .map_err(|e| crate::Error::DeserializeError(format!("Invalid UTF-8: {e}")))?,
-            ),
+            // String (may contain non-UTF8 for FixedSizedString/Binary). Use lossy decoding
+            // to ensure JSON rendering never fails; invalid bytes become U+FFFD.
+            Value::String(bytes) => {
+                JsonValue::String(String::from_utf8_lossy(bytes).to_string())
+            }
 
             // Decimal types - format with proper decimal point
             Value::Decimal32(scale, value) => {
@@ -391,9 +397,8 @@ impl Value {
                     // Convert any key type to string
                     #[allow(clippy::single_match_else)]
                     let key_str = match key {
-                        Value::String(bytes) => String::from_utf8(bytes.clone()).map_err(|e| {
-                            crate::Error::DeserializeError(format!("Invalid UTF-8 in map key: {e}"))
-                        })?,
+                        // For raw bytes (String/FixedString/Binary), allow non‑UTF8 via lossy
+                        Value::String(bytes) => String::from_utf8_lossy(bytes).to_string(),
                         // For non-string keys, convert to JSON string representation
                         _ => {
                             let json_key = key.to_json()?;
@@ -612,6 +617,8 @@ impl Value {
                     Type::Array(Box::new(Type::Variant(types)))
                 }
             }
+            // TODO: support named tuples here? Or note: names for tuple fields are in the type, not
+            // the value
             Value::Tuple(values) => Type::Tuple(values.iter().map(Value::guess_type).collect()),
             Value::Null => Type::Nullable(Box::new(Type::String)),
             Value::Map(k, v) => {
@@ -684,6 +691,41 @@ impl Value {
             Value::Object(_) => Type::Object,
             #[cfg(feature = "serde")]
             Value::Json(_) => Type::Object,
+        }
+    }
+
+    /// Convert a `ClickHouse` Value to JSON using type hints for better fidelity.
+    /// Specifically, renders named tuples (and arrays of them) as JSON objects
+    /// with field names, matching ClickHouse JSONEachRow behavior.
+    /// TODO: This feels like something that could be handled more cleanly via a serde adapter
+    #[cfg(feature = "serde")]
+    pub fn to_json_with_type(&self, typ: &Type) -> Result<serde_json::Value> {
+        use serde_json::Value as JsonValue;
+        let t = typ.strip_null();
+        match (self, t) {
+            // Array: map elements with inner type
+            (Value::Array(items), Type::Array(inner)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for it in items {
+                    out.push(it.to_json_with_type(inner)?);
+                }
+                Ok(JsonValue::Array(out))
+            }
+            // Named Tuple -> JSON object
+            (Value::Tuple(values), Type::TupleNamed(fields)) => {
+                let mut map =
+                    serde_json::Map::with_capacity(std::cmp::min(values.len(), fields.len()));
+                for (idx, (name, field_ty)) in fields.iter().enumerate() {
+                    if let Some(v) = values.get(idx) {
+                        drop(map.insert(name.clone(), v.to_json_with_type(field_ty)?));
+                    }
+                }
+                Ok(JsonValue::Object(map))
+            }
+            // Unnamed Tuple -> default array rendering
+            (Value::Tuple(_), Type::Tuple(_)) => self.to_json(),
+            // Fallback to default conversion
+            _ => self.to_json(),
         }
     }
 }

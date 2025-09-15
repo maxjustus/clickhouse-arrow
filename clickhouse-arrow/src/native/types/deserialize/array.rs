@@ -114,6 +114,7 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
 mod tests {
     use super::*;
     use bytes::BytesMut;
+    use std::str::FromStr;
     use tokio::io::{AsyncRead, ReadBuf};
 
     // Minimal AsyncRead over Bytes
@@ -288,5 +289,56 @@ mod tests {
                 if let Value::Tuple(it) = &t[1] { assert!(matches!(it[0], Value::UInt64(0))); } else { panic!("inner"); }
             } else { panic!("tuple"); }
         } else { panic!("array"); }
+    }
+
+    #[tokio::test]
+    async fn nested_basic_deserialize() {
+        // Nested(id UInt64, val UInt64) -> Array(Tuple(UInt64, UInt64))
+        let ty = Type::from_str("Nested(id UInt64, val UInt64)").unwrap();
+
+        // 2 rows, offsets [1,3] => total 3 items
+        let mut bytes = BytesMut::new();
+        bytes.extend_from_slice(&(1u64).to_le_bytes());
+        bytes.extend_from_slice(&(3u64).to_le_bytes());
+
+        // Tuple field 0 (id): 3 values
+        for v in [10u64, 20u64, 30u64] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        // Tuple field 1 (val): 3 values
+        for v in [100u64, 200u64, 300u64] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+
+        let mut reader = BytesReader(bytes.freeze());
+        let mut state = DeserializerState::default();
+
+        let out = ty
+            .deserialize_column(&mut reader, 2, &mut state)
+            .await
+            .expect("nested deserialize");
+
+        assert_eq!(out.len(), 2);
+        // Row 0: one item (10,100)
+        if let Value::Array(items) = &out[0] {
+            assert_eq!(items.len(), 1);
+            if let Value::Tuple(t) = &items[0] {
+                assert!(matches!(t[0], Value::UInt64(10)));
+                assert!(matches!(t[1], Value::UInt64(100)));
+            } else { panic!("expected tuple"); }
+        } else { panic!("expected array"); }
+
+        // Row 1: two items (20,200), (30,300)
+        if let Value::Array(items) = &out[1] {
+            assert_eq!(items.len(), 2);
+            if let Value::Tuple(t) = &items[0] {
+                assert!(matches!(t[0], Value::UInt64(20)));
+                assert!(matches!(t[1], Value::UInt64(200)));
+            } else { panic!("expected tuple"); }
+            if let Value::Tuple(t) = &items[1] {
+                assert!(matches!(t[0], Value::UInt64(30)));
+                assert!(matches!(t[1], Value::UInt64(300)));
+            } else { panic!("expected tuple"); }
+        } else { panic!("expected array"); }
     }
 }

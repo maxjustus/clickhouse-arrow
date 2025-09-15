@@ -318,10 +318,23 @@ impl ClickHouseArrowDeserializer for Type {
                 nulls,
                 rbuffer
             )).await?,
-            // Tuple
+            // Tuple (named or unnamed)
             Type::Tuple(inner) => Box::pin(
                 tuple::deserialize_async(inner, builder, data_type, reader, rows, nulls, rbuffer)
             ).await?,
+            Type::TupleNamed(fields) => {
+                let inner: Vec<Type> = fields.iter().map(|(_, t)| t.clone()).collect();
+                Box::pin(tuple::deserialize_async(
+                    &inner,
+                    builder,
+                    data_type,
+                    reader,
+                    rows,
+                    nulls,
+                    rbuffer,
+                ))
+                .await?
+            }
             // Geo types
             Type::Polygon | Type::MultiPolygon | Type::Point | Type::Ring => {
                 // Geo types should be converted earlier, this is a fallback

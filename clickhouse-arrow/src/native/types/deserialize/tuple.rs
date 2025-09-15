@@ -6,8 +6,8 @@ use crate::native::values::Value;
 pub(crate) struct TupleDeserializer;
 
 /// Build tuple values from column data
-fn build_tuples(rows: usize, inner_types: &[Type], column_data: Vec<Vec<Value>>) -> Vec<Value> {
-    let mut tuples = vec![Value::Tuple(Vec::with_capacity(inner_types.len())); rows];
+fn build_tuples(rows: usize, fields_len: usize, column_data: Vec<Vec<Value>>) -> Vec<Value> {
+    let mut tuples = vec![Value::Tuple(Vec::with_capacity(fields_len)); rows];
 
     for column_values in column_data {
         for (i, value) in column_values.into_iter().enumerate() {
@@ -28,9 +28,18 @@ impl Deserializer for TupleDeserializer {
     ) -> Result<()> {
         // Only delegate to children for non-sparse prefixes (LC, Variant, JSON, etc.).
         // Do NOT consume any sparse kind bytes here; they are parsed in block.rs into a plan.
-        let inner_types = type_.unwrap_tuple()?;
-        for item in inner_types {
-            item.deserialize_prefix_async(reader, state).await?;
+        match type_ {
+            Type::Tuple(inner_types) => {
+                for item in inner_types {
+                    item.deserialize_prefix_async(reader, state).await?;
+                }
+            }
+            Type::TupleNamed(fields) => {
+                for (_, item) in fields {
+                    item.deserialize_prefix_async(reader, state).await?;
+                }
+            }
+            _ => unreachable!(),
         }
         Ok(())
     }
@@ -41,16 +50,28 @@ impl Deserializer for TupleDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let inner_types = type_.unwrap_tuple()?;
-        let mut column_data = Vec::with_capacity(inner_types.len());
+        let mut column_data = Vec::new();
+        let fields_len = match type_ {
+            Type::Tuple(inner_types) => {
+                column_data.reserve(inner_types.len());
+                for type_ in inner_types.iter() {
+                    let data = type_.deserialize_column(reader, rows, state).await?;
+                    column_data.push(data);
+                }
+                inner_types.len()
+            }
+            Type::TupleNamed(fields) => {
+                column_data.reserve(fields.len());
+                for (_, type_) in fields.iter() {
+                    let data = type_.deserialize_column(reader, rows, state).await?;
+                    column_data.push(data);
+                }
+                fields.len()
+            }
+            _ => unreachable!(),
+        };
 
-        // Read each element column
-        for (_idx, type_) in inner_types.iter().enumerate() {
-            let data = type_.deserialize_column(reader, rows, state).await?;
-            column_data.push(data);
-        }
-
-        Ok(build_tuples(rows, inner_types, column_data))
+        Ok(build_tuples(rows, fields_len, column_data))
     }
 }
 
@@ -61,20 +82,38 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
     state: &mut DeserializerState,
     path: &mut Vec<u16>,
 ) -> Result<Vec<Value>> {
-    let inner_types = type_.unwrap_tuple()?;
-    let mut column_data = Vec::with_capacity(inner_types.len());
+    let mut column_data = Vec::new();
+    let fields_len = match type_ {
+        Type::Tuple(inner_types) => {
+            column_data.reserve(inner_types.len());
+            for (idx, type_) in inner_types.iter().enumerate() {
+                #[allow(clippy::cast_possible_truncation)]
+                path.push(idx as u16);
+                let data = type_
+                    .deserialize_column_with_path(reader, rows, state, path)
+                    .await?;
+                let _ = path.pop();
+                column_data.push(data);
+            }
+            inner_types.len()
+        }
+        Type::TupleNamed(fields) => {
+            column_data.reserve(fields.len());
+            for (idx, (_, type_)) in fields.iter().enumerate() {
+                #[allow(clippy::cast_possible_truncation)]
+                path.push(idx as u16);
+                let data = type_
+                    .deserialize_column_with_path(reader, rows, state, path)
+                    .await?;
+                let _ = path.pop();
+                column_data.push(data);
+            }
+            fields.len()
+        }
+        _ => unreachable!(),
+    };
 
-    for (idx, type_) in inner_types.iter().enumerate() {
-        #[allow(clippy::cast_possible_truncation)]
-        path.push(idx as u16);
-        let data = type_
-            .deserialize_column_with_path(reader, rows, state, path)
-            .await?;
-        let _ = path.pop();
-        column_data.push(data);
-    }
-
-    Ok(build_tuples(rows, inner_types, column_data))
+    Ok(build_tuples(rows, fields_len, column_data))
 }
 
 #[cfg(test)]

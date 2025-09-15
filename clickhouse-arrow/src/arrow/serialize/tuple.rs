@@ -33,8 +33,16 @@ pub(super) async fn serialize_async<W: ClickHouseWrite>(
     column: &ArrayRef,
     state: &mut SerializerState,
 ) -> Result<()> {
-    // Unwrap the tuple
-    let inner_types = type_hint.strip_null().unwrap_tuple()?;
+    // Get tuple field types for both named and unnamed tuples
+    let inner_types: Vec<&Type> = match type_hint.strip_null() {
+        Type::Tuple(inner) => inner.iter().collect(),
+        Type::TupleNamed(fields) => fields.iter().map(|(_, t)| t).collect(),
+        other => {
+            return Err(Error::ArrowSerialize(format!(
+                "Expected Tuple type, got {other:?}"
+            )))
+        }
+    };
 
     let struct_array = column
         .as_any()

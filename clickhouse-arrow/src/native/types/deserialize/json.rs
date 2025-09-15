@@ -23,7 +23,7 @@ impl JsonDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (version, typed_paths, path_names, dynamic_data) =
+        let (version, typed_paths, path_names, dynamic_data, path_segments) =
             if let TypeSpecificState::Json(json_state) = &state.type_specific {
                 let version = json_state.version.ok_or_else(|| {
                     Error::DeserializeError(
@@ -35,6 +35,7 @@ impl JsonDeserializer {
                     json_state.typed_paths.clone(),
                     json_state.dynamic_paths.clone(),
                     json_state.dynamic_data.clone(),
+                    json_state.path_segments.clone(),
                 )
             } else {
                 return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
@@ -101,7 +102,7 @@ impl JsonDeserializer {
                     .map(|(name, _)| name.clone())
                     .chain(path_names.iter().cloned())
                     .collect();
-                Self::build_json_objects(&all_paths, &path_values, rows)
+                Self::build_json_objects(&all_paths, &path_values, rows, &path_segments)
             }
             _ => Err(Error::DeserializeError(format!(
                 "JSON type requires version 3, got version {version}. Please use ClickHouse \
@@ -110,38 +111,39 @@ impl JsonDeserializer {
         }
     }
 
-    /// Set a value at a nested path in a JSON object map
-    fn set_nested_value(
+    /// Optimized nested setter using pre-split segments and Map::entry
+    fn set_nested_value_segments(
         object: &mut serde_json::Map<String, serde_json::Value>,
-        path: &str,
+        segments: &[String],
         value: &Value,
     ) -> Result<()> {
-        let parts: Vec<&str> = path.split('.').collect();
-        if parts.is_empty() {
+        use serde_json::Value as J;
+        if segments.is_empty() {
             return Err(Error::DeserializeError("Empty path".to_string()));
         }
 
-        // Navigate to nested location
         let mut current = object;
-        for part in &parts[..parts.len() - 1] {
-            let entry = current
-                .entry((*part).to_string())
-                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-
-            match entry {
-                serde_json::Value::Object(map) => current = map,
+        for part in &segments[..segments.len() - 1] {
+            use serde_json::map::Entry;
+            // entry() returns a temporary borrows; get a &mut Value and match it immediately
+            let value_ref = match current.entry(part.clone()) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(e) => e.insert(J::Object(serde_json::Map::new())),
+            };
+            current = match value_ref {
+                J::Object(map) => map,
                 _ => {
                     return Err(Error::DeserializeError(format!(
                         "Path conflict: '{part}' is not an object"
                     )));
                 }
-            }
+            };
         }
 
-        // Set final value
-        let json_value = value.to_json()?;
-        let old = current.insert(parts[parts.len() - 1].to_string(), json_value);
-        debug_assert!(old.is_none() || matches!(old, Some(serde_json::Value::Null)));
+        // TODO: make sure I understand this
+        let leaf = segments.last().unwrap();
+        let old = current.insert(leaf.clone(), value.to_json()?);
+        debug_assert!(old.is_none() || matches!(old, Some(J::Null)));
         Ok(())
     }
 
@@ -204,6 +206,7 @@ impl JsonDeserializer {
         path_names: &[String],
         path_values: &HashMap<String, Vec<Value>>,
         rows: usize,
+        path_segments: &BTreeMap<String, Vec<String>>,
     ) -> Result<Vec<Value>> {
         let mut result = Vec::with_capacity(rows);
 
@@ -215,7 +218,14 @@ impl JsonDeserializer {
                     && let Some(value) = path_column.get(row_idx)
                     && !matches!(value, Value::Null)
                 {
-                    Self::set_nested_value(&mut row_object, path_name, value)?;
+                    if let Some(segs) = path_segments.get(path_name) {
+                        Self::set_nested_value_segments(&mut row_object, segs, value)?;
+                    } else {
+                        // Fallback split (unexpected if prefix cached them)
+                        let segs: Vec<String> =
+                            path_name.split('.').map(|s| s.to_string()).collect();
+                        Self::set_nested_value_segments(&mut row_object, &segs, value)?;
+                    }
                 }
             }
 
@@ -314,6 +324,17 @@ impl Deserializer for JsonDeserializer {
             dynamic_data.push((total_types, type_list));
         }
 
+        // Build and cache path segments for typed and dynamic paths
+        let mut path_segments = BTreeMap::new();
+        for (name, _) in &typed_paths {
+            drop(path_segments
+                .insert(name.clone(), name.split('.').map(|s| s.to_string()).collect()));
+        }
+        for name in &dynamic_path_names {
+            drop(path_segments
+                .insert(name.clone(), name.split('.').map(|s| s.to_string()).collect()));
+        }
+
         // Store metadata in state
         state.type_specific = TypeSpecificState::Json(JsonStateData {
             version: Some(version),
@@ -325,6 +346,7 @@ impl Deserializer for JsonDeserializer {
             dynamic_data: Some(dynamic_data),
             path_dynamic_states: BTreeMap::new(),
             typed_path_states: BTreeMap::new(), // Not used in deserialization
+            path_segments,
             // Deprecated fields - leave as default
             #[allow(deprecated)]
             paths: vec![],
@@ -344,7 +366,9 @@ impl Deserializer for JsonDeserializer {
     }
 }
 
-impl JsonDeserializer { /* sync prefix removed; async-only */ }
+impl JsonDeserializer {
+    /* sync prefix removed; async-only */
+}
 
 #[cfg(test)]
 mod tests {

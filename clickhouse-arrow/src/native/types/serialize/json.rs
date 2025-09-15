@@ -308,7 +308,7 @@ impl JsonData {
 
             // Exact array/collection matches
             (Value::Array(_), Type::Array(_)) => true,
-            (Value::Tuple(_), Type::Tuple(_)) => true,
+            (Value::Tuple(_), Type::Tuple(_)) | (Value::Tuple(_), Type::TupleNamed(_)) => true,
 
             // No exact match
             _ => false,
@@ -358,8 +358,8 @@ impl JsonData {
             (Value::Array(_), Type::Array(_)) => true,
 
             // Tuple types
-            (Value::Tuple(_), Type::Tuple(_)) => true,
-            (Value::Array(_), Type::Tuple(_)) => true, // Arrays can convert to tuples
+            (Value::Tuple(_), Type::Tuple(_)) | (Value::Tuple(_), Type::TupleNamed(_)) => true,
+            (Value::Array(_), Type::Tuple(_)) | (Value::Array(_), Type::TupleNamed(_)) => true, // Arrays can convert to tuples
 
             // Map types
             (Value::Map(_, _), Type::Map(_, _)) => true,
@@ -832,6 +832,7 @@ impl JsonSerializer {
             dynamic_data: None,
             path_dynamic_states, // Pre-built per-path Dynamic states
             typed_path_states,   // Pre-built states for typed paths
+            path_segments: BTreeMap::new(),
             // Deprecated fields for compatibility
             #[allow(deprecated)]
             paths: dynamic_paths,

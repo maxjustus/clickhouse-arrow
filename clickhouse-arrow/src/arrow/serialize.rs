@@ -160,7 +160,7 @@ impl ClickHouseArrowSerializer for Type {
                 Box::pin(map::serialize_async(self, writer, column, data_type, state)).await?;
             }
             // Tuples
-            Type::Tuple(_) => {
+            Type::Tuple(_) | Type::TupleNamed(_) => {
                 Box::pin(tuple::serialize_async(self, writer, column, state)).await?;
             }
             Type::Ring | Type::Polygon | Type::Point | Type::MultiPolygon => {

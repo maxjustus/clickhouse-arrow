@@ -97,5 +97,5 @@ pub use reexports::*;
 mod dev_deps {
     //! This is here to silence rustc's unused-crate-dependencies warnings.
     //! See tracking issue [#95513](https://github.com/rust-lang/rust/issues/95513).
-    use {clickhouse as _, criterion as _};
+    use {clickhouse as _, criterion as _, serde_transcode as _};
 }
