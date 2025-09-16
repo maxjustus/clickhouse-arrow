@@ -38,8 +38,6 @@ impl Deserializer for PointDeserializer {
         }
         Ok(points)
     }
-
-    
 }
 macro_rules! array_deser {
     ($name:ident, $item:ty) => {

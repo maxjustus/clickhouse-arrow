@@ -359,7 +359,7 @@ impl JsonData {
 
             // Tuple types
             (Value::Tuple(_), Type::Tuple(_)) | (Value::Tuple(_), Type::TupleNamed(_)) => true,
-            (Value::Array(_), Type::Tuple(_)) | (Value::Array(_), Type::TupleNamed(_)) => true, // Arrays can convert to tuples
+            (Value::Array(_), Type::Tuple(_)) | (Value::Array(_), Type::TupleNamed(_)) => true, /* Arrays can convert to tuples */
 
             // Map types
             (Value::Map(_, _), Type::Map(_, _)) => true,
@@ -848,8 +848,6 @@ impl JsonSerializer {
         JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED
     }
 
-    
-
     /// Write paths header based on version (async)
     async fn write_paths_header_async<W: ClickHouseWrite>(
         paths: &[String],
@@ -871,8 +869,6 @@ impl JsonSerializer {
         }
         Ok(())
     }
-
-    
 }
 
 impl Serializer for JsonSerializer {
@@ -1053,8 +1049,6 @@ impl Serializer for JsonSerializer {
 
         Ok(())
     }
-
-    
 }
 
 #[cfg(test)]

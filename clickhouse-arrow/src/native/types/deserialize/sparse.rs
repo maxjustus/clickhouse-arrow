@@ -1,10 +1,10 @@
 // no extra imports
 
 use super::{DeserializerState, Type};
+use crate::Result;
 // no need for SparseState/TypeSpecificState with plan-based sparse
 use crate::io::ClickHouseRead;
 use crate::native::values::Value;
-use crate::Result;
 
 const END_OF_GRANULE_FLAG: u64 = 1u64 << 62;
 
@@ -13,10 +13,12 @@ async fn read_n_dense<R: ClickHouseRead>(
     reader: &mut R,
     n: usize,
 ) -> Result<Vec<Value>> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
     use tokio::io::AsyncReadExt;
     use uuid::Uuid;
+
     use crate::{Date, Date32, DateTime, DynDateTime64, i256, u256};
-    use std::net::{Ipv4Addr, Ipv6Addr};
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         out.push(match type_ {
@@ -76,19 +78,14 @@ async fn read_n_dense<R: ClickHouseRead>(
                 let value = pairs
                     .iter()
                     .find(|(_, i)| *i == idx)
-                    .ok_or(crate::Error::DeserializeError(format!(
-                        "Invalid enum8 index: {idx}"
-                    )))?;
+                    .ok_or(crate::Error::DeserializeError(format!("Invalid enum8 index: {idx}")))?;
                 Value::Enum8(value.0.clone(), idx)
             }
             Type::Enum16(pairs) => {
                 let idx = reader.read_i16_le().await?;
-                let value = pairs
-                    .iter()
-                    .find(|(_, i)| *i == idx)
-                    .ok_or(crate::Error::DeserializeError(format!(
-                        "Invalid enum16 index: {idx}"
-                    )))?;
+                let value = pairs.iter().find(|(_, i)| *i == idx).ok_or(
+                    crate::Error::DeserializeError(format!("Invalid enum16 index: {idx}")),
+                )?;
                 Value::Enum16(value.0.clone(), idx)
             }
             Type::String | Type::Binary => Value::String(reader.read_string().await?),
@@ -127,11 +124,8 @@ pub(crate) async fn read_sparse_with_path<R: ClickHouseRead>(
     let mut first = true;
 
     let key = path.clone();
-    let (mut trailing_defaults, mut has_value_after_defaults) = state
-        .sparse_runtime
-        .get(&key)
-        .copied()
-        .unwrap_or((0, false));
+    let (mut trailing_defaults, mut has_value_after_defaults) =
+        state.sparse_runtime.get(&key).copied().unwrap_or((0, false));
 
     total_rows = trailing_defaults;
     if has_value_after_defaults {
@@ -151,7 +145,9 @@ pub(crate) async fn read_sparse_with_path<R: ClickHouseRead>(
     loop {
         let mut v = reader.read_var_uint().await?;
         let end = (v & END_OF_GRANULE_FLAG) != 0;
-        if end { v &= !END_OF_GRANULE_FLAG; }
+        if end {
+            v &= !END_OF_GRANULE_FLAG;
+        }
         let mut group_size = v as usize;
 
         let mut next_total_rows = total_rows + group_size;
@@ -168,7 +164,8 @@ pub(crate) async fn read_sparse_with_path<R: ClickHouseRead>(
             trailing_defaults = group_size;
             break;
         } else {
-            let start_of_group = if !first && !indices.is_empty() { indices[indices.len()-1] + 1 } else { 0 };
+            let start_of_group =
+                if !first && !indices.is_empty() { indices[indices.len() - 1] + 1 } else { 0 };
             if group_size >= tmp_offset {
                 indices.push(start_of_group + group_size - tmp_offset);
                 tmp_offset = 0;
@@ -183,9 +180,7 @@ pub(crate) async fn read_sparse_with_path<R: ClickHouseRead>(
         total_rows = next_total_rows;
     }
 
-    let _ = state
-        .sparse_runtime
-        .insert(key.clone(), (trailing_defaults, has_value_after_defaults));
+    let _ = state.sparse_runtime.insert(key.clone(), (trailing_defaults, has_value_after_defaults));
 
     if skipped_values_rows > 0 {
         drop(read_n_dense(type_, reader, skipped_values_rows).await?);
@@ -196,22 +191,23 @@ pub(crate) async fn read_sparse_with_path<R: ClickHouseRead>(
         Vec::new()
     };
 
-    let _ = state
-        .sparse_runtime
-        .insert(key, (trailing_defaults, has_value_after_defaults));
+    let _ = state.sparse_runtime.insert(key, (trailing_defaults, has_value_after_defaults));
 
     let mut out = vec![type_.default_value(); rows];
     for (i, v) in indices.into_iter().zip(values.into_iter()) {
-        if i < rows { out[i] = v; }
+        if i < rows {
+            out[i] = v;
+        }
     }
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::BytesMut;
     use tokio::io::{AsyncRead, ReadBuf};
+
+    use super::*;
 
     // Minimal AsyncRead over Bytes
     struct BytesReader(bytes::Bytes);
@@ -234,10 +230,14 @@ mod tests {
         while pos < 9 {
             let mut byte = (value & 0x7F) as u8;
             value >>= 7;
-            if value > 0 { byte |= 0x80; }
+            if value > 0 {
+                byte |= 0x80;
+            }
             tmp[pos] = byte;
             pos += 1;
-            if value == 0 { break; }
+            if value == 0 {
+                break;
+            }
         }
         buf.extend_from_slice(&tmp[..pos]);
     }
@@ -263,11 +263,12 @@ mod tests {
         // No plan needed when calling read_sparse_async directly; runtime state starts empty
 
         let mut path = Vec::new();
-        let out = read_sparse_with_path(&ty, &mut reader, 10, &mut state, &mut path)
-            .await
-            .unwrap();
+        let out = read_sparse_with_path(&ty, &mut reader, 10, &mut state, &mut path).await.unwrap();
         assert_eq!(out.len(), 10);
-        let get_str = |v: &Value| match v { Value::String(s) => String::from_utf8_lossy(s).to_string(), _ => panic!("expected String") };
+        let get_str = |v: &Value| match v {
+            Value::String(s) => String::from_utf8_lossy(s).to_string(),
+            _ => panic!("expected String"),
+        };
         assert_eq!(get_str(&out[0]), "");
         assert_eq!(get_str(&out[1]), "a");
         assert_eq!(get_str(&out[5]), "bbb");

@@ -37,11 +37,7 @@ pub(super) async fn serialize_async<W: ClickHouseWrite>(
     let inner_types: Vec<&Type> = match type_hint.strip_null() {
         Type::Tuple(inner) => inner.iter().collect(),
         Type::TupleNamed(fields) => fields.iter().map(|(_, t)| t).collect(),
-        other => {
-            return Err(Error::ArrowSerialize(format!(
-                "Expected Tuple type, got {other:?}"
-            )))
-        }
+        other => return Err(Error::ArrowSerialize(format!("Expected Tuple type, got {other:?}"))),
     };
 
     let struct_array = column

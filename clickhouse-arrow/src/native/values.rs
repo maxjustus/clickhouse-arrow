@@ -10,9 +10,9 @@ mod ip;
 #[cfg(feature = "serde")]
 pub mod json;
 #[cfg(feature = "serde")]
-pub mod serde_impls;
-#[cfg(feature = "serde")]
 pub mod serde_de;
+#[cfg(feature = "serde")]
+pub mod serde_impls;
 pub mod vec_tuple;
 
 #[cfg(test)]
@@ -233,7 +233,6 @@ impl Hash for Value {
 impl Eq for Value {}
 
 /// Helper function to format decimal values with correct decimal point placement
-#[cfg(feature = "serde")]
 fn format_decimal(mut value: String, scale: usize) -> String {
     if scale == 0 {
         return value;
@@ -268,7 +267,6 @@ impl Value {
     ///
     /// # Errors
     /// Returns an error if the value contains invalid UTF-8 or other conversion issues
-    #[cfg(feature = "serde")]
     #[allow(clippy::too_many_lines)]
     pub fn to_json(&self) -> Result<serde_json::Value> {
         use serde_json::{Number, Value as JsonValue};
@@ -302,9 +300,7 @@ impl Value {
 
             // String (may contain non-UTF8 for FixedSizedString/Binary). Use lossy decoding
             // to ensure JSON rendering never fails; invalid bytes become U+FFFD.
-            Value::String(bytes) => {
-                JsonValue::String(String::from_utf8_lossy(bytes).to_string())
-            }
+            Value::String(bytes) => JsonValue::String(String::from_utf8_lossy(bytes).to_string()),
 
             // Decimal types - format with proper decimal point
             Value::Decimal32(scale, value) => {

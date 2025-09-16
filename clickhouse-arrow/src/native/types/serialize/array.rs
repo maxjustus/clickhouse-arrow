@@ -111,5 +111,4 @@ impl<T: ArraySerializerGeneric + 'static> Serializer for T {
 
         Ok(())
     }
-
 }

@@ -177,6 +177,4 @@ impl Deserializer for LowCardinalityDeserializer {
             }
         })
     }
-
-    
 }

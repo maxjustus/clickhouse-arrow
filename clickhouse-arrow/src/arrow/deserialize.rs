@@ -116,7 +116,6 @@ macro_rules! deser {
 
 pub(super) use deser;
 
-
 macro_rules! deser_bulk_async {
     ($builder:expr, $reader:expr, $rows:expr, $nulls:expr, $buf:expr, $type:ty) => {{
         use $crate::arrow::deserialize::primitive::primitive_bulk;

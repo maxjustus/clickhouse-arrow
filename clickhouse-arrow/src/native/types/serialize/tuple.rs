@@ -37,10 +37,9 @@ impl Serializer for TupleSerializer {
         state: &mut SerializerState,
     ) -> Result<()> {
         let (mut columns, inner_types): (Vec<Vec<Value>>, Vec<&Type>) = match type_ {
-            Type::Tuple(inner) => (
-                vec![Vec::with_capacity(values.len()); inner.len()],
-                inner.iter().collect(),
-            ),
+            Type::Tuple(inner) => {
+                (vec![Vec::with_capacity(values.len()); inner.len()], inner.iter().collect())
+            }
             Type::TupleNamed(fields) => (
                 vec![Vec::with_capacity(values.len()); fields.len()],
                 fields.iter().map(|(_, t)| t).collect(),
@@ -63,5 +62,4 @@ impl Serializer for TupleSerializer {
         }
         Ok(())
     }
-
 }

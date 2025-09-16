@@ -123,8 +123,6 @@ impl DynamicDeserializer {
         Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
     }
 
-    
-
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
         _type: &Type,
         reader: &mut R,
@@ -181,8 +179,6 @@ impl DynamicDeserializer {
     }
 
     // Removed sync read_prefix; async-only path is supported.
-
-    
 }
 
 #[cfg(test)]

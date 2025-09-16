@@ -57,7 +57,6 @@ impl VariantSerializer {
         Ok(())
     }
 
-
     /// Write column data for each discriminator in ascending order
     async fn write_columns<W: ClickHouseWrite>(
         discriminator_map: &crate::native::types::deserialize::variant::DiscriminatorMap,
@@ -67,7 +66,6 @@ impl VariantSerializer {
     ) -> Result<()> {
         Self::write_columns_internal_async(discriminator_map, grouped_values, writer, state).await
     }
-
 
     pub(crate) async fn write_prefix<W: ClickHouseWrite>(
         type_: &Type,
@@ -85,7 +83,6 @@ impl VariantSerializer {
         }
         Ok(())
     }
-
 
     pub(crate) async fn write<W: ClickHouseWrite>(
         type_: &Type,
@@ -106,7 +103,6 @@ impl VariantSerializer {
         // Write column data
         Self::write_columns(&discriminator_map, &grouped_values, writer, state).await
     }
-
 }
 
 #[cfg(test)]
@@ -213,9 +209,7 @@ mod tests {
 
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
-        VariantSerializer::write_prefix(&variant_type, &mut buffer, &mut state)
-            .await
-            .unwrap();
+        VariantSerializer::write_prefix(&variant_type, &mut buffer, &mut state).await.unwrap();
         VariantSerializer::write(&variant_type, values.clone(), &mut buffer, &mut state)
             .await
             .unwrap();
@@ -279,9 +273,7 @@ mod tests {
         let values = vec![variant!(0xFF, Value::Null); 4];
         let mut buffer = Vec::new();
         let mut state = SerializerState::default();
-        VariantSerializer::write_prefix(&variant_type, &mut buffer, &mut state)
-            .await
-            .unwrap();
+        VariantSerializer::write_prefix(&variant_type, &mut buffer, &mut state).await.unwrap();
         VariantSerializer::write(&variant_type, values.clone(), &mut buffer, &mut state)
             .await
             .unwrap();

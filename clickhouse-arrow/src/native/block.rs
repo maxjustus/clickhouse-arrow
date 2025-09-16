@@ -348,21 +348,35 @@ impl ProtocolData<Self, ()> for Block {
         };
 
         for i in 0..columns {
-            let name_bytes = reader.read_string().await.inspect_err(|e| error!("reading column name bytes (index {i}): {e}"))?;
+            let name_bytes = reader
+                .read_string()
+                .await
+                .inspect_err(|e| error!("reading column name bytes (index {i}): {e}"))?;
             let name = match String::from_utf8(name_bytes.clone()) {
                 Ok(s) => s,
                 Err(e) => {
-                    let hex: String = name_bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+                    let hex: String = name_bytes
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join("");
                     error!(?e, hex = %hex, len = name_bytes.len(), index = i, "reading column name (invalid utf-8)");
                     return Err(crate::Error::from(e));
                 }
             };
 
-            let type_bytes = reader.read_string().await.inspect_err(|e| error!("reading column type bytes (name {name}): {e}"))?;
+            let type_bytes = reader
+                .read_string()
+                .await
+                .inspect_err(|e| error!("reading column type bytes (name {name}): {e}"))?;
             let type_name = match String::from_utf8(type_bytes.clone()) {
                 Ok(s) => s,
                 Err(e) => {
-                    let hex: String = type_bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+                    let hex: String = type_bytes
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join("");
                     error!(?e, hex = %hex, len = type_bytes.len(), name = %name, "reading column type (invalid utf-8)");
                     return Err(crate::Error::from(e));
                 }
@@ -428,7 +442,8 @@ impl ProtocolData<Self, ()> for Block {
                     state.kind_plan = Some(plan);
                 }
 
-                // Let types read any non-sparse prefixes as usual (e.g., LC, variant, dynamic, json)
+                // Let types read any non-sparse prefixes as usual (e.g., LC, variant, dynamic,
+                // json)
                 type_.deserialize_prefix_async(reader, state).await?;
 
                 #[allow(clippy::cast_possible_truncation)]
@@ -450,8 +465,6 @@ impl ProtocolData<Self, ()> for Block {
 
         Ok(block)
     }
-
-    
 }
 
 fn format_type_for_header(

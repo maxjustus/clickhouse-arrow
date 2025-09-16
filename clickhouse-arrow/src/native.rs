@@ -6,12 +6,10 @@ pub mod convert;
 pub mod error_codes;
 pub mod progress;
 pub(crate) mod protocol;
-pub mod types;
-pub mod values;
-pub mod streaming;
 #[cfg(test)]
 pub(crate) mod test_helpers;
+pub mod types;
+pub mod values;
 
 pub use self::error_codes::{ServerError, Severity};
-pub use self::protocol::CompressionMethod;
-pub use self::protocol::{LogData, ProfileInfo};
+pub use self::protocol::{CompressionMethod, LogData, ProfileInfo};

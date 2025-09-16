@@ -1,16 +1,38 @@
 mod client;
 
 use std::collections::HashMap;
+use std::io::{BufWriter, Write};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use clickhouse_arrow::native::types::Type;
+use clickhouse_arrow::native::values::Value as ChValue;
+use clickhouse_arrow::native::values::serde_impls::RowSer;
 use client::ClickHouseClient;
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::BufWriter;
-use tokio::sync::mpsc;
 use tokio::io::{AsyncBufReadExt, BufReader as AsyncBufReader};
+use tokio::sync::mpsc;
+
+struct DataPayload {
+    cols: Arc<Vec<(String, Type)>>,
+    row:  Vec<ChValue>,
+}
+
+#[derive(Serialize)]
+struct DataEvent<'a> {
+    #[serde(rename = "type")]
+    output_type: &'static str,
+    #[serde(rename = "data")]
+    data:        RowSer<'a>,
+}
+
+enum WriterCmd {
+    Data(DataPayload),
+    Json(JsonOutput),
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "clickhouse-test-client")]
@@ -229,20 +251,79 @@ async fn execute_query(
     use clickhouse_arrow::native::block::Block;
 
     // Single writer task to serialize lines to stdout to avoid interleaving and contention
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1024);
-    tokio::spawn(async move {
+    let is_pretty = format == "pretty";
+    let (tx, mut rx) = mpsc::channel::<WriterCmd>(1024);
+
+    // single stdout writer task
+    tokio::task::spawn_blocking(move || {
         let stdout = std::io::stdout();
-        let mut writer = BufWriter::with_capacity(1024 * 1024, stdout);
-        while let Some(line) = rx.recv().await {
-            let _ = std::io::Write::write_all(&mut writer, &line);
-            let _ = std::io::Write::write_all(&mut writer, b"\n");
+        let mut pending = Vec::with_capacity(128);
+
+        loop {
+            match rx.blocking_recv() {
+                Some(cmd) => pending.push(cmd),
+                None => break,
+            }
+
+            while let Ok(cmd) = rx.try_recv() {
+                pending.push(cmd);
+            }
+
+            let mut handle = stdout.lock();
+            let mut writer = BufWriter::with_capacity(1024 * 1024, &mut handle);
+            let mut error_occurred = false;
+
+            for cmd in pending.drain(..) {
+                let result = match cmd {
+                    WriterCmd::Json(output) => {
+                        if is_pretty {
+                            serde_json::to_writer_pretty(&mut writer, &output)
+                        } else {
+                            serde_json::to_writer(&mut writer, &output)
+                        }
+                    }
+                    WriterCmd::Data(payload) => {
+                        let event = DataEvent {
+                            output_type: "data",
+                            data:        RowSer {
+                                cols: payload.cols.as_slice(),
+                                row:  payload.row.as_slice(),
+                            },
+                        };
+                        if is_pretty {
+                            serde_json::to_writer_pretty(&mut writer, &event)
+                        } else {
+                            serde_json::to_writer(&mut writer, &event)
+                        }
+                    }
+                };
+
+                if let Err(err) = result {
+                    let _ = serde_json::to_writer(
+                        &mut writer,
+                        &JsonOutput::error(format!("writer serialization error: {err}")),
+                    );
+                    error_occurred = true;
+                }
+
+                if writer.write_all(b"\n").is_err() {
+                    error_occurred = true;
+                    break;
+                }
+            }
+
+            if writer.flush().is_err() {
+                break;
+            }
+
+            if error_occurred {
+                break;
+            }
         }
-        let _ = std::io::Write::flush(&mut writer);
     });
 
     let ch = client.native_client();
     let mut events = ch.subscribe_events();
-    let fmt_for_events = format.to_string();
     let tx_for_events = tx.clone();
     let _ev_task = tokio::spawn(async move {
         while let Ok(evt) = events.recv().await {
@@ -257,39 +338,42 @@ async fn execute_query(
                         "written_bytes": p.written_bytes,
                         "elapsed_ns": p.elapsed_ns,
                     });
-                    let line = if fmt_for_events == "pretty" {
-                        serde_json::to_vec_pretty(&JsonOutput::event("progress", payload))
-                    } else {
-                        serde_json::to_vec(&JsonOutput::event("progress", payload))
-                    };
-                    if let Ok(b) = line { let _ = tx_for_events.send(b).await; }
+                    let _ = tx_for_events
+                        .send(WriterCmd::Json(JsonOutput::event("progress", payload)))
+                        .await;
                 }
                 clickhouse_arrow::ClickHouseEvent::Profile(events) => {
-                    let payload: Vec<serde_json::Value> = events
-                        .into_iter()
-                        .map(|e| {
-                            serde_json::json!({
-                                "host_name": e.host_name,
-                                "current_time": e.current_time,
-                                "thread_id": e.thread_id,
-                                "type_code": e.type_code,
-                                "name": e.name,
-                                "value": e.value,
-                            })
-                        })
+                    let mut grouped: HashMap<(_, _, u64, i8), serde_json::Map<String, serde_json::Value>> =
+                        HashMap::new();
+
+                    for event in events {
+                        let key = (event.current_time.clone(), event.host_name.clone(), event.thread_id, event.type_code);
+                        let entry = grouped.entry(key.clone()).or_insert_with(|| {
+                            let mut map = serde_json::Map::with_capacity(8);
+                            map.insert("current_time".to_string(), serde_json::Value::String(key.0.clone()));
+                            map.insert("host_name".to_string(), serde_json::Value::String(key.1.clone()));
+                            map.insert("thread_id".to_string(), serde_json::Value::from(key.2));
+                            map.insert("type_code".to_string(), serde_json::Value::from(key.3));
+                            map
+                        });
+
+                        entry.insert(event.name, serde_json::Value::from(event.value));
+                    }
+
+                    let mut values: Vec<serde_json::Value> = grouped
+                        .into_values()
+                        .map(serde_json::Value::Object)
                         .collect();
-                    let line = if fmt_for_events == "pretty" {
-                        serde_json::to_vec_pretty(&JsonOutput::event(
-                            "profile",
-                            serde_json::Value::Array(payload),
-                        ))
+
+                    let payload = if values.len() == 1 {
+                        values.pop().unwrap()
                     } else {
-                        serde_json::to_vec(&JsonOutput::event(
-                            "profile",
-                            serde_json::Value::Array(payload),
-                        ))
+                        serde_json::Value::Array(values)
                     };
-                    if let Ok(b) = line { let _ = tx_for_events.send(b).await; }
+
+                    let _ = tx_for_events
+                        .send(WriterCmd::Json(JsonOutput::event("profile", payload)))
+                        .await;
                 }
                 clickhouse_arrow::ClickHouseEvent::Log(logs) => {
                     for log in logs {
@@ -303,12 +387,9 @@ async fn execute_query(
                             "source": log.source,
                             "text": log.text,
                         });
-                        let line = if fmt_for_events == "pretty" {
-                            serde_json::to_vec_pretty(&JsonOutput::event("log", payload.clone()))
-                        } else {
-                            serde_json::to_vec(&JsonOutput::event("log", payload.clone()))
-                        };
-                        if let Ok(b) = line { let _ = tx_for_events.send(b).await; }
+                        let _ = tx_for_events
+                            .send(WriterCmd::Json(JsonOutput::event("log", payload)))
+                            .await;
                     }
                 }
                 clickhouse_arrow::ClickHouseEvent::ProfileInfo(info) => {
@@ -322,12 +403,9 @@ async fn execute_query(
                         "applied_aggregation": info.applied_aggregation,
                         "rows_before_aggregation": info.rows_before_aggregation,
                     });
-                    let line = if fmt_for_events == "pretty" {
-                        serde_json::to_vec_pretty(&JsonOutput::event("profile_info", payload))
-                    } else {
-                        serde_json::to_vec(&JsonOutput::event("profile_info", payload))
-                    };
-                    if let Ok(b) = line { let _ = tx_for_events.send(b).await; }
+                    let _ = tx_for_events
+                        .send(WriterCmd::Json(JsonOutput::event("profile_info", payload)))
+                        .await;
                 }
             }
         }
@@ -340,50 +418,18 @@ async fn execute_query(
             .await
             .context("Failed to send query")?;
 
-        #[derive(Serialize)]
-        struct DataEvent<'a> {
-            #[serde(rename = "type")]
-            output_type: &'static str,
-            #[serde(rename = "data")]
-            data:        clickhouse_arrow::native::values::serde_impls::RowSer<'a>,
-        }
-
         // Clone sender for events task
         let tx_events = tx.clone();
-        let format_events = format.to_string();
         while let Some(item) = stream.next().await {
             let mut block: Block = item.context("stream error")?;
-            let cols = block.column_types.clone();
+            let cols = Arc::new(block.column_types.clone());
 
             // Stream rows without O(n^2) front removals; move values out per row
             for row in block.take_iter_rows() {
                 let row_values: Vec<clickhouse_arrow::Value> =
                     row.into_iter().map(|(_name, _ty, v)| v).collect();
-
-                let ev = DataEvent {
-                    output_type: "data",
-                    data:        clickhouse_arrow::native::values::serde_impls::RowSer {
-                        cols: &cols,
-                        row:  &row_values,
-                    },
-                };
-                // Serialize to bytes and send to writer task
-                let bytes = if format_events == "pretty" {
-                    serde_json::to_vec_pretty(&ev)
-                } else {
-                    serde_json::to_vec(&ev)
-                };
-                match bytes {
-                    Ok(line) => { let _ = tx_events.send(line).await; }
-                    Err(e) => {
-                        let err = serde_json::to_vec(&JsonOutput::error(format!(
-                            "serde error: {}",
-                            e
-                        )))
-                        .unwrap_or_else(|_| b"{\"type\":\"error\",\"error\":\"serde error\"}".to_vec());
-                        let _ = tx_events.send(err).await;
-                    }
-                }
+                let payload = DataPayload { cols: cols.clone(), row: row_values };
+                let _ = tx_events.send(WriterCmd::Data(payload)).await;
             }
         }
     }

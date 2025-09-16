@@ -1038,8 +1038,7 @@ macro_rules! native_roundtrip_test {
             let result = run_test_with_cleanup(
                 stringify!($test_name),
                 |container: Arc<ClickHouseContainer>| async move {
-                    let harness =
-                        NativeRoundtripTestHarness::new(&container).with_v3_format();
+                    let harness = NativeRoundtripTestHarness::new(&container).with_v3_format();
                     let block = $block_generator;
                     harness
                         .run_native_roundtrip_test(stringify!($test_name), &block)

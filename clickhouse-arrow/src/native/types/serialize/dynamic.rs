@@ -38,7 +38,6 @@ impl DynamicSerializer {
         Ok(())
     }
 
-
     /// Check if server supports Dynamic v3
     fn check_server_version(state: &SerializerState) -> Result<()> {
         if let Some((major, minor, _)) = state.server_version
@@ -139,7 +138,6 @@ impl DynamicSerializer {
         Ok(())
     }
 
-
     /// Write complete Dynamic data (async version)
     pub(crate) async fn write_internal_async<W: ClickHouseWrite>(
         _: &Type,
@@ -174,7 +172,6 @@ impl DynamicSerializer {
         Self::write_columns_internal_async(&type_names, &type_map, &rows_by_type, writer, state)
             .await
     }
-
 
     #[allow(clippy::used_underscore_binding)]
     pub(crate) async fn write_prefix<W: ClickHouseWrite>(
@@ -247,8 +244,6 @@ impl DynamicSerializer {
     ) -> Result<()> {
         Self::write_internal_async(_type, values, writer, state).await
     }
-
-
 }
 
 #[cfg(test)]
@@ -349,7 +344,9 @@ mod tests {
                 assert_eq!(
                     async_buffer.len(),
                     $expected_bytes,
-                    "Async failed for total_types={} ({})", $total_types, $description
+                    "Async failed for total_types={} ({})",
+                    $total_types,
+                    $description
                 );
                 // Test both min and max discriminator values for this size
                 let max_disc = std::cmp::min($total_types - 1, match $expected_bytes {
@@ -363,7 +360,8 @@ mod tests {
                 assert_eq!(
                     async_buffer.len(),
                     $expected_bytes,
-                    "Async max discriminator failed for total_types={}", $total_types
+                    "Async max discriminator failed for total_types={}",
+                    $total_types
                 );
             }
         };

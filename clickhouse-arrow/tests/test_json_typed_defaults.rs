@@ -29,10 +29,7 @@ async fn test_json_typed_nullability_defaults_e2e() {
 
             // Enable JSON/Object and allow LC without inner Nullable for typed JSON paths
             client.execute("SET allow_experimental_object_type = 1", None).await.unwrap();
-            client
-                .execute("SET allow_suspicious_low_cardinality_types = 1", None)
-                .await
-                .unwrap();
+            client.execute("SET allow_suspicious_low_cardinality_types = 1", None).await.unwrap();
 
             // Prepare table
             client.execute("DROP TABLE IF EXISTS e2e_json_defaults", None).await.unwrap();
@@ -65,17 +62,14 @@ async fn test_json_typed_nullability_defaults_e2e() {
                 max_dynamic_types: None,
                 typed_paths:       vec![
                     ("id".to_string(), Box::new(Type::UInt32)),
-                    (
-                        "status".to_string(),
-                        Box::new(Type::LowCardinality(Box::new(Type::String))),
-                    ),
+                    ("status".to_string(), Box::new(Type::LowCardinality(Box::new(Type::String)))),
                     (
                         "value".to_string(),
                         Box::new(Type::variant(vec![Type::String, Type::UInt64])),
                     ),
                 ],
-                skip_exact: vec![],
-                skip_regex: vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             };
 
             let block = Block {
@@ -87,10 +81,8 @@ async fn test_json_typed_nullability_defaults_e2e() {
 
             // Insert using native
             use futures_util::StreamExt;
-            let mut stream = client
-                .insert("INSERT INTO e2e_json_defaults VALUES", block, None)
-                .await
-                .unwrap();
+            let mut stream =
+                client.insert("INSERT INTO e2e_json_defaults VALUES", block, None).await.unwrap();
             while let Some(res) = stream.next().await {
                 res.unwrap();
             }
@@ -137,12 +129,10 @@ async fn test_json_typed_nullability_defaults_e2e() {
 
             // 2) LowCardinality(String) defaults to empty string when missing
             let defaults_status = seen.iter().filter(|o| get(o, "status") == "").count();
-            assert!(
-                defaults_status >= 2,
-                "Expected at least two rows with status=\"\" : {seen:?}"
-            );
+            assert!(defaults_status >= 2, "Expected at least two rows with status=\"\" : {seen:?}");
 
-            // 3) Variant missing should be JSON null; present should be number (or a stringified number)
+            // 3) Variant missing should be JSON null; present should be number (or a stringified
+            //    number)
             assert!(seen.iter().any(|o| get(o, "value") == serde_json::Value::Null));
             assert!(
                 seen.iter().any(|o| {

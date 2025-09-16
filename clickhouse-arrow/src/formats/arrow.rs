@@ -1,13 +1,13 @@
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
-// use bytes::BytesMut;
+use tokio::io::AsyncWriteExt as _;
 
+// use bytes::BytesMut;
 use super::DeserializerState;
 use super::protocol_data::{EmptyBlock, ProtocolData};
 use crate::Type;
 use crate::arrow::ArrowDeserializerState;
 use crate::compression::{DecompressionReader, StreamingCompressor};
-use tokio::io::AsyncWriteExt as _;
 use crate::connection::ClientMetadata;
 use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::protocol::CompressionMethod;
@@ -51,7 +51,8 @@ impl super::sealed::ClientFormatImpl<RecordBatch> for ArrowFormat {
                 .await
                 .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "serialize"))?;
         } else {
-            // Stream-compress Arrow blocks during async serialization (avoid buffering entire batch)
+            // Stream-compress Arrow blocks during async serialization (avoid buffering entire
+            // batch)
             let mut sc = StreamingCompressor::new(
                 writer,
                 metadata.compression,

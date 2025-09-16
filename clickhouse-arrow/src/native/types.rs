@@ -622,7 +622,7 @@ impl Type {
                 | Type::Ipv4
                 | Type::Ipv6
                 | Type::Enum8(_)
-            | Type::Enum16(_) => {
+                | Type::Enum16(_) => {
                     sized::SizedSerializer::write(self, values, writer, state).await?;
                 }
 

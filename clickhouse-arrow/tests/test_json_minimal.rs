@@ -39,28 +39,24 @@ async fn test_json_minimal() {
 
             // Try to insert using native protocol with our JSON serialization
             // Provide valid JSON bytes (raw string, no escaping inside)
-            let json_values = vec![Value::String(
-                br#"{"id": 1, "name": "test"}"#.to_vec(),
-            )];
+            let json_values = vec![Value::String(br#"{"id": 1, "name": "test"}"#.to_vec())];
 
             let block = Block {
                 info:         BlockInfo::default(),
                 rows:         1,
-                column_types: vec![(
-                    "data".to_string(),
-                    Type::JSON {
-                        max_dynamic_paths: None,
-                        max_dynamic_types: None,
-                        typed_paths:       vec![],
-                        skip_exact:        vec![],
-                        skip_regex:        vec![],
-                    },
-                )],
+                column_types: vec![("data".to_string(), Type::JSON {
+                    max_dynamic_paths: None,
+                    max_dynamic_types: None,
+                    typed_paths:       vec![],
+                    skip_exact:        vec![],
+                    skip_regex:        vec![],
+                })],
                 column_data:  json_values,
             };
 
             use futures_util::StreamExt;
-            let mut stream = client.insert("INSERT INTO test_json_min VALUES", block, None).await.unwrap();
+            let mut stream =
+                client.insert("INSERT INTO test_json_min VALUES", block, None).await.unwrap();
             while let Some(result) = stream.next().await {
                 result.unwrap();
             }

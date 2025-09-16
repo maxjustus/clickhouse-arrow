@@ -1,5 +1,6 @@
-use tokio::io::AsyncReadExt;
 use std::future::Future;
+
+use tokio::io::AsyncReadExt;
 
 use super::{Deserializer, DeserializerState, Type};
 use crate::Result;
@@ -16,7 +17,7 @@ impl Deserializer for StringDeserializer {
     ) -> impl Future<Output = Result<()>> {
         async move { Ok(()) }
     }
-    
+
     async fn read<R: ClickHouseRead>(
         type_: &Type,
         reader: &mut R,
@@ -26,8 +27,6 @@ impl Deserializer for StringDeserializer {
         let mut path = Vec::new();
         read_with_path(type_, reader, rows, state, &mut path).await
     }
-
-    
 }
 
 pub(crate) async fn read_with_path<R: ClickHouseRead>(
@@ -38,12 +37,8 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
     path: &mut Vec<u16>,
 ) -> Result<Vec<Value>> {
     // Decide sparse by plan for current path (non-zero = SPARSE)
-    let sparse_enabled = state
-        .kind_plan
-        .as_ref()
-        .and_then(|p| p.get(path))
-        .map(|&k| k != 0)
-        .unwrap_or(false);
+    let sparse_enabled =
+        state.kind_plan.as_ref().and_then(|p| p.get(path)).map(|&k| k != 0).unwrap_or(false);
 
     if sparse_enabled {
         return crate::native::types::deserialize::sparse::read_sparse_with_path(

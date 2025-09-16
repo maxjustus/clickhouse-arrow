@@ -4,10 +4,8 @@ use super::DeserializerState;
 use super::protocol_data::{EmptyBlock, ProtocolData};
 use crate::Type;
 use crate::client::connection::ClientMetadata;
-// use crate::compression::compress_data_sync;
 use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::block::Block;
-// Already imported as `super::DeserializerState`
 use crate::native::protocol::CompressionMethod;
 use crate::prelude::*;
 
@@ -35,15 +33,13 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
         metadata: ClientMetadata,
         state: &mut DeserializerState,
     ) -> Result<Option<Block>> {
+        // this reads / parses one block at a time serially, clickhouse client seems to operate in
+        // parallel. Even given that it seems like we're 3x faster for single threaded reading?
+        // It would still be cool to support parallel reading/deserialization in the future.
         Ok(if let CompressionMethod::None = metadata.compression {
             Block::read_async(reader, revision, None, state).await?.into_option()
         } else {
-            // Stream-decompress all chunks for this packet and read block asynchronously - NOTE:
-            // this means that effectively we no longer use the sync deserialization code.
-            // This strat is simpler because with async block processing we properly handle
-            // multiple compressed chunks per block. The next todo should be to add an async
-            // compression writer and make the write path fully async as well. Then remove all
-            // the duplicative sync serialization/deserialization code.
+            // Stream-decompress all chunks for this packet and read block asynchronously
             let mut decompressor =
                 crate::compression::DecompressionReader::new(metadata.compression, reader).await?;
             Block::read_async(&mut decompressor, revision, None, state).await?.into_option()
@@ -55,7 +51,8 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
         data: Block,
         qid: Qid,
         header: Option<&[(String, Type)]>,
-        revision: u64,
+        revision: u64, // TODO: what is revision - server revision? compression block format
+        // revision? Would be good to document.
         metadata: ClientMetadata,
     ) -> Result<()> {
         // No-op: avoid noisy header logs in normal operation
@@ -76,9 +73,13 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
                 .write_async(&mut sc, revision, header, Some(metadata))
                 .instrument(trace_span!("serialize_block_streaming"))
                 .await
-                .inspect_err(|error| error!(?error, {ATT_QID} = %qid, "(block:streaming-compressed)"));
+                .inspect_err(
+                    |error| error!(?error, {ATT_QID} = %qid, "(block:streaming-compressed)"),
+                );
             // Ensure all frames are flushed; do NOT shutdown the underlying socket here.
-            if let Err(e) = sc.flush().await { error!(?e, {ATT_QID} = %qid, "flush compressor"); }
+            if let Err(e) = sc.flush().await {
+                error!(?e, {ATT_QID} = %qid, "flush compressor");
+            }
             res
         }
     }

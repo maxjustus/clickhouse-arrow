@@ -34,7 +34,6 @@ impl Serializer for PointSerializer {
         }
         Ok(())
     }
-
 }
 
 macro_rules! array_ser {

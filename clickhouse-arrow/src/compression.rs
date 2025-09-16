@@ -14,11 +14,11 @@
 /// See the [ClickHouse Native Protocol Documentation](https://clickhouse.com/docs/en/interfaces/tcp)
 /// for details on compression in the native protocol.
 use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, ready};
+
 use futures_util::FutureExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::task::ready;
 
 use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::protocol::CompressionMethod;
@@ -71,8 +71,6 @@ pub(crate) async fn compress_data<W: ClickHouseWrite>(
 
     Ok(())
 }
-
-// removed unused compress_data_sync (async compress_data covers usage)
 
 /// Reads and decompresses a single compression chunk.
 ///
@@ -286,14 +284,15 @@ impl<R: ClickHouseRead> AsyncRead for DecompressionReader<'_, R> {
 
 /// Async writer that frames and compresses data into ClickHouse compression chunks.
 /// Each chunk is written as:
-/// [16 bytes checksum][1 byte type][4 bytes compressed_size_with_header][4 bytes decompressed_size][payload]
+/// [16 bytes checksum][1 byte type][4 bytes compressed_size_with_header][4 bytes
+/// decompressed_size][payload]
 pub(crate) struct StreamingCompressor<W: AsyncWrite + Unpin> {
-    inner: W,
-    method: CompressionMethod,
+    inner:                  W,
+    method:                 CompressionMethod,
     max_uncompressed_chunk: usize,
-    in_buf: Vec<u8>,
-    out_buf: Vec<u8>,
-    out_pos: usize,
+    in_buf:                 Vec<u8>,
+    out_buf:                Vec<u8>,
+    out_pos:                usize,
 }
 
 impl<W: AsyncWrite + Unpin> StreamingCompressor<W> {
@@ -364,30 +363,44 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for StreamingCompressor<W> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-
         // Drain any pending frame
         while self.out_pos < self.out_buf.len() {
             // Take a temporary owned slice to avoid aliasing with &mut self.inner
             let start = self.out_pos;
             let tmp = self.out_buf[start..].to_vec();
             let nw = ready!(Pin::new(&mut self.inner).poll_write(cx, &tmp[..]))?;
-            if nw == 0 { return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "write zero"))); }
+            if nw == 0 {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "write zero",
+                )));
+            }
             self.out_pos += nw;
         }
         // accept into input buffer
         let remaining = self.max_uncompressed_chunk - self.in_buf.len();
         let take = remaining.min(buf.len());
-        if take > 0 { self.in_buf.extend_from_slice(&buf[..take]); }
+        if take > 0 {
+            self.in_buf.extend_from_slice(&buf[..take]);
+        }
         // if chunk full, frame and start draining
         if self.chunk_ready() {
             if let Err(e) = self.build_frame() {
-                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                )));
             }
             while self.out_pos < self.out_buf.len() {
                 let start = self.out_pos;
                 let tmp = self.out_buf[start..].to_vec();
                 let nw = ready!(Pin::new(&mut self.inner).poll_write(cx, &tmp[..]))?;
-                if nw == 0 { return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "write zero"))); }
+                if nw == 0 {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "write zero",
+                    )));
+                }
                 self.out_pos += nw;
             }
             self.out_buf.clear();
@@ -396,28 +409,38 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for StreamingCompressor<W> {
         Poll::Ready(Ok(take))
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         // drain any existing frame
         while self.out_pos < self.out_buf.len() {
             let start = self.out_pos;
             let tmp = self.out_buf[start..].to_vec();
             let nw = ready!(Pin::new(&mut self.inner).poll_write(cx, &tmp[..]))?;
-            if nw == 0 { return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "write zero"))); }
+            if nw == 0 {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "write zero",
+                )));
+            }
             self.out_pos += nw;
         }
         // if we have buffered input, frame it and drain
         if !self.in_buf.is_empty() {
             if let Err(e) = self.build_frame() {
-                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                )));
             }
             while self.out_pos < self.out_buf.len() {
                 let start = self.out_pos;
                 let tmp = self.out_buf[start..].to_vec();
                 let nw = ready!(Pin::new(&mut self.inner).poll_write(cx, &tmp[..]))?;
-                if nw == 0 { return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "write zero"))); }
+                if nw == 0 {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "write zero",
+                    )));
+                }
                 self.out_pos += nw;
             }
             self.out_buf.clear();
@@ -426,10 +449,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for StreamingCompressor<W> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         ready!(self.as_mut().poll_flush(cx))?;
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }

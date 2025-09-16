@@ -66,11 +66,16 @@ pub(crate) mod sealed {
 pub(crate) struct DeserializerState<T: Default = ()> {
     pub(crate) options:        Option<ArrowOptions>,
     pub(crate) deserializer:   T,
+    // TODO: just wondering out loud. We do kind_plan for all paths in one pass but we have a
+    // single type_specific state. Are these sort of inconsistent patterns or does it make sense?
+    // Type specific is sort of a container for state as we deserialize so maybe it makes sense?
     pub(crate) type_specific:  TypeSpecificState,
     // Sparse/custom plan and traversal state
     // When present, maps a type-path (sequence of child indexes from column root)
     // to a kind byte (0 = DEFAULT, non-zero = SPARSE).
+    // TODO: kind is too general. Should this serialization_type_by_path?
     pub(crate) kind_plan:      Option<BTreeMap<Vec<u16>, u8>>,
+    // TODO: this feels like a bad name. Maybe `sparse_format_state`?
     // Runtime sparse state per leaf path: (num_trailing_defaults, has_value_after_defaults)
     pub(crate) sparse_runtime: BTreeMap<Vec<u16>, (usize, bool)>,
 }

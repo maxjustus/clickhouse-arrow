@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use tokio::io::AsyncReadExt;
 
@@ -15,6 +15,16 @@ use crate::{Error, Result};
 const JSON_OBJECT_VERSION_FLATTENED: u64 = 3;
 
 pub(crate) struct JsonDeserializer;
+
+enum SegmentRef<'a> {
+    Borrowed(&'a [String]),
+    Fallback(usize),
+}
+
+struct PathEntry<'a> {
+    segments: SegmentRef<'a>,
+    values:   &'a [Value],
+}
 
 impl JsonDeserializer {
     /// Common logic for reading JSON data (async version)
@@ -47,18 +57,16 @@ impl JsonDeserializer {
                     Error::DeserializeError("JSON object data not set".to_string())
                 })?;
 
-                // Read values for each path
-                let mut path_values = HashMap::new();
+                let mut path_values = Vec::with_capacity(typed_paths.len() + path_names.len());
 
                 // Typed path prefixes were already read in read_prefix; now read their data
-                for (path_name, type_) in &typed_paths {
+                for (_path_name, type_) in &typed_paths {
                     let mut typed_state = DeserializerState::default();
                     let values = type_.deserialize_column(reader, rows, &mut typed_state).await?;
-                    let old = path_values.insert(path_name.clone(), values);
-                    debug_assert!(old.is_none());
+                    path_values.push(values);
                 }
 
-                for (path_idx, path_name) in path_names.iter().enumerate() {
+                for (path_idx, _path_name) in path_names.iter().enumerate() {
                     let (total_types, types) = &dynamic_data[path_idx];
 
                     // Read discriminators
@@ -67,20 +75,21 @@ impl JsonDeserializer {
                         discriminators.push(read_discriminator!(async reader, *total_types));
                     }
 
-                    // Build offsets
+                    // Prepare offset bookkeeping
+                    let total_types_usize = (*total_types).try_into().map_err(|_| {
+                        Error::DeserializeError("Too many dynamic types in JSON column".to_string())
+                    })?;
                     let (offsets, row_count_by_type) =
-                        Self::build_offsets(&discriminators, *total_types);
+                        Self::build_offsets(&discriminators, *total_types, total_types_usize);
 
                     // Read column data
-                    let mut columns = HashMap::new();
+                    let mut columns = vec![Vec::new(); total_types_usize];
                     for (idx, (_type_name, typ)) in types.iter().enumerate() {
-                        let type_idx = idx as u64;
-                        if let Some(&count) = row_count_by_type.get(&type_idx)
+                        if let Some(&count) = row_count_by_type.get(idx)
                             && count > 0
                         {
                             let values = typ.deserialize_column(reader, count, state).await?;
-                            let old = columns.insert(type_idx, values);
-                            debug_assert!(old.is_none());
+                            columns[idx] = values;
                         }
                     }
 
@@ -92,8 +101,7 @@ impl JsonDeserializer {
                         *total_types,
                         rows,
                     );
-                    let old = path_values.insert(path_name.clone(), values);
-                    debug_assert!(old.is_none());
+                    path_values.push(values);
                 }
 
                 // Build JSON objects with all paths (typed and dynamic)
@@ -161,15 +169,22 @@ impl JsonDeserializer {
     fn build_offsets(
         discriminators: &[u64],
         total_types: u64,
-    ) -> (Vec<usize>, HashMap<u64, usize>) {
-        let mut row_count_by_type = HashMap::new();
+        total_types_len: usize,
+    ) -> (Vec<usize>, Vec<usize>) {
+        let mut row_count_by_type = vec![0usize; total_types_len];
         let mut offsets = vec![0; discriminators.len()];
 
         for (i, &disc) in discriminators.iter().enumerate() {
-            if disc != total_types {
-                let count = row_count_by_type.entry(disc).or_default();
+            if disc == total_types {
+                continue;
+            }
+
+            let disc_idx = disc as usize;
+            if let Some(count) = row_count_by_type.get_mut(disc_idx) {
                 offsets[i] = *count;
                 *count += 1;
+            } else {
+                offsets[i] = 0;
             }
         }
 
@@ -180,7 +195,7 @@ impl JsonDeserializer {
     fn reconstruct_path_values(
         discriminators: &[u64],
         offsets: &[usize],
-        columns: &HashMap<u64, Vec<Value>>,
+        columns: &[Vec<Value>],
         total_types: u64,
         rows: usize,
     ) -> Vec<Value> {
@@ -189,7 +204,7 @@ impl JsonDeserializer {
         for (i, &disc) in discriminators.iter().enumerate() {
             if disc == total_types {
                 values.push(Value::Null);
-            } else if let Some(column) = columns.get(&disc) {
+            } else if let Some(column) = columns.get(disc as usize) {
                 let offset = offsets[i];
                 values.push(column.get(offset).cloned().unwrap_or(Value::Null));
             } else {
@@ -204,28 +219,39 @@ impl JsonDeserializer {
     /// Emits `Value::Json(..)` when serde is enabled, otherwise `Value::Object(Vec<u8>)`.
     fn build_json_objects(
         path_names: &[String],
-        path_values: &HashMap<String, Vec<Value>>,
+        path_values: &[Vec<Value>],
         rows: usize,
         path_segments: &BTreeMap<String, Vec<String>>,
     ) -> Result<Vec<Value>> {
         let mut result = Vec::with_capacity(rows);
 
+        let mut entries = Vec::with_capacity(path_names.len());
+        let mut fallback_segments: Vec<Vec<String>> = Vec::new();
+        for (idx, path_name) in path_names.iter().enumerate() {
+            let segment_ref = if let Some(segments) = path_segments.get(path_name) {
+                SegmentRef::Borrowed(segments.as_slice())
+            } else {
+                fallback_segments.push(path_name.split('.').map(|s| s.to_string()).collect());
+                SegmentRef::Fallback(fallback_segments.len() - 1)
+            };
+            let values = path_values.get(idx).ok_or_else(|| {
+                Error::DeserializeError(format!("Path values missing for '{path_name}'"))
+            })?;
+            entries.push(PathEntry { segments: segment_ref, values: values.as_slice() });
+        }
+
         for row_idx in 0..rows {
             let mut row_object = serde_json::Map::new();
 
-            for path_name in path_names {
-                if let Some(path_column) = path_values.get(path_name)
-                    && let Some(value) = path_column.get(row_idx)
+            for entry in &entries {
+                if let Some(value) = entry.values.get(row_idx)
                     && !matches!(value, Value::Null)
                 {
-                    if let Some(segs) = path_segments.get(path_name) {
-                        Self::set_nested_value_segments(&mut row_object, segs, value)?;
-                    } else {
-                        // Fallback split (unexpected if prefix cached them)
-                        let segs: Vec<String> =
-                            path_name.split('.').map(|s| s.to_string()).collect();
-                        Self::set_nested_value_segments(&mut row_object, &segs, value)?;
-                    }
+                    let segments = match entry.segments {
+                        SegmentRef::Borrowed(seg) => seg,
+                        SegmentRef::Fallback(idx) => &fallback_segments[idx],
+                    };
+                    Self::set_nested_value_segments(&mut row_object, segments, value)?;
                 }
             }
 
@@ -327,12 +353,16 @@ impl Deserializer for JsonDeserializer {
         // Build and cache path segments for typed and dynamic paths
         let mut path_segments = BTreeMap::new();
         for (name, _) in &typed_paths {
-            drop(path_segments
-                .insert(name.clone(), name.split('.').map(|s| s.to_string()).collect()));
+            drop(
+                path_segments
+                    .insert(name.clone(), name.split('.').map(|s| s.to_string()).collect()),
+            );
         }
         for name in &dynamic_path_names {
-            drop(path_segments
-                .insert(name.clone(), name.split('.').map(|s| s.to_string()).collect()));
+            drop(
+                path_segments
+                    .insert(name.clone(), name.split('.').map(|s| s.to_string()).collect()),
+            );
         }
 
         // Store metadata in state

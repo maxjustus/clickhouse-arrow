@@ -10,4 +10,3 @@ pub(crate) fn mk_kind_plan(entries: &[(Vec<u16>, u8)]) -> BTreeMap<Vec<u16>, u8>
     }
     plan
 }
-

@@ -43,5 +43,4 @@ impl Serializer for NullableSerializer {
         inner_type.serialize_column(values, writer, state).await?;
         Ok(())
     }
-
 }

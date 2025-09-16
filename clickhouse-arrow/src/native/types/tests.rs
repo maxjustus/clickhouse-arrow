@@ -9,8 +9,7 @@ use super::deserialize::ClickHouseNativeDeserializer;
 use super::serialize::ClickHouseNativeSerializer;
 use crate::formats::{DeserializerState, SerializerState};
 use crate::{
-    Date, DateTime, DynDateTime64, MultiPolygon, Point, Polygon, Result, Ring, Value, i256,
-    u256,
+    Date, DateTime, DynDateTime64, MultiPolygon, Point, Polygon, Result, Ring, Value, i256, u256,
 };
 
 async fn roundtrip_values(type_: &Type, values: &[Value]) -> Result<Vec<Value>> {

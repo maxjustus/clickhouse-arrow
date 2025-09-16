@@ -50,16 +50,16 @@ async fn test_json_max_dynamic_types_server_selection() {
             let type_ = Type::JSON {
                 max_dynamic_paths: None,
                 max_dynamic_types: Some(2),
-                typed_paths: vec![],
-                skip_exact: vec![],
-                skip_regex: vec![],
+                typed_paths:       vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             };
 
             let block = Block {
-                info: BlockInfo::default(),
-                rows: rows.len() as u64,
+                info:         BlockInfo::default(),
+                rows:         rows.len() as u64,
                 column_types: vec![("data".to_string(), type_)],
-                column_data: rows.clone(),
+                column_data:  rows.clone(),
             };
 
             use futures_util::StreamExt;
@@ -67,20 +67,28 @@ async fn test_json_max_dynamic_types_server_selection() {
                 .insert("INSERT INTO e2e_json_max_dyn_types VALUES", block, None)
                 .await
                 .unwrap();
-            while let Some(r) = stream.next().await { r.unwrap(); }
+            while let Some(r) = stream.next().await {
+                r.unwrap();
+            }
 
             #[derive(clickhouse_arrow_derive::Row, Debug)]
-            struct Cnt { count: u64 }
+            struct Cnt {
+                count: u64,
+            }
             let mut cnt_stream = client
                 .query::<Cnt>("SELECT count() AS count FROM e2e_json_max_dyn_types", None)
                 .await
                 .unwrap();
             let mut total = 0u64;
-            while let Some(r) = cnt_stream.next().await { total += r.unwrap().count; }
+            while let Some(r) = cnt_stream.next().await {
+                total += r.unwrap().count;
+            }
             assert_eq!(total, 4, "expected 4 rows inserted");
 
             #[derive(clickhouse_arrow_derive::Row, Debug)]
-            struct RowOut { data: String }
+            struct RowOut {
+                data: String,
+            }
             let mut rows_out = client
                 .query::<RowOut>(
                     "SELECT toJSONString(data) AS data FROM e2e_json_max_dyn_types ORDER BY data",
@@ -89,7 +97,9 @@ async fn test_json_max_dynamic_types_server_selection() {
                 .await
                 .unwrap();
             let mut seen = Vec::new();
-            while let Some(r) = rows_out.next().await { seen.push(r.unwrap().data); }
+            while let Some(r) = rows_out.next().await {
+                seen.push(r.unwrap().data);
+            }
             assert_eq!(seen.len(), 4);
 
             client.execute("DROP TABLE e2e_json_max_dyn_types", None).await.unwrap();
@@ -99,6 +109,7 @@ async fn test_json_max_dynamic_types_server_selection() {
     )
     .await;
 
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
-

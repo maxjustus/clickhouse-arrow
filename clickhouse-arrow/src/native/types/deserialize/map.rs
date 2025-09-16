@@ -79,8 +79,6 @@ impl Deserializer for MapDeserializer {
         }
         Ok(out)
     }
-
-    
 }
 
 pub(crate) async fn read_with_path<R: ClickHouseRead>(
@@ -115,17 +113,13 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
 
     // Read keys under path [0]
     path.push(0);
-    let keys = key
-        .deserialize_column_with_path(reader, total_length, state, path)
-        .await?;
+    let keys = key.deserialize_column_with_path(reader, total_length, state, path).await?;
     let _ = path.pop();
     assert_eq!(keys.len(), total_length);
 
     // Read values under path [1]
     path.push(1);
-    let values = value
-        .deserialize_column_with_path(reader, total_length, state, path)
-        .await?;
+    let values = value.deserialize_column_with_path(reader, total_length, state, path).await?;
     let _ = path.pop();
     assert_eq!(values.len(), total_length);
 

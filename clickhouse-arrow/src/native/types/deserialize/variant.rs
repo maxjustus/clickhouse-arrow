@@ -149,7 +149,6 @@ impl VariantDeserializer {
         Self::reconstruct_values(&discriminators, &offsets, &columns)
     }
 
-
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
         type_: &Type,
         reader: &mut R,
@@ -176,7 +175,6 @@ impl VariantDeserializer {
     ) -> Result<Vec<Value>> {
         Self::read_internal_async(type_, reader, rows, state).await
     }
-
 }
 
 #[cfg(test)]
@@ -372,13 +370,10 @@ mod tests {
         ]);
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
-        VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state)
+        VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state).await.unwrap();
+        let values = VariantDeserializer::read_async(&variant_type, &mut reader, 3, &mut state)
             .await
             .unwrap();
-        let values =
-            VariantDeserializer::read_async(&variant_type, &mut reader, 3, &mut state)
-                .await
-                .unwrap();
         assert_eq!(values.len(), 3);
 
         // Check array value
@@ -403,13 +398,10 @@ mod tests {
         let (variant_type, data) = create_multitype_test_data();
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
-        VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state)
+        VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state).await.unwrap();
+        let values = VariantDeserializer::read_async(&variant_type, &mut reader, 5, &mut state)
             .await
             .unwrap();
-        let values =
-            VariantDeserializer::read_async(&variant_type, &mut reader, 5, &mut state)
-                .await
-                .unwrap();
         assert_eq!(values.len(), 5);
 
         // Verify discriminator assignments match expected sort order
@@ -423,13 +415,10 @@ mod tests {
         let (variant_type, data) = create_multitype_test_data();
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
-        VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state)
+        VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state).await.unwrap();
+        let values = VariantDeserializer::read_async(&variant_type, &mut reader, 5, &mut state)
             .await
             .unwrap();
-        let values =
-            VariantDeserializer::read_async(&variant_type, &mut reader, 5, &mut state)
-                .await
-                .unwrap();
 
         // Check array (discriminator 0)
         match &values[3] {
@@ -448,13 +437,10 @@ mod tests {
         let (variant_type, data) = create_multitype_test_data();
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
-        VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state)
+        VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state).await.unwrap();
+        let values = VariantDeserializer::read_async(&variant_type, &mut reader, 5, &mut state)
             .await
             .unwrap();
-        let values =
-            VariantDeserializer::read_async(&variant_type, &mut reader, 5, &mut state)
-                .await
-                .unwrap();
 
         // Check DateTime (discriminator 2)
         match &values[4] {

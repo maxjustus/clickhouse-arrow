@@ -32,8 +32,6 @@ pub(crate) trait ProtocolData<Return, Deser: Default> {
         options: Self::Options,
     ) -> impl Future<Output = Result<()>> + Send;
 
-    
-
     /// Reads a `ClickHouse` native block and constructs the data.
     ///
     /// # Arguments
@@ -51,8 +49,6 @@ pub(crate) trait ProtocolData<Return, Deser: Default> {
         options: Self::Options,
         state: &mut DeserializerState<Deser>,
     ) -> impl Future<Output = Result<Return>> + Send;
-
-    
 }
 
 /// Simple trait to determine whether a `Block` of data (whatever impls `ProtocolData`) is empty, ie

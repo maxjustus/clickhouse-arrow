@@ -124,9 +124,7 @@ impl<T: ToSql, Y: ToSql, S: ::std::hash::BuildHasher> ToSql for IndexMap<T, Y, S
 
 #[cfg(feature = "serde")]
 impl ToSql for serde_json::Value {
-    fn to_sql(self, _type_hint: Option<&Type>) -> Result<Value> {
-        Ok(Value::Object(self.to_string().into_bytes()))
-    }
+    fn to_sql(self, _type_hint: Option<&Type>) -> Result<Value> { Ok(Value::Json(self)) }
 }
 
 impl<T: ToSql> ToSql for Option<T> {
@@ -200,6 +198,7 @@ tuple_impls! {
 
 /// ToSql implementation for serde_json::Map<String, serde_json::Value>
 /// This enables inserting JSON objects directly as Object columns
+/// TODO: expound on this / what the code path for this is and verify tests
 #[cfg(feature = "serde")]
 impl ToSql for serde_json::Map<String, serde_json::Value> {
     fn to_sql(self, type_hint: Option<&Type>) -> Result<Value> {

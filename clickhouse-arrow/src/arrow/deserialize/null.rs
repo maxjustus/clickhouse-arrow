@@ -84,7 +84,6 @@ pub(crate) async fn deserialize_async<R: ClickHouseRead>(
     inner.deserialize_arrow_async(builder, reader, data_type, rows, &nulls, rbuffer).await
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;

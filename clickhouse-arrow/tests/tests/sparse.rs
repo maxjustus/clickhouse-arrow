@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use clickhouse_arrow::prelude::*;
 use clickhouse_arrow::InsertOptions;
-use futures_util::StreamExt;
+use clickhouse_arrow::prelude::*;
 use clickhouse_arrow::test_utils::ClickHouseContainer;
+use futures_util::StreamExt;
 
 // Verify we can read sparse/custom Float32 columns correctly end-to-end.
 pub async fn test_sparse_float32_e2e(ch: Arc<ClickHouseContainer>) {
@@ -25,10 +25,8 @@ pub async fn test_sparse_float32_e2e(ch: Arc<ClickHouseContainer>) {
         .expect("create");
 
     // Insert 10 rows; only 2 are non-default to trigger sparse on server
-    let mut op = client
-        .insert_into("e2e_sparse_f32", InsertOptions::default())
-        .await
-        .expect("insert_into");
+    let mut op =
+        client.insert_into("e2e_sparse_f32", InsertOptions::default()).await.expect("insert_into");
     let rows = vec![
         serde_json::json!({"x": 0.0}),
         serde_json::json!({"x": 3000.0}),
@@ -53,7 +51,9 @@ pub async fn test_sparse_float32_e2e(ch: Arc<ClickHouseContainer>) {
         .await
         .expect("select");
     let mut got = Vec::new();
-    while let Some(r) = rs.next().await { got.push(r.expect("row")); }
+    while let Some(r) = rs.next().await {
+        got.push(r.expect("row"));
+    }
     assert_eq!(got.len(), 10);
     let vals: Vec<f32> = got.into_iter().map(|r| r.x).collect();
     assert_eq!(vals, vec![0.0, 3000.0, 0.0, 0.0, 0.0, 30000.0, 0.0, 0.0, 0.0, 0.0]);
@@ -74,7 +74,8 @@ pub async fn test_sparse_tuple_nested_e2e(ch: Arc<ClickHouseContainer>) {
     client.execute("DROP TABLE IF EXISTS e2e_sparse_tuple_nested", None).await.expect("drop");
     client
         .execute(
-            "CREATE TABLE e2e_sparse_tuple_nested (t Tuple(UInt64, Tuple(UUID, UInt64))) ENGINE = MergeTree() ORDER BY tuple()",
+            "CREATE TABLE e2e_sparse_tuple_nested (t Tuple(UInt64, Tuple(UUID, UInt64))) ENGINE = \
+             MergeTree() ORDER BY tuple()",
             None,
         )
         .await
@@ -111,7 +112,9 @@ pub async fn test_sparse_tuple_nested_e2e(ch: Arc<ClickHouseContainer>) {
         .await
         .expect("select");
     let mut got = Vec::new();
-    while let Some(r) = rs.next().await { got.push(r.expect("row")); }
+    while let Some(r) = rs.next().await {
+        got.push(r.expect("row"));
+    }
     assert_eq!(got.len(), 10);
 
     // Validate a few key rows
@@ -122,8 +125,5 @@ pub async fn test_sparse_tuple_nested_e2e(ch: Arc<ClickHouseContainer>) {
     assert_eq!(got[5].o, 2);
     assert_eq!(got[8].u.to_string(), "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
-    client
-        .execute("DROP TABLE e2e_sparse_tuple_nested", None)
-        .await
-        .expect("drop");
+    client.execute("DROP TABLE e2e_sparse_tuple_nested", None).await.expect("drop");
 }

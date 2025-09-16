@@ -111,12 +111,7 @@ e2e_test!(e2e_json_map_roundtrip, tests::native::test_json_map_roundtrip, TRACIN
 
 // Sparse/custom Float32 e2e
 #[cfg(feature = "derive")]
-e2e_test!(
-    e2e_sparse_float32,
-    tests::sparse::test_sparse_float32_e2e,
-    TRACING_DIRECTIVES,
-    None
-);
+e2e_test!(e2e_sparse_float32, tests::sparse::test_sparse_float32_e2e, TRACING_DIRECTIVES, None);
 
 // Sparse/custom nested Tuple e2e
 #[cfg(feature = "derive")]

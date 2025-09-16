@@ -467,7 +467,8 @@ impl<R: ClickHouseRead + 'static> Reader<R> {
         revision: u64,
         metadata: ClientMetadata,
     ) -> Result<Option<ServerData<Block>>> {
-        drop(reader.read_string().await?);
+        drop(reader.read_string().await?); // table name..? TODO: confirm that. How does that make
+        // sense for select query results?
         let mut state = DeserializerState::default();
         let Some(block) = NativeFormat::read(reader, revision, metadata, &mut state)
             .await

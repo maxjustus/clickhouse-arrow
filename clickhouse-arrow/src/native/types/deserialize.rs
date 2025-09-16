@@ -39,7 +39,6 @@ pub(crate) trait ClickHouseNativeDeserializer {
         reader: &'a mut R,
         state: &'a mut DeserializerState,
     ) -> impl Future<Output = Result<()>> + Send + 'a;
-
 }
 
 impl ClickHouseNativeDeserializer for Type {
@@ -655,7 +654,8 @@ impl FromStr for Type {
                     let tuple = if !named.is_empty() {
                         if !inner.is_empty() {
                             return Err(Error::TypeParseError(
-                                "Cannot mix named and positional tuple fields in Nested".to_string(),
+                                "Cannot mix named and positional tuple fields in Nested"
+                                    .to_string(),
                             ));
                         }
                         Type::TupleNamed(named)
@@ -1150,10 +1150,7 @@ mod tests {
     #[test]
     fn test_from_str_nested_mapping() {
         let ty = Type::from_str("Nested(UInt64, String)").unwrap();
-        assert_eq!(
-            ty,
-            Type::Array(Box::new(Type::Tuple(vec![Type::UInt64, Type::String])))
-        );
+        assert_eq!(ty, Type::Array(Box::new(Type::Tuple(vec![Type::UInt64, Type::String]))));
 
         let ty2 = Type::from_str("Nested(id UInt64, name String)").unwrap();
         assert_eq!(

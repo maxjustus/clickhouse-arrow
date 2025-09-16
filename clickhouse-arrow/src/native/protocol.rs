@@ -1,5 +1,7 @@
 use std::str::FromStr;
 
+use chrono::{DateTime, Utc};
+
 use strum::AsRefStr;
 use uuid::Uuid;
 
@@ -331,11 +333,14 @@ pub struct ProfileEvent {
 impl ProfileEvent {
     fn update_value(&mut self, name: &str, value: Value, type_: &Type) -> Result<()> {
         match name {
-            "host_name" => self.host_name = value.to_string(),
-            "current_time" => self.current_time = value.to_string(),
+            "host_name" => self.host_name = value.to_value(type_)?,
+            "current_time" => {
+                let dt: DateTime<Utc> = value.to_value(type_)?;
+                self.current_time = dt.to_rfc3339();
+            }
             "thread_id" => self.thread_id = value.to_value(type_)?,
             "type_code" => self.type_code = value.to_value(type_)?,
-            "name" => self.name = value.to_string(),
+            "name" => self.name = value.to_value(type_)?,
             "value" => self.value = value.to_value(type_)?,
             _ => {}
         }

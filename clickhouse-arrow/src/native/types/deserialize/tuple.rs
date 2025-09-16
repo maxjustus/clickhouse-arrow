@@ -89,9 +89,7 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
             for (idx, type_) in inner_types.iter().enumerate() {
                 #[allow(clippy::cast_possible_truncation)]
                 path.push(idx as u16);
-                let data = type_
-                    .deserialize_column_with_path(reader, rows, state, path)
-                    .await?;
+                let data = type_.deserialize_column_with_path(reader, rows, state, path).await?;
                 let _ = path.pop();
                 column_data.push(data);
             }
@@ -102,9 +100,7 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
             for (idx, (_, type_)) in fields.iter().enumerate() {
                 #[allow(clippy::cast_possible_truncation)]
                 path.push(idx as u16);
-                let data = type_
-                    .deserialize_column_with_path(reader, rows, state, path)
-                    .await?;
+                let data = type_.deserialize_column_with_path(reader, rows, state, path).await?;
                 let _ = path.pop();
                 column_data.push(data);
             }
@@ -118,9 +114,10 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::BytesMut;
     use tokio::io::{AsyncRead, ReadBuf};
+
+    use super::*;
 
     // Minimal AsyncRead over Bytes
     struct BytesReader(bytes::Bytes);
@@ -143,10 +140,14 @@ mod tests {
         while pos < 9 {
             let mut byte = (value & 0x7F) as u8;
             value >>= 7;
-            if value > 0 { byte |= 0x80; }
+            if value > 0 {
+                byte |= 0x80;
+            }
             tmp[pos] = byte;
             pos += 1;
-            if value == 0 { break; }
+            if value == 0 {
+                break;
+            }
         }
         buf.extend_from_slice(&tmp[..pos]);
     }
@@ -195,17 +196,15 @@ mod tests {
         let mut state = DeserializerState::default();
         use crate::native::test_helpers::mk_kind_plan;
         state.kind_plan = Some(mk_kind_plan(&[
-            (vec![], 0),          // tuple node default
-            (vec![0], 1),         // e0 sparse
-            (vec![1], 0),         // e1 default
-            (vec![2], 1),         // e2 sparse
+            (vec![], 0),  // tuple node default
+            (vec![0], 1), // e0 sparse
+            (vec![1], 0), // e1 default
+            (vec![2], 1), // e2 sparse
         ]));
 
         // Read tuple column
-        let out = tuple_ty
-            .deserialize_column(&mut reader, rows, &mut state)
-            .await
-            .expect("tuple read");
+        let out =
+            tuple_ty.deserialize_column(&mut reader, rows, &mut state).await.expect("tuple read");
 
         assert_eq!(out.len(), rows);
         // Validate several rows
@@ -308,11 +307,11 @@ mod tests {
         let mut state = DeserializerState::default();
         use crate::native::test_helpers::mk_kind_plan;
         state.kind_plan = Some(mk_kind_plan(&[
-            (vec![], 0),      // tuple root
-            (vec![0], 1),     // outer first elem sparse
-            (vec![1], 0),     // inner tuple default
-            (vec![1, 0], 0),  // inner first elem dense
-            (vec![1, 1], 1),  // inner second elem sparse
+            (vec![], 0),     // tuple root
+            (vec![0], 1),    // outer first elem sparse
+            (vec![1], 0),    // inner tuple default
+            (vec![1, 0], 0), // inner first elem dense
+            (vec![1, 1], 1), // inner second elem sparse
         ]));
 
         let out = tuple_ty
@@ -328,27 +327,49 @@ mod tests {
                 assert!(matches!(iv[0], Value::UInt64(100)));
                 if let Value::Uuid(u) = iv[1] {
                     assert_eq!(u.as_u128(), ((u128::from(a1) << 64) | u128::from(a2)));
-                } else { panic!("expected uuid"); }
-            } else { panic!("expected inner tuple"); }
-        } else { panic!("expected tuple"); }
+                } else {
+                    panic!("expected uuid");
+                }
+            } else {
+                panic!("expected inner tuple");
+            }
+        } else {
+            panic!("expected tuple");
+        }
 
         // Row 1: [0]=11 present, inner=(101, default uuid)
         if let Value::Tuple(v) = &out[1] {
             assert!(matches!(v[0], Value::UInt64(11)));
             if let Value::Tuple(iv) = &v[1] {
                 assert!(matches!(iv[0], Value::UInt64(101)));
-                if let Value::Uuid(u) = iv[1] { assert_eq!(u.as_u128(), 0); } else { panic!("uuid"); }
-            } else { panic!("inner"); }
-        } else { panic!("tuple"); }
+                if let Value::Uuid(u) = iv[1] {
+                    assert_eq!(u.as_u128(), 0);
+                } else {
+                    panic!("uuid");
+                }
+            } else {
+                panic!("inner");
+            }
+        } else {
+            panic!("tuple");
+        }
 
         // Row 3: [0]=33 present, inner=(103, default)
         if let Value::Tuple(v) = &out[3] {
             assert!(matches!(v[0], Value::UInt64(33)));
             if let Value::Tuple(iv) = &v[1] {
                 assert!(matches!(iv[0], Value::UInt64(103)));
-                if let Value::Uuid(u) = iv[1] { assert_eq!(u.as_u128(), 0); } else { panic!("uuid"); }
-            } else { panic!("inner"); }
-        } else { panic!("tuple"); }
+                if let Value::Uuid(u) = iv[1] {
+                    assert_eq!(u.as_u128(), 0);
+                } else {
+                    panic!("uuid");
+                }
+            } else {
+                panic!("inner");
+            }
+        } else {
+            panic!("tuple");
+        }
 
         // Row 4: [0]=default(0), inner=(104, uuid b)
         if let Value::Tuple(v) = &out[4] {
@@ -357,8 +378,14 @@ mod tests {
                 assert!(matches!(iv[0], Value::UInt64(104)));
                 if let Value::Uuid(u) = iv[1] {
                     assert_eq!(u.as_u128(), ((u128::from(b1) << 64) | u128::from(b2)));
-                } else { panic!("uuid"); }
-            } else { panic!("inner"); }
-        } else { panic!("tuple"); }
+                } else {
+                    panic!("uuid");
+                }
+            } else {
+                panic!("inner");
+            }
+        } else {
+            panic!("tuple");
+        }
     }
 }

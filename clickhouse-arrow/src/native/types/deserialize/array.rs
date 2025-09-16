@@ -69,8 +69,6 @@ impl<T: ArrayDeserializerGeneric + 'static> Deserializer for T {
 
         Ok(out)
     }
-
-    
 }
 
 pub(crate) async fn read_with_path<R: ClickHouseRead>(
@@ -112,10 +110,12 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use bytes::BytesMut;
     use std::str::FromStr;
+
+    use bytes::BytesMut;
     use tokio::io::{AsyncRead, ReadBuf};
+
+    use super::*;
 
     // Minimal AsyncRead over Bytes
     struct BytesReader(bytes::Bytes);
@@ -138,10 +138,14 @@ mod tests {
         while pos < 9 {
             let mut byte = (value & 0x7F) as u8;
             value >>= 7;
-            if value > 0 { byte |= 0x80; }
+            if value > 0 {
+                byte |= 0x80;
+            }
             tmp[pos] = byte;
             pos += 1;
-            if value == 0 { break; }
+            if value == 0 {
+                break;
+            }
         }
         buf.extend_from_slice(&tmp[..pos]);
     }
@@ -180,16 +184,14 @@ mod tests {
         use crate::native::test_helpers::mk_kind_plan;
         // Plan kinds: [] for Array (ignored), [0] for inner tuple, then elements
         state.kind_plan = Some(mk_kind_plan(&[
-            (vec![], 0),       // array node
-            (vec![0], 0),      // tuple node
-            (vec![0, 0], 1),   // tuple e0 sparse
-            (vec![0, 1], 0),   // tuple e1 default
+            (vec![], 0),     // array node
+            (vec![0], 0),    // tuple node
+            (vec![0, 0], 1), // tuple e0 sparse
+            (vec![0, 1], 0), // tuple e1 default
         ]));
 
-        let out = ty
-            .deserialize_column(&mut reader, 3, &mut state)
-            .await
-            .expect("array(tuple) read");
+        let out =
+            ty.deserialize_column(&mut reader, 3, &mut state).await.expect("array(tuple) read");
 
         assert_eq!(out.len(), 3);
         // row0 has 2 items: (7,100), (0,200)
@@ -198,12 +200,18 @@ mod tests {
             if let Value::Tuple(v) = &items[0] {
                 assert!(matches!(v[0], Value::UInt64(7)));
                 assert!(matches!(v[1], Value::UInt64(100)));
-            } else { panic!("expected tuple"); }
+            } else {
+                panic!("expected tuple");
+            }
             if let Value::Tuple(v) = &items[1] {
                 assert!(matches!(v[0], Value::UInt64(0)));
                 assert!(matches!(v[1], Value::UInt64(200)));
-            } else { panic!("expected tuple"); }
-        } else { panic!("expected array"); }
+            } else {
+                panic!("expected tuple");
+            }
+        } else {
+            panic!("expected array");
+        }
 
         // row2 has 1 item: (9,300)
         if let Value::Array(items) = &out[2] {
@@ -211,8 +219,12 @@ mod tests {
             if let Value::Tuple(v) = &items[0] {
                 assert!(matches!(v[0], Value::UInt64(9)));
                 assert!(matches!(v[1], Value::UInt64(300)));
-            } else { panic!("expected tuple"); }
-        } else { panic!("expected array"); }
+            } else {
+                panic!("expected tuple");
+            }
+        } else {
+            panic!("expected array");
+        }
     }
 
     #[tokio::test]
@@ -238,10 +250,14 @@ mod tests {
         put_var_uint(&mut bytes, 0); // first value immediately
         put_var_uint(&mut bytes, 1); // gap of 1 till next
         put_var_uint(&mut bytes, (1u64 << 62) | 0); // end, no trailing defaults
-        let u0a: u64 = 0x01010101_02020202; let u0b: u64 = 0x03030303_04040404;
-        let u2a: u64 = 0xa0a0a0a0_b0b0b0b0; let u2b: u64 = 0xc0c0c0c0_d0d0d0d0;
-        bytes.extend_from_slice(&u0a.to_le_bytes()); bytes.extend_from_slice(&u0b.to_le_bytes());
-        bytes.extend_from_slice(&u2a.to_le_bytes()); bytes.extend_from_slice(&u2b.to_le_bytes());
+        let u0a: u64 = 0x01010101_02020202;
+        let u0b: u64 = 0x03030303_04040404;
+        let u2a: u64 = 0xa0a0a0a0_b0b0b0b0;
+        let u2b: u64 = 0xc0c0c0c0_d0d0d0d0;
+        bytes.extend_from_slice(&u0a.to_le_bytes());
+        bytes.extend_from_slice(&u0b.to_le_bytes());
+        bytes.extend_from_slice(&u2a.to_le_bytes());
+        bytes.extend_from_slice(&u2b.to_le_bytes());
 
         // Inner UInt64 (sparse) across 3: present at item 1 only
         put_var_uint(&mut bytes, 1); // one default before first value
@@ -259,7 +275,8 @@ mod tests {
             (vec![0, 1, 0], 1), // inner uint64 sparse
         ]));
 
-        let out = ty.deserialize_column(&mut reader, 2, &mut state).await.expect("array nested tuple");
+        let out =
+            ty.deserialize_column(&mut reader, 2, &mut state).await.expect("array nested tuple");
         assert_eq!(out.len(), 2);
 
         // Row 0 has 1 item: (uuid0, (default))
@@ -268,27 +285,55 @@ mod tests {
             if let Value::Tuple(t) = &items[0] {
                 if let Value::Uuid(u) = t[0] {
                     assert_eq!(u.as_u128(), ((u128::from(u0a) << 64) | u128::from(u0b)));
-                } else { panic!("uuid0"); }
+                } else {
+                    panic!("uuid0");
+                }
                 if let Value::Tuple(it) = &t[1] {
                     assert!(matches!(it[0], Value::UInt64(0)));
-                } else { panic!("inner"); }
-            } else { panic!("tuple"); }
-        } else { panic!("array"); }
+                } else {
+                    panic!("inner");
+                }
+            } else {
+                panic!("tuple");
+            }
+        } else {
+            panic!("array");
+        }
 
         // Row 1 has 2 items: (default uuid, (777)), (uuid2, (default))
         if let Value::Array(items) = &out[1] {
             assert_eq!(items.len(), 2);
             if let Value::Tuple(t) = &items[0] {
-                if let Value::Uuid(u) = t[0] { assert_eq!(u.as_u128(), 0); } else { panic!("uuid"); }
-                if let Value::Tuple(it) = &t[1] { assert!(matches!(it[0], Value::UInt64(777))); } else { panic!("inner"); }
-            } else { panic!("tuple"); }
+                if let Value::Uuid(u) = t[0] {
+                    assert_eq!(u.as_u128(), 0);
+                } else {
+                    panic!("uuid");
+                }
+                if let Value::Tuple(it) = &t[1] {
+                    assert!(matches!(it[0], Value::UInt64(777)));
+                } else {
+                    panic!("inner");
+                }
+            } else {
+                panic!("tuple");
+            }
             if let Value::Tuple(t) = &items[1] {
                 if let Value::Uuid(u) = t[0] {
                     assert_eq!(u.as_u128(), ((u128::from(u2a) << 64) | u128::from(u2b)));
-                } else { panic!("uuid2"); }
-                if let Value::Tuple(it) = &t[1] { assert!(matches!(it[0], Value::UInt64(0))); } else { panic!("inner"); }
-            } else { panic!("tuple"); }
-        } else { panic!("array"); }
+                } else {
+                    panic!("uuid2");
+                }
+                if let Value::Tuple(it) = &t[1] {
+                    assert!(matches!(it[0], Value::UInt64(0)));
+                } else {
+                    panic!("inner");
+                }
+            } else {
+                panic!("tuple");
+            }
+        } else {
+            panic!("array");
+        }
     }
 
     #[tokio::test]
@@ -313,10 +358,8 @@ mod tests {
         let mut reader = BytesReader(bytes.freeze());
         let mut state = DeserializerState::default();
 
-        let out = ty
-            .deserialize_column(&mut reader, 2, &mut state)
-            .await
-            .expect("nested deserialize");
+        let out =
+            ty.deserialize_column(&mut reader, 2, &mut state).await.expect("nested deserialize");
 
         assert_eq!(out.len(), 2);
         // Row 0: one item (10,100)
@@ -325,8 +368,12 @@ mod tests {
             if let Value::Tuple(t) = &items[0] {
                 assert!(matches!(t[0], Value::UInt64(10)));
                 assert!(matches!(t[1], Value::UInt64(100)));
-            } else { panic!("expected tuple"); }
-        } else { panic!("expected array"); }
+            } else {
+                panic!("expected tuple");
+            }
+        } else {
+            panic!("expected array");
+        }
 
         // Row 1: two items (20,200), (30,300)
         if let Value::Array(items) = &out[1] {
@@ -334,11 +381,17 @@ mod tests {
             if let Value::Tuple(t) = &items[0] {
                 assert!(matches!(t[0], Value::UInt64(20)));
                 assert!(matches!(t[1], Value::UInt64(200)));
-            } else { panic!("expected tuple"); }
+            } else {
+                panic!("expected tuple");
+            }
             if let Value::Tuple(t) = &items[1] {
                 assert!(matches!(t[0], Value::UInt64(30)));
                 assert!(matches!(t[1], Value::UInt64(300)));
-            } else { panic!("expected tuple"); }
-        } else { panic!("expected array"); }
+            } else {
+                panic!("expected tuple");
+            }
+        } else {
+            panic!("expected array");
+        }
     }
 }

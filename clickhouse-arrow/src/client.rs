@@ -41,6 +41,7 @@ use crate::arrow::utils::batch_to_rows;
 use crate::constants::*;
 use crate::formats::{ClientFormat, NativeFormat};
 use crate::native::block::Block;
+#[cfg(feature = "serde")]
 use crate::native::block_info::BlockInfo;
 use crate::native::protocol::{CompressionMethod, LogData, ProfileEvent, ProfileInfo};
 use crate::prelude::*;
@@ -1655,6 +1656,7 @@ impl Client<NativeFormat> {
     /// with a single JSON column: each Serde row is serialized as the JSON value for that column.
     /// The JSON serializer handles typed paths, defaults for non-nullable typed paths, and
     /// dynamic paths automatically based on the table's JSON type.
+    #[cfg(feature = "serde")]
     pub async fn insert_into(&self, table: &str, options: InsertOptions) -> Result<InsertInto<'_>> {
         let (database, table) = split_db_table(self.connection.database(), table);
         Ok(InsertInto {
@@ -1668,6 +1670,7 @@ impl Client<NativeFormat> {
     }
 }
 
+#[cfg(feature = "serde")]
 fn split_db_table<'a>(default_db: &'a str, table: &'a str) -> (&'a str, &'a str) {
     match table.split_once('.') {
         Some((db, t)) if !db.is_empty() && !t.is_empty() => (db, t),
@@ -1678,6 +1681,7 @@ fn split_db_table<'a>(default_db: &'a str, table: &'a str) -> (&'a str, &'a str)
     }
 }
 
+#[cfg(feature = "serde")]
 #[derive(Debug, Clone)]
 pub struct InsertOptions {
     pub batch_size:          usize,
@@ -1690,10 +1694,12 @@ pub struct InsertOptions {
     pub columns:             Option<Vec<String>>,
 }
 
+#[cfg(feature = "serde")]
 impl InsertOptions {
     pub fn default_batch() -> usize { 10_000 }
 }
 
+#[cfg(feature = "serde")]
 impl Default for InsertOptions {
     fn default() -> Self {
         Self {
@@ -1706,6 +1712,7 @@ impl Default for InsertOptions {
     }
 }
 
+#[cfg(feature = "serde")]
 pub struct InsertInto<'a> {
     client:     &'a Client<NativeFormat>,
     database:   String,
@@ -1715,6 +1722,7 @@ pub struct InsertInto<'a> {
     total_rows: usize,
 }
 
+#[cfg(feature = "serde")]
 impl InsertInto<'_> {
     /// Write a batch of Serde rows. For single JSON-column tables, each row is serialized
     /// as the JSON value for that column.
@@ -1803,6 +1811,7 @@ impl InsertInto<'_> {
     pub async fn finish(mut self) -> Result<()> { self.flush().await }
 }
 
+#[cfg(feature = "serde")]
 fn map_cell_to_value(
     cell: Option<&serde_json::Value>,
     ty: &Type,
@@ -1897,6 +1906,7 @@ fn map_cell_to_value(
     }
 }
 
+#[cfg(feature = "serde")]
 fn to_u64(v: &serde_json::Value, strict: bool) -> Result<u64> {
     if let Some(u) = v.as_u64() {
         return Ok(u);
@@ -1915,6 +1925,7 @@ fn to_u64(v: &serde_json::Value, strict: bool) -> Result<u64> {
     Err(Error::SerializeError("cannot coerce to u64".to_string()))
 }
 
+#[cfg(feature = "serde")]
 fn to_i64(v: &serde_json::Value, strict: bool) -> Result<i64> {
     if let Some(i) = v.as_i64() {
         return Ok(i);
@@ -1933,6 +1944,7 @@ fn to_i64(v: &serde_json::Value, strict: bool) -> Result<i64> {
     Err(Error::SerializeError("cannot coerce to i64".to_string()))
 }
 
+#[cfg(feature = "serde")]
 fn to_f64(v: &serde_json::Value, strict: bool) -> Result<f64> {
     if let Some(f) = v.as_f64() {
         return Ok(f);
@@ -1951,6 +1963,7 @@ fn to_f64(v: &serde_json::Value, strict: bool) -> Result<f64> {
     Err(Error::SerializeError("cannot coerce to f64".to_string()))
 }
 
+#[cfg(feature = "serde")]
 fn u8_from_u64(x: u64) -> Result<u8> {
     if x <= u8::MAX as u64 {
         Ok(x as u8)
@@ -1959,6 +1972,7 @@ fn u8_from_u64(x: u64) -> Result<u8> {
     }
 }
 
+#[cfg(feature = "serde")]
 fn u16_from_u64(x: u64) -> Result<u16> {
     if x <= u16::MAX as u64 {
         Ok(x as u16)
@@ -1967,6 +1981,7 @@ fn u16_from_u64(x: u64) -> Result<u16> {
     }
 }
 
+#[cfg(feature = "serde")]
 fn u32_from_u64(x: u64) -> Result<u32> {
     if x <= u32::MAX as u64 {
         Ok(x as u32)
@@ -1975,6 +1990,7 @@ fn u32_from_u64(x: u64) -> Result<u32> {
     }
 }
 
+#[cfg(feature = "serde")]
 fn i8_from_i64(x: i64) -> Result<i8> {
     if x >= i8::MIN as i64 && x <= i8::MAX as i64 {
         Ok(x as i8)
@@ -1983,6 +1999,7 @@ fn i8_from_i64(x: i64) -> Result<i8> {
     }
 }
 
+#[cfg(feature = "serde")]
 fn i16_from_i64(x: i64) -> Result<i16> {
     if x >= i16::MIN as i64 && x <= i16::MAX as i64 {
         Ok(x as i16)
@@ -1991,6 +2008,7 @@ fn i16_from_i64(x: i64) -> Result<i16> {
     }
 }
 
+#[cfg(feature = "serde")]
 fn i32_from_i64(x: i64) -> Result<i32> {
     if x >= i32::MIN as i64 && x <= i32::MAX as i64 {
         Ok(x as i32)

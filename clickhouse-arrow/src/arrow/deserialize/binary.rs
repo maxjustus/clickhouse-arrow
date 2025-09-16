@@ -19,7 +19,6 @@ use crate::arrow::builder::TypedBuilder;
 use crate::io::ClickHouseRead;
 use crate::{Error, Result, Type};
 
-
 macro_rules! binary_async {
     // Infallible aka panic
     (String => $reader:expr) => {

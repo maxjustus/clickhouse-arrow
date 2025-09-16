@@ -67,6 +67,4 @@ impl Serializer for StringSerializer {
         }
         Ok(())
     }
-
-    
 }

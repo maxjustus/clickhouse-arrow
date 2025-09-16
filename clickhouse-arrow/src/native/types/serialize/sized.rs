@@ -61,7 +61,6 @@ impl Serializer for SizedSerializer {
         }
         Ok(())
     }
-
 }
 impl SizedSerializer {
     pub(crate) async fn write_prefix<W: ClickHouseWrite>(

@@ -58,5 +58,4 @@ impl Serializer for MapSerializer {
         value_type.serialize_column(total_values, writer, state).await?;
         Ok(())
     }
-
 }

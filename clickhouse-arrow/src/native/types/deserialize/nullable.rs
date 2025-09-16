@@ -42,8 +42,6 @@ impl Deserializer for NullableDeserializer {
 
         Ok(out)
     }
-
-    
 }
 
 pub(crate) async fn read_with_path<R: ClickHouseRead>(
@@ -58,10 +56,8 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
     let _ = reader.read_exact(&mut mask).await?;
 
     path.push(0);
-    let mut out = type_
-        .strip_null()
-        .deserialize_column_with_path(reader, rows, state, path)
-        .await?;
+    let mut out =
+        type_.strip_null().deserialize_column_with_path(reader, rows, state, path).await?;
     let _ = path.pop();
 
     for (i, mask) in mask.iter().enumerate() {
