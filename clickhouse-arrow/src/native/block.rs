@@ -398,7 +398,6 @@ impl ProtocolData<Self, ()> for Block {
                 state.kind_plan = None;
                 state.sparse_runtime.clear();
                 if _has_custom_serialization {
-                    tracing::debug!(col = %name, ty = %type_name, "server custom/sparse serialization detected");
                     let mut plan = std::collections::BTreeMap::<Vec<u16>, u8>::new();
 
                     // Iterative DFS: node first, then children
@@ -411,6 +410,14 @@ impl ProtocolData<Self, ()> for Block {
                         match ty {
                             Type::Tuple(children) => {
                                 for (idx, child) in children.iter().enumerate().rev() {
+                                    let mut next = path.clone();
+                                    #[allow(clippy::cast_possible_truncation)]
+                                    next.push(idx as u16);
+                                    stack.push((next, child));
+                                }
+                            }
+                            Type::TupleNamed(fields) => {
+                                for (idx, (_, child)) in fields.iter().enumerate().rev() {
                                     let mut next = path.clone();
                                     #[allow(clippy::cast_possible_truncation)]
                                     next.push(idx as u16);

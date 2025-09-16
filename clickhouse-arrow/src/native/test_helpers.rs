@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 pub(crate) fn mk_kind_plan(entries: &[(Vec<u16>, u8)]) -> BTreeMap<Vec<u16>, u8> {
     let mut plan = BTreeMap::new();
     for (path, kind) in entries.iter().cloned() {
-        plan.insert(path, kind);
+        let _ = plan.insert(path, kind);
     }
     plan
 }

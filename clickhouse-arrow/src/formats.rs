@@ -80,10 +80,6 @@ pub(crate) struct DeserializerState<T: Default = ()> {
     pub(crate) sparse_runtime: BTreeMap<Vec<u16>, (usize, bool)>,
 }
 
-/// RAII helper to push an index onto a path stack and ensure it is popped
-/// even on early returns or panics.
-// No path guard utilities needed with explicit path parameter design
-
 impl<T: Default> DeserializerState<T> {
     #[must_use]
     pub(crate) fn with_arrow_options(mut self, options: ArrowOptions) -> Self {
@@ -93,6 +89,29 @@ impl<T: Default> DeserializerState<T> {
 
     #[must_use]
     pub(crate) fn deserializer(&mut self) -> &mut T { &mut self.deserializer }
+
+    /// Look up the custom/sparse kind byte for a given path, falling back to parent paths.
+    #[must_use]
+    pub(crate) fn kind_for_path(&self, path: &[u16]) -> Option<u8> {
+        let plan = self.kind_plan.as_ref()?;
+        let mut len = path.len();
+        loop {
+            if let Some(kind) = plan.get(&path[..len]) {
+                return Some(*kind);
+            }
+            if len == 0 {
+                break;
+            }
+            len -= 1;
+        }
+        plan.get(&[][..]).copied()
+    }
+
+    /// Whether the given path should use sparse decoding.
+    #[must_use]
+    pub(crate) fn is_sparse_path(&self, path: &[u16]) -> bool {
+        self.kind_for_path(path).map(|kind| kind != 0).unwrap_or(false)
+    }
 }
 
 /// Context maintained during serialization
@@ -166,6 +185,32 @@ pub struct JsonState {
     pub paths:        Vec<String>,
     #[deprecated(note = "Use dynamic_path_columns instead")]
     pub path_columns: Option<BTreeMap<String, Vec<Value>>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::DeserializerState;
+
+    #[test]
+    fn sparse_kind_falls_back_to_parent() {
+        let mut state: DeserializerState<()> = DeserializerState::default();
+        let mut plan = BTreeMap::new();
+        let _ = plan.insert(Vec::<u16>::new(), 1);
+        state.kind_plan = Some(plan);
+
+        assert!(state.is_sparse_path(&[]));
+        assert!(state.is_sparse_path(&[0]));
+        assert!(state.is_sparse_path(&[0, 1]));
+    }
+
+    #[test]
+    fn sparse_kind_defaults_to_dense() {
+        let state: DeserializerState<()> = DeserializerState::default();
+        assert!(!state.is_sparse_path(&[]));
+        assert!(!state.is_sparse_path(&[1, 2]));
+    }
 }
 
 /// Enum to hold type-specific state

@@ -39,7 +39,6 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
     // Decide sparse by plan for current path (non-zero = SPARSE)
     let sparse_enabled =
         state.kind_plan.as_ref().and_then(|p| p.get(path)).map(|&k| k != 0).unwrap_or(false);
-
     if sparse_enabled {
         return crate::native::types::deserialize::sparse::read_sparse_with_path(
             type_, reader, rows, state, path,

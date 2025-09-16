@@ -30,8 +30,7 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
     path: &mut Vec<u16>,
 ) -> Result<Vec<Value>> {
     // If plan says SPARSE for current path, use generic sparse path
-    let sparse_enabled =
-        state.kind_plan.as_ref().and_then(|p| p.get(path)).map(|&k| k != 0).unwrap_or(false);
+    let sparse_enabled = state.is_sparse_path(path);
 
     if sparse_enabled {
         return super::sparse::read_sparse_with_path(type_, reader, rows, state, path).await;

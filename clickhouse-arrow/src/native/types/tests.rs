@@ -250,7 +250,13 @@ async fn roundtrip_object() {
     assert_eq!(&values[..], roundtrip_values(&Type::String, &values[..]).await.unwrap());
 
     let values = &[Value::Object(obj.as_bytes().to_vec())];
-    assert_eq!(&values[..], roundtrip_values(&Type::Object, &values[..]).await.unwrap());
+    let roundtripped = roundtrip_values(&Type::Object, &values[..]).await.unwrap();
+
+    #[cfg(feature = "serde")]
+    assert_eq!(roundtripped, vec![Value::Json(serde_json::json!({ "a": "a" }))]);
+
+    #[cfg(not(feature = "serde"))]
+    assert_eq!(roundtripped, values);
 }
 
 #[tokio::test]

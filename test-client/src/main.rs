@@ -343,15 +343,28 @@ async fn execute_query(
                         .await;
                 }
                 clickhouse_arrow::ClickHouseEvent::Profile(events) => {
-                    let mut grouped: HashMap<(_, _, u64, i8), serde_json::Map<String, serde_json::Value>> =
-                        HashMap::new();
+                    let mut grouped: HashMap<
+                        (_, _, u64, i8),
+                        serde_json::Map<String, serde_json::Value>,
+                    > = HashMap::new();
 
                     for event in events {
-                        let key = (event.current_time.clone(), event.host_name.clone(), event.thread_id, event.type_code);
+                        let key = (
+                            event.current_time.clone(),
+                            event.host_name.clone(),
+                            event.thread_id,
+                            event.type_code,
+                        );
                         let entry = grouped.entry(key.clone()).or_insert_with(|| {
                             let mut map = serde_json::Map::with_capacity(8);
-                            map.insert("current_time".to_string(), serde_json::Value::String(key.0.clone()));
-                            map.insert("host_name".to_string(), serde_json::Value::String(key.1.clone()));
+                            map.insert(
+                                "current_time".to_string(),
+                                serde_json::Value::String(key.0.clone()),
+                            );
+                            map.insert(
+                                "host_name".to_string(),
+                                serde_json::Value::String(key.1.clone()),
+                            );
                             map.insert("thread_id".to_string(), serde_json::Value::from(key.2));
                             map.insert("type_code".to_string(), serde_json::Value::from(key.3));
                             map
@@ -360,10 +373,8 @@ async fn execute_query(
                         entry.insert(event.name, serde_json::Value::from(event.value));
                     }
 
-                    let mut values: Vec<serde_json::Value> = grouped
-                        .into_values()
-                        .map(serde_json::Value::Object)
-                        .collect();
+                    let mut values: Vec<serde_json::Value> =
+                        grouped.into_values().map(serde_json::Value::Object).collect();
 
                     let payload = if values.len() == 1 {
                         values.pop().unwrap()
