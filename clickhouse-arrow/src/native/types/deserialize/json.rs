@@ -12,6 +12,7 @@ use crate::{Error, Result};
 
 // JSON serialization versions
 // Using FLATTENED format (version 3) for client compatibility
+const JSON_OBJECT_VERSION_STRING: u64 = 1;
 const JSON_OBJECT_VERSION_FLATTENED: u64 = 3;
 
 pub(crate) struct JsonDeserializer;
@@ -33,29 +34,26 @@ impl JsonDeserializer {
         rows: usize,
         state: &mut DeserializerState,
     ) -> Result<Vec<Value>> {
-        let (version, typed_paths, path_names, dynamic_data, path_segments) =
-            if let TypeSpecificState::Json(json_state) = &state.type_specific {
-                let version = json_state.version.ok_or_else(|| {
-                    Error::DeserializeError(
-                        "JSON version not set. read_prefix must be called first".to_string(),
-                    )
-                })?;
-                (
-                    version,
-                    json_state.typed_paths.clone(),
-                    json_state.dynamic_paths.clone(),
-                    json_state.dynamic_data.clone(),
-                    json_state.path_segments.clone(),
-                )
-            } else {
-                return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
-            };
+        let json_state = if let TypeSpecificState::Json(json_state) = &state.type_specific {
+            json_state.clone()
+        } else {
+            return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
+        };
+
+        let version = json_state.version.ok_or_else(|| {
+            Error::DeserializeError(
+                "JSON version not set. read_prefix must be called first".to_string(),
+            )
+        })?;
 
         match version {
             JSON_OBJECT_VERSION_FLATTENED => {
-                let dynamic_data = dynamic_data.ok_or_else(|| {
+                let dynamic_data = json_state.dynamic_data.clone().ok_or_else(|| {
                     Error::DeserializeError("JSON object data not set".to_string())
                 })?;
+                let typed_paths = json_state.typed_paths.clone();
+                let path_names = json_state.dynamic_paths.clone();
+                let path_segments = json_state.path_segments.clone();
 
                 let mut path_values = Vec::with_capacity(typed_paths.len() + path_names.len());
 
@@ -112,9 +110,24 @@ impl JsonDeserializer {
                     .collect();
                 Self::build_json_objects(&all_paths, &path_values, rows, &path_segments)
             }
+            JSON_OBJECT_VERSION_STRING => {
+                let mut result = Vec::with_capacity(rows);
+                for _ in 0..rows {
+                    let raw = reader.read_string().await?;
+
+                    let parsed: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| {
+                        Error::DeserializeError(format!(
+                            "Failed to parse JSON string serialization: {e}"
+                        ))
+                    })?;
+
+                    result.push(Value::Json(parsed));
+                }
+
+                Ok(result)
+            }
             _ => Err(Error::DeserializeError(format!(
-                "JSON type requires version 3, got version {version}. Please use ClickHouse \
-                 server >= 25.6"
+                "Unsupported JSON serialization version {version}."
             ))),
         }
     }
@@ -255,18 +268,7 @@ impl JsonDeserializer {
                 }
             }
 
-            #[cfg(feature = "serde")]
-            {
-                result.push(Value::Json(serde_json::Value::Object(row_object)));
-            }
-            #[cfg(not(feature = "serde"))]
-            {
-                let json_bytes = serde_json::to_vec(&serde_json::Value::Object(row_object))
-                    .map_err(|e| {
-                        Error::DeserializeError(format!("Failed to serialize JSON: {e}"))
-                    })?;
-                result.push(Value::Object(json_bytes));
-            }
+            result.push(Value::Json(serde_json::Value::Object(row_object)));
         }
 
         Ok(result)
@@ -281,22 +283,30 @@ impl Deserializer for JsonDeserializer {
     ) -> Result<()> {
         let version = reader.read_u64_le().await?;
 
-        if version != JSON_OBJECT_VERSION_FLATTENED {
-            return Err(Error::DeserializeError(format!(
-                "JSON type requires FLATTENED format (version 3), got version {version}. Please \
-                 use ClickHouse server >= 25.6"
-            )));
-        }
-
-        // In v3 format, typed paths are NOT in ObjectStructure
-        // They are implicit from the schema passed to the deserializer
-        let typed_paths = match type_ {
+        // Schema-driven typed paths are available even for legacy/string serialization
+        let typed_paths: Vec<(String, Type)> = match type_ {
             Type::JSON { typed_paths, .. } => typed_paths
                 .iter()
                 .map(|(name, boxed_type)| (name.clone(), *boxed_type.clone()))
                 .collect(),
             _ => vec![],
         };
+
+        if version == JSON_OBJECT_VERSION_STRING {
+            state.type_specific = TypeSpecificState::Json(JsonStateData {
+                version: Some(version),
+                typed_paths,
+                ..JsonStateData::default()
+            });
+            return Ok(());
+        }
+
+        if version != JSON_OBJECT_VERSION_FLATTENED {
+            return Err(Error::DeserializeError(format!(
+                "Unsupported JSON serialization version {version}. Expected STRING (1) or \
+                 FLATTENED (3)."
+            )));
+        }
 
         // Read flattened (dynamic) paths from ObjectStructure (v3 FLATTENED)
         let total_paths = reader.read_var_uint().await?;
@@ -402,6 +412,7 @@ impl JsonDeserializer {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use chrono_tz::UTC;
@@ -547,6 +558,39 @@ mod tests {
         Value::Variant(0, Box::new(Value::String(b"hello".to_vec()))) => serde_json::json!("hello"),
         Value::Variant(1, Box::new(Value::Int32(42))) => serde_json::json!(42),
     );
+
+    #[tokio::test]
+    async fn json_string_serialization_is_parsed() {
+        let rows: [&[u8]; 2] = [br#"{"a":1}"#, br#"{"b":"x"}"#];
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&JSON_OBJECT_VERSION_STRING.to_le_bytes());
+        for row in &rows {
+            payload.push(row.len() as u8);
+            payload.extend_from_slice(row);
+        }
+
+        let mut reader = Cursor::new(payload);
+        let mut state = DeserializerState::default();
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        };
+
+        JsonDeserializer::read_prefix(&type_, &mut reader, &mut state).await.unwrap();
+        let values =
+            JsonDeserializer::read(&type_, &mut reader, rows.len(), &mut state).await.unwrap();
+
+        {
+            assert_eq!(values, vec![
+                Value::Json(serde_json::json!({"a": 1})),
+                Value::Json(serde_json::json!({"b": "x"})),
+            ]);
+        }
+    }
 
     #[test]
     fn test_object_json_conversion() {
