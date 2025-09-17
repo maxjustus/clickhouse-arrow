@@ -1687,6 +1687,7 @@ pub struct InsertOptions {
     pub batch_size:          usize,
     pub strict:              bool,
     pub on_missing_default:  bool,
+    // TODO: get rid of this. It's a weird  thing to include.
     pub set_object_settings: bool,
     /// Optional explicit column list to include in the INSERT statement,
     /// e.g. INSERT INTO db.table (col1, col2) VALUES ...
@@ -1731,11 +1732,10 @@ impl InsertInto<'_> {
         rows: impl IntoIterator<Item = T>,
     ) -> Result<usize> {
         // Apply settings once if requested
+        // TODO: this is a dumb top level setting to have. Remove it.
         if self.options.set_object_settings {
             // Best-effort: ignore errors if already set
             let _unused = self.client.execute("SET allow_experimental_object_type = 1", None).await;
-            let _unused =
-                self.client.execute("SET allow_suspicious_low_cardinality_types = 1", None).await;
         }
 
         let mut wrote = 0usize;

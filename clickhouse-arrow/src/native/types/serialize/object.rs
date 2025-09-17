@@ -6,16 +6,15 @@ use crate::{Error, Result, Value};
 
 pub(crate) struct ObjectSerializer;
 
-const JSON_OBJECT_VERSION_STRING: u64 = 1;
-
 impl Serializer for ObjectSerializer {
     async fn write_prefix<W: ClickHouseWrite>(
         _type_: &Type,
         writer: &mut W,
         _state: &mut SerializerState,
     ) -> Result<()> {
-        // Emit the STRING serialization version header (v1)
-        writer.write_u64_le(JSON_OBJECT_VERSION_STRING).await?;
+        // Corresponds to STRING serialization in native protocol
+        // See: https://github.com/ClickHouse/ClickHouse/blob/6fb23dee26fdee776c014e735436a4e670c99d82/src/DataTypes/Serializations/SerializationObject.cpp#L216
+        writer.write_u8(1).await?;
         Ok(())
     }
 

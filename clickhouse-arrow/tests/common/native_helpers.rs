@@ -763,7 +763,7 @@ pub fn generate_evil_heterogeneous_dynamic_test_block() -> Block {
 /// Higher-level test harness for native roundtrip tests
 pub struct NativeRoundtripTestHarness<'a> {
     pub container:   &'a clickhouse_arrow::test_utils::ClickHouseContainer,
-    pub require_v3:  bool,
+    pub require_v3:  bool, // too general, should say require_dynamic_flattened_format
     pub compression: CompressionMethod,
 }
 

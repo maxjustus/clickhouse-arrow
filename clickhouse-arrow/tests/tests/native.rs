@@ -197,6 +197,8 @@ pub async fn test_insert_into_nonjson_multi(ch: Arc<ClickHouseContainer>) {
 ///
 /// # Panics
 pub async fn test_insert_into_mixed_json(ch: Arc<ClickHouseContainer>) {
+    // TODO: put this code block in something reusable. It feels weird we have the roundtrip
+    // harness helper but then use this in places.
     let client = ClientBuilder::default()
         .with_endpoint(ch.get_native_url())
         .with_username("clickhouse")
@@ -205,7 +207,11 @@ pub async fn test_insert_into_mixed_json(ch: Arc<ClickHouseContainer>) {
         .await
         .expect("build client");
 
-    let _ = client.execute("SET allow_experimental_object_type = 1", None).await.ok();
+    // TODO: I would love if this setting could be auto-applied if ch version >= 25.6
+    let _ = client
+        .execute("SET output_format_native_use_flattened_dynamic_and_json_serialization = 1", None)
+        .await
+        .ok();
     let _ = client.execute("SET allow_suspicious_low_cardinality_types = 1", None).await.ok();
 
     client.execute("DROP TABLE IF EXISTS e2e_mixed_json", None).await.expect("drop");
@@ -238,13 +244,10 @@ pub async fn test_insert_into_mixed_json(ch: Arc<ClickHouseContainer>) {
     #[derive(clickhouse_arrow_derive::Row, Debug)]
     struct RowOut {
         ts:   u32,
-        data: String,
+        data: serde_json::Value,
     }
     let mut rows = client
-        .query::<RowOut>(
-            "SELECT ts, toJSONString(data) as data FROM e2e_mixed_json ORDER BY ts",
-            None,
-        )
+        .query::<RowOut>("SELECT ts, data as data FROM e2e_mixed_json ORDER BY ts", None)
         .await
         .expect("select");
     let mut seen = Vec::new();
@@ -252,9 +255,7 @@ pub async fn test_insert_into_mixed_json(ch: Arc<ClickHouseContainer>) {
         seen.push(r.expect("row"));
     }
     assert_eq!(seen.len(), 3);
-    // Parse JSON and assert id/status defaults
-    let parse = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
-    let v0 = parse(&seen[0].data);
+    let v0 = &seen[0].data;
     assert_eq!(seen[0].ts, 1);
     assert_eq!(
         v0.get("id").cloned().unwrap_or(serde_json::Value::Null),
@@ -265,7 +266,7 @@ pub async fn test_insert_into_mixed_json(ch: Arc<ClickHouseContainer>) {
         serde_json::Value::from("ok")
     );
 
-    let v1 = parse(&seen[1].data);
+    let v1 = &seen[1].data;
     assert_eq!(seen[1].ts, 2);
     // Missing typed id/status should default
     assert_eq!(
@@ -277,7 +278,7 @@ pub async fn test_insert_into_mixed_json(ch: Arc<ClickHouseContainer>) {
         serde_json::Value::from("")
     );
 
-    let v2 = parse(&seen[2].data);
+    let v2 = &seen[2].data;
     assert_eq!(seen[2].ts, 3);
     // data was Null; toJSONString renders it as {}
     assert!(v2.is_object());
@@ -543,10 +544,9 @@ pub async fn test_query_json_basic(ch: Arc<ClickHouseContainer>) {
     assert!(rows[0]["empty_field"].is_null());
 }
 
-/// Tests round-trip functionality: insert serde_json::Map and read back with query_json
-///
-/// # Panics  
-pub async fn test_json_map_roundtrip(ch: Arc<ClickHouseContainer>) {
+/// Tests round-trip functionality: insert serde_json::Map into an Object('json') column and read
+/// back with query_json
+pub async fn test_legacy_object_json_map_roundtrip(ch: Arc<ClickHouseContainer>) {
     let client = ClientBuilder::default()
         .with_endpoint(ch.get_native_url())
         .with_username("clickhouse")
@@ -556,10 +556,9 @@ pub async fn test_json_map_roundtrip(ch: Arc<ClickHouseContainer>) {
         .expect("build client");
 
     let _ = client.execute("SET allow_experimental_object_type = 1", None).await.ok();
-    client.execute("DROP TABLE IF EXISTS e2e_json_map_roundtrip", None).await.expect("drop");
     client
         .execute(
-            "CREATE TABLE e2e_json_map_roundtrip (
+            "CREATE OR REPLACE TABLE e2e_json_map_roundtrip (
                 id UInt32,
                 data Object('json')
             ) ENGINE = MergeTree() ORDER BY tuple()",
