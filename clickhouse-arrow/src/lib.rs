@@ -7,6 +7,7 @@ mod constants;
 mod errors;
 mod flags;
 pub mod formats;
+pub mod file_stream;
 mod io;
 pub mod native;
 #[cfg(feature = "pool")]
@@ -55,6 +56,7 @@ pub use client::*;
 pub use constants::{CONN_READ_BUFFER_ENV_VAR, CONN_WRITE_BUFFER_ENV_VAR, DEBUG_ARROW_ENV_VAR};
 pub use errors::*;
 pub use formats::{ArrowFormat, ClientFormat, NativeFormat};
+pub use io::{ClickHouseRead, ClickHouseWrite};
 /// Contains useful top-level traits to interface with [`crate::prelude::NativeFormat`]
 pub use native::convert::*;
 pub use native::progress::Progress;

@@ -2,18 +2,23 @@ mod client;
 
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use clickhouse_arrow::file_stream::FileStreamWriter;
 use clickhouse_arrow::native::types::Type;
 use clickhouse_arrow::native::values::Value as ChValue;
 use clickhouse_arrow::native::values::serde_impls::RowSer;
+use clickhouse_arrow::{ArrowOptions, CompressionMethod, NativeFormat};
 use client::ClickHouseClient;
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, BufReader as AsyncBufReader};
+use tokio::io::{
+    AsyncBufReadExt, AsyncWriteExt as _, BufReader as AsyncBufReader, BufWriter as AsyncBufWriter,
+};
 use tokio::sync::mpsc;
 
 struct DataPayload {
@@ -102,6 +107,10 @@ struct Args {
     /// Output format: json, pretty
     #[arg(long, default_value = "json")]
     format: String,
+
+    /// Path to write query results in native format (requires --query)
+    #[arg(long)]
+    native_output: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -189,6 +198,13 @@ async fn main() -> Result<()> {
         }
     }
 
+    if args.native_output.is_some() && args.query.is_none() {
+        output_json(&JsonOutput::error(
+            "--native-output currently requires --query mode".to_string(),
+        ));
+        std::process::exit(1);
+    }
+
     // Initialize ClickHouse client
     let client = match ClickHouseClient::new(
         &args.host,
@@ -210,7 +226,16 @@ async fn main() -> Result<()> {
 
     // Execute based on mode
     if let Some(query) = args.query {
-        execute_query(client, &query, args.params, args.settings, &args.format).await?;
+        execute_query(
+            client,
+            &query,
+            args.params,
+            args.settings,
+            &args.format,
+            &args.compression,
+            args.native_output,
+        )
+        .await?;
     } else if let Some(table) = args.insert {
         execute_insert(client, &table, args.columns.clone(), &args.format).await?;
     } else if args.info {
@@ -228,6 +253,8 @@ async fn execute_query(
     params: Option<String>,
     settings: Option<String>,
     format: &str,
+    compression: &str,
+    native_output: Option<PathBuf>,
 ) -> Result<()> {
     // Parse parameters - TODO: unused
     let _params: HashMap<String, Value> = if let Some(params_str) = params {
@@ -422,6 +449,34 @@ async fn execute_query(
         }
     });
 
+    let compression_method = match compression {
+        "lz4" => CompressionMethod::LZ4,
+        "zstd" => CompressionMethod::ZSTD,
+        _ => CompressionMethod::None,
+    };
+
+    let native_output_path = native_output;
+    let mut native_writer = if let Some(ref path) = native_output_path {
+        let file = tokio::fs::File::create(path).await.with_context(|| {
+            format!("Failed to create native output file at {}", path.display())
+        })?;
+        let buf_writer = AsyncBufWriter::with_capacity(8 * 1024 * 1024, file);
+        Some(FileStreamWriter::<NativeFormat, _>::new(
+            buf_writer,
+            compression_method,
+            ArrowOptions::default(),
+            None,
+        ))
+    } else {
+        None
+    };
+
+    if native_writer.is_some() {
+        let message =
+            JsonOutput::message("Writing query results to native output file".to_string(), "info");
+        let _ = tx.send(WriterCmd::Json(message)).await;
+    }
+
     for statement in statements {
         let qid = Qid::new();
         let mut stream = ch
@@ -433,6 +488,10 @@ async fn execute_query(
         let tx_events = tx.clone();
         while let Some(item) = stream.next().await {
             let mut block: Block = item.context("stream error")?;
+
+            if let Some(writer) = native_writer.as_mut() {
+                writer.write(block.clone()).await.context("Failed to write native block")?;
+            }
             let cols = Arc::new(block.column_types.clone());
 
             // Stream rows without O(n^2) front removals; move values out per row
@@ -443,6 +502,16 @@ async fn execute_query(
                 let _ = tx_events.send(WriterCmd::Data(payload)).await;
             }
         }
+    }
+
+    if let Some(writer) = native_writer.as_mut() {
+        writer.finish().await.context("Failed to finish native output stream")?;
+        writer.writer_mut().flush().await.context("Failed to flush native output")?;
+    }
+
+    if let Some(path) = native_output_path {
+        let message = format!("Native output written to {}", path.display());
+        let _ = tx.send(WriterCmd::Json(JsonOutput::message(message, "info"))).await;
     }
 
     Ok(())

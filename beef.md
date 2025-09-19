@@ -43,3 +43,14 @@ Confirm that we don't already have an API like this that we're duplicating
 
 - we now have sparse state paths for deserialization. Does it make sense to somehow unify that with type specific state?
 - kind_plan is maybe not a great name. serialization_type_by_path is more descriptive?
+
+- what's up with this?
+............2025-09-12T23:04:33.766007Z  WARN e2e_native::common::version_compat: clickhouse-arrow/tests/common/version_compat.r
+s:110: Skipping test_json_direct_dynamic - could not determine ClickHouse version
+
+why to_json_with_type instead of just to_json?
+
+- what if we parsed and presented profile event values both as raw numbers and as human readable strings relevant to each event type/unit? or, add extra top level values that are the human readable versions or give different scales
+like seconds instead of microseconds, MB instead of bytes, etc.
+
+- would be cool if we could detect server version and automatically serialize json cols using v1 (string), or v3 flattened. Same for setting the output format native settings for one vs the other?

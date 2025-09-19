@@ -144,9 +144,11 @@ impl ProtocolData<RecordBatch, ArrowDeserializerState> for RecordBatch {
         options: ArrowOptions,
         state: &mut DeserializerState<ArrowDeserializerState>,
     ) -> Result<RecordBatch> {
-        let _ = BlockInfo::read_async(reader).await.inspect_err(|error| {
-            error!(?error, "failed to read block info");
-        })?;
+        if revision > 0 {
+            let _ = BlockInfo::read_async(reader).await.inspect_err(|error| {
+                error!(?error, "failed to read block info");
+            })?;
+        }
 
         #[allow(clippy::cast_possible_truncation)]
         let (columns, rows) =
