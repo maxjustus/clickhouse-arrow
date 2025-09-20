@@ -5,9 +5,9 @@ mod client;
 mod compression;
 mod constants;
 mod errors;
+pub mod file_stream;
 mod flags;
 pub mod formats;
-pub mod file_stream;
 mod io;
 pub mod native;
 #[cfg(feature = "pool")]
