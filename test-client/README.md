@@ -118,6 +118,58 @@ Test all supported ClickHouse native types:
 ./target/release/clickhouse-test-client --format pretty --info
 ```
 
+### JSONL Session Mode (stdin/stdout)
+
+When no mode flags (`--query`, `--insert`, `--info`, `--test-types`) are provided, the client runs as a
+stateful JSONL session service. Each line on `stdin` must be a JSON command; responses are emitted as
+newline-delimited JSON objects with a consistent shape and always echo the `request_id` that you supplied.
+
+Supported commands:
+
+```jsonc
+// Execute a SELECT and stream rows + progress events
+{"type":"query","request_id":"req-1","sql":"SELECT number FROM system.numbers LIMIT 3","settings":{"send_logs_level":"trace"}}
+
+// One-shot INSERT (rows are sent in a single batch)
+{"type":"insert","request_id":"req-2","table":"default.events","rows":[{"id":1},{"id":2}]}
+
+// Incremental INSERT
+{"type":"insert_begin","request_id":"req-3","table":"default.events"}
+{"type":"insert_rows","request_id":"req-3","rows":[{"id":1}]}
+{"type":"insert_rows","request_id":"req-3","rows":[{"id":2},{"id":3}]}
+{"type":"insert_end","request_id":"req-3"}
+
+// Abort an in-flight incremental INSERT
+{"type":"insert_abort","request_id":"req-3"}
+
+// Cancel the in-flight request with matching request_id
+{"type":"cancel","request_id":"req-1"}
+
+// Terminate the session
+{"type":"shutdown"}
+```
+
+Responses are emitted in the same order they are produced by ClickHouse. Example transcript:
+
+```jsonc
+{"type":"started","request_id":"req-1","data":{"query_id":"a1b2..."}}
+{"type":"progress","request_id":"req-1","data":{"read_rows":1000,"read_bytes":4096}}
+{"type":"data","request_id":"req-1","data":{"number":0}}
+{"type":"data","request_id":"req-1","data":{"number":1}}
+{"type":"complete","request_id":"req-1","data":{"status":"ok"}}
+```
+
+Notes on insert commands:
+- `insert` is a convenience wrapper that performs `insert_begin` → `insert_rows` → `insert_end` in one step.
+- For large payloads, issue `insert_begin` once, stream any number of `insert_rows` chunks, then finish with `insert_end`.
+- Use `insert_abort` (or `cancel`) to abandon an in-flight incremental insert and clear the session state.
+
+Both `query` and `insert` commands accept optional `params` and `settings` objects encoded as JSON.
+
+Only one request may be active at a time; new commands will be rejected until the previous request finishes
+or is cancelled. This makes the binary easy to wrap from other languages that want a persistent TCP session
+with streamed results, progress updates, cancellation, and incremental inserts.
+
 ## Configuration Options
 
 ### Connection Options

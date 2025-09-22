@@ -47,10 +47,25 @@ use crate::native::protocol::{CompressionMethod, LogData, ProfileEvent, ProfileI
 use crate::prelude::*;
 use crate::query::{ParsedQuery, QueryParams};
 use crate::schema::CreateOptions;
-use crate::{Error, Progress, Result, Row};
+use crate::{Error, Progress, Result, Row, Settings};
 // use std::str::FromStr; // no longer needed with header-driven serialization
 
 static CLIENT_ID: AtomicU16 = AtomicU16::new(0);
+
+fn merge_settings(base: Option<Arc<Settings>>, extra: Option<Settings>) -> Option<Arc<Settings>> {
+    match (base, extra) {
+        (None, None) => None,
+        (some @ Some(_), None) => some,
+        (None, Some(extra)) => Some(Arc::new(extra)),
+        (Some(base_arc), Some(extra)) => {
+            let mut combined = Settings::from(base_arc.encode_to_key_value_strings());
+            for (key, value) in extra.encode_to_key_value_strings() {
+                combined.add_setting(key, value);
+            }
+            Some(Arc::new(combined))
+        }
+    }
+}
 
 /// A `ClickHouse` client configured for the native format.
 ///
@@ -663,7 +678,23 @@ impl<T: ClientFormat> Client<T> {
         params: Option<P>,
         qid: Qid,
     ) -> Result<impl Stream<Item = Result<T::Data>> + 'static> {
-        // Create metadata channel
+        self.query_raw_with_settings(query, params, Option::<Settings>::None, qid).await
+    }
+
+    pub async fn query_raw_with_settings<P, S>(
+        &self,
+        query: String,
+        params: Option<P>,
+        settings: Option<S>,
+        qid: Qid,
+    ) -> Result<impl Stream<Item = Result<T::Data>> + 'static>
+    where
+        P: Into<QueryParams>,
+        S: Into<Settings>,
+    {
+        let merged_settings = merge_settings(self.settings.clone(), settings.map(Into::into));
+        let params = params.map(Into::into);
+
         let (tx, rx) = oneshot::channel();
         let connection = self.conn().await?;
 
@@ -672,8 +703,8 @@ impl<T: ClientFormat> Client<T> {
             .send_operation(
                 Operation::Query {
                     query,
-                    settings: self.settings.clone(),
-                    params: params.map(Into::into),
+                    settings: merged_settings,
+                    params,
                     response: tx,
                     header: None,
                 },
@@ -690,7 +721,6 @@ impl<T: ClientFormat> Client<T> {
             .inspect_err(|error| error!(?error, { ATT_QID } = %qid, "Error receiving header"))?;
         trace!({ ATT_CID } = self.client_id, { ATT_QID } = %qid, "sent query, awaiting response");
 
-        // Decrement load balancer
         #[cfg(feature = "inner_pool")]
         connection.finish(conn_idx, Operation::<T::Data>::weight_query());
 

@@ -8,7 +8,7 @@ use super::block::Block;
 use super::error_codes::map_exception_to_error;
 use super::progress::Progress;
 use crate::prelude::*;
-use crate::{Error, FxIndexMap, Result, ServerError};
+use crate::{Error, FxIndexMap, Result, ServerError, Type};
 
 pub(crate) const DBMS_MIN_REVISION_WITH_CLIENT_INFO: u64 = 54032;
 pub(crate) const DBMS_MIN_REVISION_WITH_SERVER_TIMEZONE: u64 = 54058;
@@ -276,21 +276,21 @@ pub(crate) struct TablesStatusResponse {
 
 #[derive(Debug, Clone, Default)]
 pub struct LogData {
-    pub time:       String,
-    pub time_micro: u32,
-    pub host_name:  String,
-    pub query_id:   String,
-    pub thread_id:  u64,
-    pub priority:   i8,
-    pub source:     String,
-    pub text:       String,
+    pub time:              String,
+    pub time_microseconds: u32,
+    pub host_name:         String,
+    pub query_id:          String,
+    pub thread_id:         u64,
+    pub priority:          i8,
+    pub source:            String,
+    pub text:              String,
 }
 
 impl LogData {
     fn update_value(&mut self, name: &str, value: Value, type_: &Type) -> Result<()> {
         match name {
-            "time" => self.time = value.to_string(),
-            "time_micro" => self.time_micro = value.to_value(type_)?,
+            "event_time" => self.time = value.to_string(),
+            "event_time_microseconds" => self.time_microseconds = value.to_value(type_)?,
             "host_name" => self.host_name = value.to_string(),
             "query_id" => self.query_id = value.to_string(),
             "thread_id" => self.thread_id = value.to_value(type_)?,
@@ -324,7 +324,7 @@ pub struct ProfileEvent {
     pub host_name:    String,
     pub current_time: String,
     pub thread_id:    u64,
-    pub type_code:    i8,
+    pub type_name:    String,
     pub name:         String,
     pub value:        i64,
 }
@@ -338,7 +338,19 @@ impl ProfileEvent {
                 self.current_time = dt.to_rfc3339();
             }
             "thread_id" => self.thread_id = value.to_value(type_)?,
-            "type_code" => self.type_code = value.to_value(type_)?,
+            "type" => {
+                // Enum8/Enum16 arrive as Value::Enum8/Value::Enum16 carrying the string label
+                // and numeric code. Extract the label for human-readable type_name.
+                match value {
+                    Value::Enum8(label, _) => {
+                        self.type_name = label;
+                    }
+                    // Fallback: stringify whatever we got
+                    other => {
+                        self.type_name = other.to_string();
+                    }
+                }
+            }
             "name" => self.name = value.to_value(type_)?,
             "value" => self.value = value.to_value(type_)?,
             _ => {}
