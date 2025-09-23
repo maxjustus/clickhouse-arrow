@@ -1,3 +1,7 @@
+//! This module and its submodules handle the serialization of `Value`s into ClickHouse's native
+//! format. The `ClickHouseNativeSerializer` trait is the main entry point, dispatching to
+//! type-specific serializers.
+
 pub(crate) mod array;
 pub(crate) mod discriminator;
 pub mod dynamic;

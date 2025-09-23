@@ -2798,14 +2798,30 @@ fn block_to_json_rows(mut block: Block) -> Result<Vec<serde_json::Map<String, se
     let mut row_iter = block.take_iter_rows();
 
     while let Some(row_data) = row_iter.next() {
-        let mut json_object = serde_json::Map::new();
+        // Build a per-row (name, Type) schema and value slice
+        use crate::native::types::Type;
+        use crate::native::values::{Value, serde_impls};
+        let mut cols: Vec<(String, Type)> = Vec::new();
+        let mut row_vals: Vec<Value> = Vec::new();
 
-        for (column_name, _column_type, value) in row_data {
-            let json_value = value.to_json().map_err(|e| Error::DeserializeError(e.to_string()))?;
-            let _previous = json_object.insert(column_name.to_string(), json_value);
+        for (column_name, column_type, value) in row_data {
+            cols.push((column_name.to_string(), column_type.clone()));
+            row_vals.push(value);
         }
 
-        json_rows.push(json_object);
+        // Serialize the entire row via RowSer for correct named-tuple/object shaping
+        // Render with default typed behavior (named tuples as objects)
+        let row_ser = serde_impls::RowSer { cols: &cols, row: &row_vals };
+        let json_value =
+            serde_json::to_value(row_ser).map_err(|e| Error::DeserializeError(e.to_string()))?;
+        match json_value {
+            serde_json::Value::Object(map) => json_rows.push(map),
+            other => {
+                return Err(Error::DeserializeError(format!(
+                    "Expected object for row, got {other}"
+                )));
+            }
+        }
     }
 
     Ok(json_rows)

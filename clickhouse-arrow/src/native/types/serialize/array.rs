@@ -2,40 +2,17 @@ use tokio::io::AsyncWriteExt;
 
 use super::{ClickHouseNativeSerializer, Serializer, SerializerState, Type};
 use crate::io::ClickHouseWrite;
+use crate::native::coerce::discriminate;
 use crate::prelude::*;
 use crate::{Result, Value};
 
 /// Transform array elements to Variant when type expects Array(Variant(...)) but values are raw
 fn wrap_heterogeneous_elements(elements: &[Value], variant_types: &[Type]) -> Result<Vec<Value>> {
-    // Create discriminator mapping from variant types (sorted alphabetically)
-    let mut type_map = std::collections::HashMap::new();
-    for (idx, typ) in variant_types.iter().enumerate() {
-        let _ = type_map.insert(typ.to_string(), idx);
-    }
-
     let mut wrapped = Vec::with_capacity(elements.len());
     for element in elements {
-        if matches!(element, Value::Null) {
-            // Handle NULL case - use max discriminator without wrapping in Nullable
-            wrapped.push(Value::Variant(0xFF, Box::new(Value::Null)));
-        } else {
-            let elem_type = element.guess_type();
-            let type_string = elem_type.to_string();
-
-            if let Some(&discriminator) = type_map.get(&type_string) {
-                // Wrap in Variant with correct discriminator
-                let disc_u8 = u8::try_from(discriminator).map_err(|_| {
-                    Error::SerializeError(format!("Discriminator {discriminator} too large for u8"))
-                })?;
-                wrapped.push(Value::Variant(disc_u8, Box::new(element.clone())));
-            } else {
-                return Err(Error::SerializeError(format!(
-                    "Element type {type_string} not found in Variant types {variant_types:?}"
-                )));
-            }
-        }
+        let (disc, _orig_idx) = discriminate(element, variant_types)?;
+        wrapped.push(Value::Variant(disc, Box::new(element.clone())));
     }
-
     Ok(wrapped)
 }
 

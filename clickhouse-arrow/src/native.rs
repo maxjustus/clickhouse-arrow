@@ -2,6 +2,7 @@
 pub mod block;
 pub mod block_info;
 pub(crate) mod client_info;
+pub(crate) mod coerce;
 pub mod convert;
 pub mod error_codes;
 pub mod progress;

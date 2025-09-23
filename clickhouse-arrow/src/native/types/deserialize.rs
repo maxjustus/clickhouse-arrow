@@ -1,3 +1,7 @@
+//! This module and its submodules handle the deserialization of ClickHouse's native format into
+//! `Value`s. The `ClickHouseNativeDeserializer` trait is the main entry point, dispatching to
+//! type-specific deserializers.
+
 pub(crate) mod array;
 pub(crate) mod dynamic;
 pub(crate) mod geo;

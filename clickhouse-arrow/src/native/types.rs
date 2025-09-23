@@ -1053,6 +1053,7 @@ pub(crate) trait Deserializer {
         async { Ok(()) }
     }
 
+    // TODO: should this include path and we get rid of the read_with_path vs read?
     fn read<R: ClickHouseRead>(
         type_: &Type,
         reader: &mut R,

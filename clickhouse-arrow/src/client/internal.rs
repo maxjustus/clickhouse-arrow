@@ -397,6 +397,7 @@ impl<T: ClientFormat> InternalConn<T> {
                 let event = ClickHouseEvent::ProfileInfo(info);
                 let _ = self.events.send(Event { event, qid, client_id }).ok();
             }
+            // TODO: verify log events don't end up here?
             ServerPacket::Ignore(ignored) => trace!(ignored = ignored.as_ref(), "Ignored packet"),
 
             _ => {}

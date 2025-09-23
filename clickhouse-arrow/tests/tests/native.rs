@@ -7,13 +7,6 @@ use futures_util::StreamExt;
 
 use crate::common::native_helpers::*;
 
-// Helper struct for type check queries
-#[derive(Debug, Clone, Row)]
-#[allow(dead_code)]
-struct TypeCheckRow {
-    dtype: String,
-}
-
 // Helper functions to reduce repetitive patterns
 
 /// # Panics
@@ -508,7 +501,6 @@ pub async fn test_query_json_basic(ch: Arc<ClickHouseContainer>) {
     assert_eq!(rows[0]["id"].as_u64(), Some(42));
     assert_eq!(rows[0]["name"].as_str(), Some("Alice"));
 
-    // ClickHouse stores Bool as UInt8, so check for number instead of bool
     assert_eq!(rows[0]["active"].as_u64(), Some(1));
 
     // Float comparison with tolerance
@@ -604,35 +596,29 @@ pub async fn test_legacy_object_json_map_roundtrip(ch: Arc<ClickHouseContainer>)
     // Verify row 1
     assert_eq!(rows[0]["id"].as_u64(), Some(1));
     let data1 = &rows[0]["data"];
-    // NOTE: ClickHouse Object('json') columns get converted to concrete Tuple types
-    // based on the data structure, so they come back as arrays, not objects.
-    // The tuple structure from the debug was: Tuple([UInt8, Int8, Array(String), String])
-    // which corresponds to: [active, age, hobbies, name] in alphabetical order
-    assert!(data1.is_array());
-    let data1_array = data1.as_array().unwrap();
-    assert_eq!(data1_array.len(), 4);
-    // Fields are alphabetically ordered: active, age, hobbies, name
-    assert_eq!(data1_array[0].as_u64(), Some(1)); // active: true -> 1
-    assert_eq!(data1_array[1].as_i64(), Some(30)); // age: 30
-    assert!(data1_array[2].is_array() && data1_array[2].as_array().unwrap().is_empty()); // hobbies: []
-    assert_eq!(data1_array[3].as_str(), Some("Alice")); // name: "Alice"
+    // With typed JSON rendering, Object('json') round-trips as a JSON object.
+    assert!(data1.is_object());
+    assert_eq!(data1["active"], serde_json::json!(1));
+    assert_eq!(data1["age"], serde_json::json!(30));
+    // ClickHouse materializes schema; missing arrays default to []
+    assert!(data1["hobbies"].is_array());
+    assert!(data1["hobbies"].as_array().unwrap().is_empty());
+    assert_eq!(data1["name"], serde_json::json!("Alice"));
 
     // Verify row 2
     assert_eq!(rows[1]["id"].as_u64(), Some(2));
     let data2 = &rows[1]["data"];
-    assert!(data2.is_array());
-    let data2_array = data2.as_array().unwrap();
-    assert_eq!(data2_array.len(), 4);
-    // Fields are alphabetically ordered: active, age, hobbies, name
-    assert_eq!(data2_array[0].as_u64(), Some(0)); // active: undefined/null -> 0
-    assert_eq!(data2_array[1].as_i64(), Some(25)); // age: 25
-    let hobbies = &data2_array[2];
+    assert!(data2.is_object());
+    // Missing active defaults to 0 (UInt8)
+    assert_eq!(data2["active"], serde_json::json!(0));
+    assert_eq!(data2["age"], serde_json::json!(25));
+    let hobbies = &data2["hobbies"];
     assert!(hobbies.is_array());
     let hobbies_array = hobbies.as_array().unwrap();
     assert_eq!(hobbies_array.len(), 2);
     assert_eq!(hobbies_array[0].as_str(), Some("coding"));
     assert_eq!(hobbies_array[1].as_str(), Some("reading"));
-    assert_eq!(data2_array[3].as_str(), Some("Bob")); // name: "Bob"
+    assert_eq!(data2["name"], serde_json::json!("Bob"));
 
     client.execute("DROP TABLE e2e_json_map_roundtrip", None).await.expect("drop");
 }

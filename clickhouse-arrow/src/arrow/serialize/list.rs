@@ -158,14 +158,6 @@ pub(super) async fn serialize_async<W: ClickHouseWrite>(
     )))
 }
 
-// Removed sync serializer; async-only path is supported.
-#[allow(dead_code)]
-fn _removed_sync_serialize_guard() {}
-
-/*
- * Removed sync list serializer.
- */
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

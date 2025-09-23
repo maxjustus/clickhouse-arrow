@@ -263,225 +263,24 @@ fn format_decimal(mut value: String, scale: usize) -> String {
 impl Value {
     pub fn string(value: impl Into<String>) -> Self { Value::String(value.into().into_bytes()) }
 
-    /// Convert a `ClickHouse` Value to JSON representation
+    /// Convert a `ClickHouse` Value to JSON representation via the typed serializer.
+    ///
+    /// Uses `guess_type()` as schema when no explicit type is known.
     ///
     /// # Errors
-    /// Returns an error if the value contains invalid UTF-8 or other conversion issues
-    #[allow(clippy::too_many_lines)]
+    /// Returns an error if serialization fails.
     pub fn to_json(&self) -> Result<serde_json::Value> {
-        use serde_json::{Number, Value as JsonValue};
-
-        Ok(match self {
-            #[cfg(feature = "serde")]
-            Value::Json(v) => v.clone(),
-            Value::Null => JsonValue::Null,
-
-            // Numeric types that fit in JSON numbers
-            Value::Int8(i) => JsonValue::Number(Number::from(*i)),
-            Value::Int16(i) => JsonValue::Number(Number::from(*i)),
-            Value::Int32(i) => JsonValue::Number(Number::from(*i)),
-            Value::Int64(i) => JsonValue::Number(Number::from(*i)),
-            Value::UInt8(i) => JsonValue::Number(Number::from(*i)),
-            Value::UInt16(i) => JsonValue::Number(Number::from(*i)),
-            Value::UInt32(i) => JsonValue::Number(Number::from(*i)),
-            Value::UInt64(i) => JsonValue::Number(Number::from(*i)),
-
-            // Large integers as strings
-            Value::Int128(i) => JsonValue::String(i.to_string()),
-            Value::Int256(i) => JsonValue::String(i.to_string()),
-            Value::UInt128(i) => JsonValue::String(i.to_string()),
-            Value::UInt256(i) => JsonValue::String(i.to_string()),
-
-            // Floats
-            Value::Float32(f) => {
-                Number::from_f64(f64::from(*f)).map_or(JsonValue::Null, JsonValue::Number)
-            }
-            Value::Float64(f) => Number::from_f64(*f).map_or(JsonValue::Null, JsonValue::Number),
-
-            // String (may contain non-UTF8 for FixedSizedString/Binary). Use lossy decoding
-            // to ensure JSON rendering never fails; invalid bytes become U+FFFD.
-            Value::String(bytes) => JsonValue::String(String::from_utf8_lossy(bytes).to_string()),
-
-            // Decimal types - format with proper decimal point
-            Value::Decimal32(scale, value) => {
-                JsonValue::String(format_decimal(value.to_string(), *scale))
-            }
-            Value::Decimal64(scale, value) => {
-                JsonValue::String(format_decimal(value.to_string(), *scale))
-            }
-            Value::Decimal128(scale, value) => {
-                JsonValue::String(format_decimal(value.to_string(), *scale))
-            }
-            Value::Decimal256(scale, value) => {
-                JsonValue::String(format_decimal(value.to_string(), *scale))
-            }
-
-            // Date/Time types - format as ISO strings
-            Value::Date(date) => {
-                let chrono_date: NaiveDate = (*date).into();
-                JsonValue::String(chrono_date.format("%Y-%m-%d").to_string())
-            }
-            Value::Date32(date) => {
-                let chrono_date: NaiveDate = (*date).into();
-                JsonValue::String(chrono_date.format("%Y-%m-%d").to_string())
-            }
-            Value::DateTime(datetime) => {
-                let chrono_date: chrono::DateTime<Tz> = (*datetime)
-                    .try_into()
-                    .map_err(|_| crate::Error::DeserializeError("Invalid DateTime".to_string()))?;
-                // Match ClickHouse's native JSON format: "YYYY-MM-DD HH:MM:SS"
-                JsonValue::String(chrono_date.format("%Y-%m-%d %H:%M:%S").to_string())
-            }
-            Value::DateTime64(datetime) => {
-                let chrono_date: chrono::DateTime<Tz> =
-                    FromSql::from_sql(&Type::DateTime64(datetime.2, datetime.0), self.clone())
-                        .map_err(|e| {
-                            crate::Error::DeserializeError(format!("Invalid DateTime64: {e}"))
-                        })?;
-                // Match ClickHouse's native JSON format with precision
-                let formatted = match datetime.2 {
-                    0 => chrono_date.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    3 => chrono_date.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
-                    6 => chrono_date.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
-                    9 => chrono_date.format("%Y-%m-%d %H:%M:%S%.9f").to_string(),
-                    _ => {
-                        // For other precisions, format manually
-                        let nanos = chrono_date.timestamp_subsec_nanos();
-                        #[allow(clippy::cast_possible_truncation)]
-                        let divisor = 10_u32.pow(9_u32.saturating_sub(datetime.2 as u32));
-                        let subsec = nanos / divisor;
-                        format!(
-                            "{}.{:0width$}",
-                            chrono_date.format("%Y-%m-%d %H:%M:%S"),
-                            subsec,
-                            width = datetime.2
-                        )
-                    }
-                };
-                JsonValue::String(formatted)
-            }
-
-            // UUID - standard hyphenated format
-            Value::Uuid(uuid) => JsonValue::String(uuid.to_string()),
-
-            // Network types
-            Value::Ipv4(ip) => JsonValue::String(ip.to_string()),
-            Value::Ipv6(ip) => JsonValue::String(ip.to_string()),
-
-            // Enum types - just the string value
-            Value::Enum8(name, _) | Value::Enum16(name, _) => JsonValue::String(name.clone()),
-
-            // Container types
-            Value::Array(array) => {
-                let mut arr = Vec::with_capacity(array.len());
-                for item in array {
-                    arr.push(item.to_json()?);
-                }
-                JsonValue::Array(arr)
-            }
-            Value::Tuple(tuple) => {
-                let mut arr = Vec::with_capacity(tuple.len());
-                for item in tuple {
-                    arr.push(item.to_json()?);
-                }
-                JsonValue::Array(arr)
-            }
-            Value::Map(keys, values) => {
-                // ClickHouse always converts maps to JSON objects with string keys
-                let mut map = serde_json::Map::new();
-                for (key, value) in keys.iter().zip(values.iter()) {
-                    // Convert any key type to string
-                    #[allow(clippy::single_match_else)]
-                    let key_str = match key {
-                        // For raw bytes (String/FixedString/Binary), allow non‑UTF8 via lossy
-                        Value::String(bytes) => String::from_utf8_lossy(bytes).to_string(),
-                        // For non-string keys, convert to JSON string representation
-                        _ => {
-                            let json_key = key.to_json()?;
-                            match json_key {
-                                JsonValue::String(s) => s,
-                                JsonValue::Number(n) => n.to_string(),
-                                JsonValue::Bool(b) => b.to_string(),
-                                JsonValue::Null => "null".to_string(),
-                                _ => serde_json::to_string(&json_key).map_err(|e| {
-                                    crate::Error::DeserializeError(format!(
-                                        "Failed to convert map key to string: {e}"
-                                    ))
-                                })?,
-                            }
-                        }
-                    };
-                    drop(map.insert(key_str, value.to_json()?));
-                }
-                JsonValue::Object(map)
-            }
-
-            // Variant and Dynamic - unwrap and serialize contained value
-            Value::Variant(_, boxed_value) | Value::Dynamic(_, boxed_value) => {
-                boxed_value.to_json()?
-            }
-
-            // Object type - already JSON, parse it
-            Value::Object(json_bytes) => serde_json::from_slice(json_bytes).map_err(|e| {
-                crate::Error::DeserializeError(format!("Invalid JSON in Object: {e}"))
-            })?,
-
-            // Geo types - as coordinate arrays
-            Value::Point(point) => JsonValue::Array(vec![
-                JsonValue::Number(Number::from_f64(point.0[0]).unwrap_or(Number::from(0))),
-                JsonValue::Number(Number::from_f64(point.0[1]).unwrap_or(Number::from(0))),
-            ]),
-            Value::Ring(ring) => {
-                let mut arr = Vec::with_capacity(ring.0.len());
-                for point in &ring.0 {
-                    arr.push(JsonValue::Array(vec![
-                        JsonValue::Number(Number::from_f64(point.0[0]).unwrap_or(Number::from(0))),
-                        JsonValue::Number(Number::from_f64(point.0[1]).unwrap_or(Number::from(0))),
-                    ]));
-                }
-                JsonValue::Array(arr)
-            }
-            Value::Polygon(polygon) => {
-                let mut arr = Vec::with_capacity(polygon.0.len());
-                for ring in &polygon.0 {
-                    let mut ring_arr = Vec::with_capacity(ring.0.len());
-                    for point in &ring.0 {
-                        ring_arr.push(JsonValue::Array(vec![
-                            JsonValue::Number(
-                                Number::from_f64(point.0[0]).unwrap_or(Number::from(0)),
-                            ),
-                            JsonValue::Number(
-                                Number::from_f64(point.0[1]).unwrap_or(Number::from(0)),
-                            ),
-                        ]));
-                    }
-                    arr.push(JsonValue::Array(ring_arr));
-                }
-                JsonValue::Array(arr)
-            }
-            Value::MultiPolygon(multi) => {
-                let mut arr = Vec::with_capacity(multi.0.len());
-                for polygon in &multi.0 {
-                    let mut poly_arr = Vec::with_capacity(polygon.0.len());
-                    for ring in &polygon.0 {
-                        let mut ring_arr = Vec::with_capacity(ring.0.len());
-                        for point in &ring.0 {
-                            ring_arr.push(JsonValue::Array(vec![
-                                JsonValue::Number(
-                                    Number::from_f64(point.0[0]).unwrap_or(Number::from(0)),
-                                ),
-                                JsonValue::Number(
-                                    Number::from_f64(point.0[1]).unwrap_or(Number::from(0)),
-                                ),
-                            ]));
-                        }
-                        poly_arr.push(JsonValue::Array(ring_arr));
-                    }
-                    arr.push(JsonValue::Array(poly_arr));
-                }
-                JsonValue::Array(arr)
-            }
-        })
+        #[cfg(feature = "serde")]
+        {
+            let t = self.guess_type();
+            let typed = serde_impls::Typed { v: self, t: &t };
+            serde_json::to_value(typed)
+                .map_err(|e| crate::Error::DeserializeError(format!("serde error: {e}")))
+        }
+        #[cfg(not(feature = "serde"))]
+        {
+            Err(crate::Error::DeserializeError("serde feature not enabled".to_string()))
+        }
     }
 
     /// # Errors
@@ -613,11 +412,10 @@ impl Value {
                     Type::Array(Box::new(Type::Variant(types)))
                 }
             }
-            // TODO: support named tuples here? Or note: names for tuple fields are in the type, not
-            // the value
             Value::Tuple(values) => Type::Tuple(values.iter().map(Value::guess_type).collect()),
             Value::Null => Type::Nullable(Box::new(Type::String)),
             Value::Map(k, v) => {
+                // TODO: the key and value path here.. Can it be simplified?
                 // For keys - check if heterogeneous
                 let key_type = if k.is_empty() {
                     Type::String
@@ -687,41 +485,6 @@ impl Value {
             Value::Object(_) => Type::Object,
             #[cfg(feature = "serde")]
             Value::Json(_) => Type::Object,
-        }
-    }
-
-    /// Convert a `ClickHouse` Value to JSON using type hints for better fidelity.
-    /// Specifically, renders named tuples (and arrays of them) as JSON objects
-    /// with field names, matching ClickHouse JSONEachRow behavior.
-    /// TODO: This feels like something that could be handled more cleanly via a serde adapter
-    #[cfg(feature = "serde")]
-    pub fn to_json_with_type(&self, typ: &Type) -> Result<serde_json::Value> {
-        use serde_json::Value as JsonValue;
-        let t = typ.strip_null();
-        match (self, t) {
-            // Array: map elements with inner type
-            (Value::Array(items), Type::Array(inner)) => {
-                let mut out = Vec::with_capacity(items.len());
-                for it in items {
-                    out.push(it.to_json_with_type(inner)?);
-                }
-                Ok(JsonValue::Array(out))
-            }
-            // Named Tuple -> JSON object
-            (Value::Tuple(values), Type::TupleNamed(fields)) => {
-                let mut map =
-                    serde_json::Map::with_capacity(std::cmp::min(values.len(), fields.len()));
-                for (idx, (name, field_ty)) in fields.iter().enumerate() {
-                    if let Some(v) = values.get(idx) {
-                        drop(map.insert(name.clone(), v.to_json_with_type(field_ty)?));
-                    }
-                }
-                Ok(JsonValue::Object(map))
-            }
-            // Unnamed Tuple -> default array rendering
-            (Value::Tuple(_), Type::Tuple(_)) => self.to_json(),
-            // Fallback to default conversion
-            _ => self.to_json(),
         }
     }
 }
@@ -835,6 +598,7 @@ impl fmt::Display for Value {
                 let chrono_date: chrono::DateTime<Tz> =
                     (*datetime).try_into().map_err(|_| fmt::Error)?;
                 let string = chrono_date.to_rfc3339_opts(SecondsFormat::AutoSi, true);
+                // TODO: get rid of this weird wrapper text
                 write!(f, "parseDateTimeBestEffort('")?;
                 escape_string(f, &string)?;
                 write!(f, "')")
