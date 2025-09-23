@@ -377,7 +377,7 @@ impl ProfileEvent {
 }
 
 #[derive(Clone, Default, Copy, Debug, PartialEq, Eq, Hash, AsRefStr)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub enum ChunkedProtocolMode {
     #[default]
     #[strum(serialize = "chunked_optional")]
@@ -455,7 +455,7 @@ impl FromStr for ChunkedProtocolMode {
 }
 
 #[derive(Clone, Default, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub enum CompressionMethod {
     None,
     #[default]

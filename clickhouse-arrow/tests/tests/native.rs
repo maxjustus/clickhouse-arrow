@@ -341,7 +341,7 @@ pub async fn test_json_minimal_insert_into(ch: Arc<ClickHouseContainer>) {
 /// # Panics
 pub async fn test_json_direct_deserialize(ch: Arc<ClickHouseContainer>) {
     use clickhouse_arrow::native::values::json::Json;
-    use serde::Deserialize;
+    use ::serde::{Deserialize, Serialize};
 
     let client = ClientBuilder::default()
         .with_endpoint(ch.get_native_url())
@@ -379,7 +379,7 @@ pub async fn test_json_direct_deserialize(ch: Arc<ClickHouseContainer>) {
         .expect("write_rows");
     op.finish().await.expect("finish");
 
-    #[derive(Deserialize, serde::Serialize, Debug, PartialEq, Eq)]
+    #[derive(Deserialize, Serialize, Debug, PartialEq, Eq)]
     struct Data {
         id:   u32,
         name: String,

@@ -2,11 +2,14 @@ use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::ops::Deref;
 
-use super::*;
+use crate::Result;
+use crate::native::convert::{FromSql, ToSql, unexpected_type};
+use crate::native::types::Type;
+use crate::native::values::Value;
 
 /// Wrapper type for `ClickHouse` `IPv4` type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct Ipv4(pub Ipv4Addr);
 
 impl fmt::Display for Ipv4 {
@@ -33,7 +36,7 @@ impl Default for Ipv4 {
 
 /// Wrapper type for `ClickHouse` `IPv6` type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct Ipv6(pub Ipv6Addr);
 
 impl fmt::Display for Ipv6 {

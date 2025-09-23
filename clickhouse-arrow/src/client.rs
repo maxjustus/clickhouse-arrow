@@ -22,12 +22,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU16;
 
+#[cfg(feature = "serde")]
+use ::serde::ser::SerializeSeq;
 use arrow::array::{ArrayRef, RecordBatch};
 use arrow::compute::take_record_batch;
 use arrow::datatypes::SchemaRef;
 use futures_util::{Stream, StreamExt, TryStreamExt, stream};
-#[cfg(feature = "serde")]
-use serde::ser::SerializeSeq;
 use strum::AsRefStr;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -1066,12 +1066,12 @@ impl Client<crate::formats::NativeFormat> {
         serializer: S,
     ) -> Result<S::Ok>
     where
-        S: serde::Serializer,
+        S: ::serde::Serializer,
         P: Into<QueryParams>,
     {
         use futures_util::StreamExt as _;
 
-        use crate::native::values::serde_impls::RowSer;
+        use crate::native::values::serde::RowSerializer;
 
         let mut stream = self.query_raw(query, params, qid).await?;
         let mut seq =
@@ -1082,7 +1082,7 @@ impl Client<crate::formats::NativeFormat> {
             let cols = block.column_types.clone();
             for row in block.take_iter_rows() {
                 let row_values: Vec<_> = row.into_iter().map(|(_n, _t, v)| v).collect();
-                seq.serialize_element(&RowSer { cols: &cols, row: &row_values })
+                seq.serialize_element(&RowSerializer { cols: &cols, row: &row_values })
                     .map_err(|e| Error::SerializeError(e.to_string()))?;
             }
         }
@@ -1538,7 +1538,7 @@ impl Client<NativeFormat> {
     /// This is the parameterized version of `query_json`.
     #[cfg(feature = "serde")]
     #[instrument(
-        name = "clickhouse.query_json_params", 
+        name = "clickhouse.query_json_params",
         skip_all,
         fields(db.system = "clickhouse", db.operation = "query", db.format = NativeFormat::FORMAT)
     )]
@@ -1757,7 +1757,7 @@ pub struct InsertInto<'a> {
 impl InsertInto<'_> {
     /// Write a batch of Serde rows. For single JSON-column tables, each row is serialized
     /// as the JSON value for that column.
-    pub async fn write_rows<T: serde::Serialize>(
+    pub async fn write_rows<T: ::serde::Serialize>(
         &mut self,
         rows: impl IntoIterator<Item = T>,
     ) -> Result<usize> {
@@ -2800,7 +2800,7 @@ fn block_to_json_rows(mut block: Block) -> Result<Vec<serde_json::Map<String, se
     while let Some(row_data) = row_iter.next() {
         // Build a per-row (name, Type) schema and value slice
         use crate::native::types::Type;
-        use crate::native::values::{Value, serde_impls};
+        use crate::native::values::{Value, serde};
         let mut cols: Vec<(String, Type)> = Vec::new();
         let mut row_vals: Vec<Value> = Vec::new();
 
@@ -2811,7 +2811,7 @@ fn block_to_json_rows(mut block: Block) -> Result<Vec<serde_json::Map<String, se
 
         // Serialize the entire row via RowSer for correct named-tuple/object shaping
         // Render with default typed behavior (named tuples as objects)
-        let row_ser = serde_impls::RowSer { cols: &cols, row: &row_vals };
+        let row_ser = serde::RowSerializer { cols: &cols, row: &row_vals };
         let json_value =
             serde_json::to_value(row_ser).map_err(|e| Error::DeserializeError(e.to_string()))?;
         match json_value {

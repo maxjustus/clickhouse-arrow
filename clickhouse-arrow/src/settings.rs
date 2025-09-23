@@ -46,7 +46,7 @@
 /// - Settings are serialized according to the `ClickHouse` server’s protocol revision. For
 ///   revisions ≤ 54429, only integer and boolean settings are supported.
 /// - The `serde` feature enables serialization/deserialization of [`Setting`] and [`Settings`]
-///   with `serde::Serialize` and `serde::Deserialize`.
+///   with `::serde::Serialize` and `::serde::Deserialize`.
 use std::fmt;
 
 use crate::io::{ClickHouseRead, ClickHouseWrite};
@@ -163,7 +163,7 @@ impl fmt::Display for SettingValue {
 /// See the [ClickHouse Settings Reference](https://clickhouse.com/docs/en/operations/settings)
 /// for valid setting names and their types.
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct Setting {
     key:       String,
     value:     SettingValue,
@@ -348,7 +348,7 @@ impl<T: Into<String>, U: Into<SettingValue>> From<(T, U)> for Setting {
 /// See the [ClickHouse Native Protocol Documentation](https://clickhouse.com/docs/en/interfaces/tcp)
 /// for details on settings serialization.
 #[derive(Debug, Clone, Default, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct Settings(pub Vec<Setting>);
 
 impl Settings {
@@ -550,14 +550,14 @@ impl std::ops::Deref for Settings {
 
 #[cfg(feature = "serde")]
 pub mod deser {
-    use serde::{Deserialize, Serialize};
+    use ::serde::{Deserialize, Serialize};
 
     use super::*;
 
     impl Serialize for SettingValue {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
-            S: serde::Serializer,
+            S: ::serde::Serializer,
         {
             match self {
                 SettingValue::Int(i) => ::serde::Serialize::serialize(i, serializer),
@@ -571,18 +571,19 @@ pub mod deser {
     impl<'de> Deserialize<'de> for SettingValue {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
-            D: serde::Deserializer<'de>,
+            D: ::serde::Deserializer<'de>,
         {
             fn deserialize_setting<'d, De>(deserializer: De) -> Result<SettingValue, De::Error>
             where
-                De: serde::Deserializer<'d>,
+                De: ::serde::Deserializer<'d>,
             {
-                use serde::de::Visitor;
+                use ::serde::de::Visitor;
 
                 struct SettingVisitor;
 
                 type Result<E> = std::result::Result<SettingValue, E>;
 
+                // this strikes me as an absurd amount of duplication. Easily put in a macro.
                 impl Visitor<'_> for SettingVisitor {
                     type Value = SettingValue;
 
@@ -592,91 +593,91 @@ pub mod deser {
 
                     fn visit_bool<E>(self, value: bool) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         Ok(value.into())
                     }
 
                     fn visit_u8<E>(self, value: u8) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         Ok(value.into())
                     }
 
                     fn visit_u16<E>(self, value: u16) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         Ok(value.into())
                     }
 
                     fn visit_u32<E>(self, value: u32) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         Ok(value.into())
                     }
 
                     fn visit_u64<E>(self, value: u64) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         Ok(value.into())
                     }
 
                     fn visit_i8<E>(self, value: i8) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         Ok(value.into())
                     }
 
                     fn visit_i16<E>(self, value: i16) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         Ok(value.into())
                     }
 
                     fn visit_i32<E>(self, value: i32) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         Ok(value.into())
                     }
 
                     fn visit_i64<E>(self, value: i64) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         Ok(value.into())
                     }
 
                     fn visit_f32<E>(self, value: f32) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         Ok(value.into())
                     }
 
                     fn visit_f64<E>(self, value: f64) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         Ok(value.into())
                     }
 
                     fn visit_str<E>(self, value: &str) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         Ok(value.into())
                     }
 
                     fn visit_string<E>(self, value: String) -> Result<E>
                     where
-                        E: serde::de::Error,
+                        E: ::serde::de::Error,
                     {
                         self.visit_str(&value)
                     }

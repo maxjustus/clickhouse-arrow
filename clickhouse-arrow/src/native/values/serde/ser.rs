@@ -1,6 +1,6 @@
+use ::serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use chrono::NaiveDate;
 use chrono_tz::Tz;
-use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
 use crate::native::convert::FromSql;
 use crate::native::types::Type;
@@ -161,16 +161,16 @@ fn serialize_typed_impl<S: Serializer>(
         },
         // Decimals: render as strings with decimal point
         (Value::Decimal32(scale, v), _) => {
-            serializer.serialize_str(&super::format_decimal(v.to_string(), *scale))
+            serializer.serialize_str(&super::super::format_decimal(v.to_string(), *scale))
         }
         (Value::Decimal64(scale, v), _) => {
-            serializer.serialize_str(&super::format_decimal(v.to_string(), *scale))
+            serializer.serialize_str(&super::super::format_decimal(v.to_string(), *scale))
         }
         (Value::Decimal128(scale, v), _) => {
-            serializer.serialize_str(&super::format_decimal(v.to_string(), *scale))
+            serializer.serialize_str(&super::super::format_decimal(v.to_string(), *scale))
         }
         (Value::Decimal256(scale, v), _) => {
-            serializer.serialize_str(&super::format_decimal(v.to_string(), *scale))
+            serializer.serialize_str(&super::super::format_decimal(v.to_string(), *scale))
         }
         // Strings may be non-UTF8 (FixedString/Binary); use lossy for stability
         (Value::String(bytes), _) => serializer.serialize_str(&String::from_utf8_lossy(bytes)),
@@ -194,7 +194,7 @@ fn serialize_typed_impl<S: Serializer>(
         (Value::DateTime(datetime), _) => {
             let ch: chrono::DateTime<Tz> = (*datetime)
                 .try_into()
-                .map_err(|_| serde::ser::Error::custom("Invalid DateTime"))?;
+                .map_err(|_| ::serde::ser::Error::custom("Invalid DateTime"))?;
             serializer.serialize_str(&ch.format("%Y-%m-%d %H:%M:%S").to_string())
         }
         // DateTime64 with precision handling like Value::to_json
@@ -202,7 +202,7 @@ fn serialize_typed_impl<S: Serializer>(
             let ty = Type::DateTime64(datetime.2, datetime.0);
             let v = Value::DateTime64(*datetime);
             let ch: chrono::DateTime<Tz> = FromSql::from_sql(&ty, v)
-                .map_err(|e| serde::ser::Error::custom(format!("Invalid DateTime64: {e}")))?;
+                .map_err(|e| ::serde::ser::Error::custom(format!("Invalid DateTime64: {e}")))?;
             let formatted = match datetime.2 {
                 0 => ch.format("%Y-%m-%d %H:%M:%S").to_string(),
                 3 => ch.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
@@ -228,7 +228,7 @@ fn serialize_typed_impl<S: Serializer>(
         // Object: parse as JSON and serialize that
         (Value::Object(bytes), _) => match serde_json::from_slice::<serde_json::Value>(bytes) {
             Ok(json) => json.serialize(serializer),
-            Err(e) => Err(serde::ser::Error::custom(format!("Invalid JSON in Object: {e}"))),
+            Err(e) => Err(::serde::ser::Error::custom(format!("Invalid JSON in Object: {e}"))),
         },
         // Json: pass-through
         #[cfg(feature = "serde")]
@@ -336,7 +336,7 @@ fn serialize_typed_impl<S: Serializer>(
         // typed path with `guess_type()`, so this converges without infinite recursion.
         (v, _) => match v.to_json() {
             Ok(json) => json.serialize(serializer),
-            Err(e) => Err(serde::ser::Error::custom(e.to_string())),
+            Err(e) => Err(::serde::ser::Error::custom(e.to_string())),
         },
     }
 }
@@ -388,12 +388,12 @@ fn stringify_key_for_json(k: &Value) -> String {
 }
 
 /// Serialize a row object from `(name, Type)` columns and corresponding `Value`s.
-pub struct RowSer<'a> {
+pub struct RowSerializer<'a> {
     pub cols: &'a [(String, Type)],
     pub row:  &'a [Value],
 }
 
-impl Serialize for RowSer<'_> {
+impl Serialize for RowSerializer<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let cap = core::cmp::min(self.cols.len(), self.row.len());
         let mut map = serializer.serialize_map(Some(cap))?;
@@ -469,7 +469,7 @@ mod tests {
             ("n".into(), Type::Nullable(Box::new(Type::Int32))),
         ];
         let row = vec![Value::Tuple(vec![Value::string("z"), Value::Int64(1)]), Value::Null];
-        let got = serde_json::to_value(RowSer { cols: &cols, row: &row }).unwrap();
+        let got = serde_json::to_value(RowSerializer { cols: &cols, row: &row }).unwrap();
         assert_eq!(got, json!({"t": {"a": "z", "b": 1}, "n": null}));
     }
 

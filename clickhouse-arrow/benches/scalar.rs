@@ -12,7 +12,7 @@ use clickhouse_arrow::test_utils::{arrow_tests, get_or_create_container};
 use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
+use ::serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
 use self::common::{init, print_msg};

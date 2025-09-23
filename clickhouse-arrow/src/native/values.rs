@@ -10,9 +10,7 @@ mod ip;
 #[cfg(feature = "serde")]
 pub mod json;
 #[cfg(feature = "serde")]
-pub mod serde_de;
-#[cfg(feature = "serde")]
-pub mod serde_impls;
+pub mod serde;
 pub mod vec_tuple;
 
 #[cfg(test)]
@@ -39,7 +37,7 @@ use crate::Result;
 /// Types are not strictly/completely preserved (i.e. types `Type::String` and `Type::FixedString`
 /// both are value `Type::String`). Use this if you want dynamically typed queries.
 #[derive(Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub enum Value {
     Int8(i8),
     Int16(i16),
@@ -273,7 +271,7 @@ impl Value {
         #[cfg(feature = "serde")]
         {
             let t = self.guess_type();
-            let typed = serde_impls::Typed { v: self, t: &t };
+            let typed = serde::Typed { v: self, t: &t };
             serde_json::to_value(typed)
                 .map_err(|e| crate::Error::DeserializeError(format!("serde error: {e}")))
         }

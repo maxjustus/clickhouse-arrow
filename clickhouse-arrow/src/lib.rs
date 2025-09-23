@@ -24,8 +24,8 @@ pub mod test_utils;
 #[cfg(feature = "derive")]
 /// Derive macro for the [Row] trait.
 ///
-/// This is similar in usage and implementation to the [`serde::Serialize`] and
-/// [`serde::Deserialize`] derive macros.
+/// This is similar in usage and implementation to the [`::serde::Serialize`] and
+/// [`::serde::Deserialize`] derive macros.
 ///
 /// ## serde attributes
 /// The following [serde attributes](https://serde.rs/attributes.html) are supported, using `#[clickhouse_arrow(...)]` instead of `#[serde(...)]`:

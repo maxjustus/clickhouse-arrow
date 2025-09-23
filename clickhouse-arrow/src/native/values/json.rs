@@ -1,5 +1,5 @@
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use ::serde::de::DeserializeOwned;
+use ::serde::{Deserialize, Serialize};
 
 use crate::{Error, FromSql, Result, ToSql, Type, Value};
 

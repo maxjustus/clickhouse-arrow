@@ -44,7 +44,7 @@ use crate::prelude::Secret;
 ///     .unwrap();
 /// ```
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct ClientOptions {
     /// Username credential
     pub username:         String,
@@ -157,7 +157,7 @@ impl ClientOptions {
 /// implementations.
 #[non_exhaustive]
 #[derive(Debug, Default, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct Extension {
     /// Options specific to (de)serializing arrow data.
     pub arrow:          Option<ArrowOptions>,
@@ -279,7 +279,7 @@ impl Extension {
 #[expect(clippy::struct_excessive_bools)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct ArrowOptions {
     pub strings_as_strings:           bool,
     pub use_date32_for_date:          bool,
@@ -709,7 +709,7 @@ impl<'a> FromIterator<(&'a str, bool)> for ArrowOptions {
 /// };
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct CloudOptions {
     #[cfg_attr(feature = "serde", serde(default))]
     pub timeout: Option<u64>,

@@ -5,18 +5,18 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ::serde::{Deserialize, Serialize};
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use clickhouse_arrow::file_stream::FileStreamWriter;
 use clickhouse_arrow::native::types::Type;
 use clickhouse_arrow::native::values::Value as ChValue;
-use clickhouse_arrow::native::values::serde_impls::RowSer;
+use clickhouse_arrow::native::values::serde::RowSerializer;
 use clickhouse_arrow::{
     ArrowOptions, Client, CompressionMethod, NativeFormat, Qid, QueryParams, SettingValue, Settings,
 };
 use client::ClickHouseClient;
 use futures::StreamExt as _;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{
     AsyncBufReadExt, AsyncWriteExt as _, BufReader as AsyncBufReader, BufWriter as AsyncBufWriter,
@@ -36,7 +36,7 @@ struct DataEvent<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id:  Option<&'a str>,
     #[serde(rename = "data")]
-    data:        RowSer<'a>,
+    data:        RowSerializer<'a>,
 }
 
 enum WriterCmd {
@@ -254,7 +254,7 @@ fn spawn_stdout_writer(is_pretty: bool) -> mpsc::Sender<WriterCmd> {
                         let event = DataEvent {
                             output_type: "data",
                             request_id,
-                            data: RowSer {
+                            data: RowSerializer {
                                 cols: payload.cols.as_slice(),
                                 row:  payload.row.as_slice(),
                             },

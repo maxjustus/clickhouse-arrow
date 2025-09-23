@@ -30,7 +30,7 @@ use crate::{Date32, Error, Result};
 
 /// A raw `ClickHouse` type.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub enum Type {
     Int8,
     Int16,
