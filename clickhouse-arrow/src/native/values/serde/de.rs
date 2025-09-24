@@ -1,8 +1,15 @@
 use ::serde::Deserializer;
-use ::serde::de::{self, DeserializeSeed, IntoDeserializer, MapAccess, SeqAccess, Visitor};
+use ::serde::de::value::SeqAccessDeserializer;
+use ::serde::de::{
+    self, DeserializeSeed, Error as DeError, IntoDeserializer, MapAccess, SeqAccess, Visitor,
+};
+use chrono::NaiveDate;
+use chrono_tz::Tz;
 
+use crate::native::convert::FromSql;
 use crate::native::types::Type;
-use crate::native::values::Value;
+use crate::native::values::serde::ser::stringify_key_for_json;
+use crate::native::values::{Point, Polygon, Ring, Value};
 
 // Macro to generate deserialize_* methods that forward to deserialize_any
 // This is a standard serde pattern to reduce boilerplate
@@ -17,6 +24,101 @@ macro_rules! forward_to_deserialize_any {
             }
         )*
     };
+}
+
+struct PointAccess {
+    point: Point,
+    idx:   usize,
+}
+
+impl<'de> SeqAccess<'de> for PointAccess {
+    type Error = serde_json::Error;
+
+    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        if self.idx >= 2 {
+            return Ok(None);
+        }
+        let coord = self.point.0[self.idx];
+        self.idx += 1;
+        seed.deserialize(coord.into_deserializer()).map(Some)
+    }
+
+    fn size_hint(&self) -> Option<usize> { Some(2_usize.saturating_sub(self.idx)) }
+}
+
+struct RingAccess<'a> {
+    points: &'a [Point],
+    idx:    usize,
+}
+
+impl<'de> SeqAccess<'de> for RingAccess<'_> {
+    type Error = serde_json::Error;
+
+    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        if self.idx >= self.points.len() {
+            return Ok(None);
+        }
+        let point = self.points[self.idx];
+        self.idx += 1;
+        let seq = SeqAccessDeserializer::new(PointAccess { point, idx: 0 });
+        seed.deserialize(seq).map(Some).map_err(|err| DeError::custom(err))
+    }
+
+    fn size_hint(&self) -> Option<usize> { Some(self.points.len().saturating_sub(self.idx)) }
+}
+
+struct PolygonAccess<'a> {
+    rings: &'a [Ring],
+    idx:   usize,
+}
+
+impl<'de> SeqAccess<'de> for PolygonAccess<'_> {
+    type Error = serde_json::Error;
+
+    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        if self.idx >= self.rings.len() {
+            return Ok(None);
+        }
+        let ring = &self.rings[self.idx];
+        self.idx += 1;
+        let seq = SeqAccessDeserializer::new(RingAccess { points: &ring.0, idx: 0 });
+        seed.deserialize(seq).map(Some).map_err(|err| DeError::custom(err))
+    }
+
+    fn size_hint(&self) -> Option<usize> { Some(self.rings.len().saturating_sub(self.idx)) }
+}
+
+struct MultiPolygonAccess<'a> {
+    polygons: &'a [Polygon],
+    idx:      usize,
+}
+
+impl<'de> SeqAccess<'de> for MultiPolygonAccess<'_> {
+    type Error = serde_json::Error;
+
+    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        if self.idx >= self.polygons.len() {
+            return Ok(None);
+        }
+        let polygon = &self.polygons[self.idx];
+        self.idx += 1;
+        let seq = SeqAccessDeserializer::new(PolygonAccess { rings: &polygon.0, idx: 0 });
+        seed.deserialize(seq).map(Some).map_err(|err| DeError::custom(err))
+    }
+
+    fn size_hint(&self) -> Option<usize> { Some(self.polygons.len().saturating_sub(self.idx)) }
 }
 
 /// A type-aware deserializer over a `Value` guided by a `Type` schema.
@@ -43,13 +145,21 @@ impl<'de> Deserializer<'de> for TypedDeserializer<'_> {
     where
         V: Visitor<'de>,
     {
-        let t = self.t.strip_null();
-        match (self.v, t) {
-            (Value::Null, _) => visitor.visit_none(),
-            (v, Type::Nullable(inner)) => {
-                TypedDeserializer { v, t: inner }.deserialize_any(visitor)
-            }
+        if matches!(self.v, Value::Null) {
+            return visitor.visit_none();
+        }
 
+        let mut ty = self.t;
+        loop {
+            match ty {
+                Type::Nullable(inner) | Type::LowCardinality(inner) => {
+                    ty = inner;
+                }
+                _ => break,
+            }
+        }
+
+        match (self.v, ty) {
             (Value::Array(items), Type::Array(inner)) => {
                 struct ArrAccess<'a> {
                     items: &'a [Value],
@@ -143,6 +253,158 @@ impl<'de> Deserializer<'de> for TypedDeserializer<'_> {
                     }
                 }
                 visitor.visit_seq(TupAccess { values, types: inner, idx: 0, cap })
+            }
+
+            (Value::Map(keys, values), Type::Map(_key_ty, value_ty)) => {
+                let cap = core::cmp::min(keys.len(), values.len());
+                struct MapAccessImpl<'a> {
+                    keys:     &'a [Value],
+                    values:   &'a [Value],
+                    value_ty: &'a Type,
+                    idx:      usize,
+                    cap:      usize,
+                }
+                impl<'de> MapAccess<'de> for MapAccessImpl<'_> {
+                    type Error = serde_json::Error;
+
+                    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
+                    where
+                        K: DeserializeSeed<'de>,
+                    {
+                        if self.idx >= self.cap {
+                            return Ok(None);
+                        }
+                        let key = stringify_key_for_json(&self.keys[self.idx]);
+                        seed.deserialize(key.into_deserializer()).map(Some)
+                    }
+
+                    fn next_value_seed<VV>(&mut self, seed: VV) -> Result<VV::Value, Self::Error>
+                    where
+                        VV: DeserializeSeed<'de>,
+                    {
+                        let i = self.idx;
+                        self.idx += 1;
+                        let de = TypedDeserializer { v: &self.values[i], t: self.value_ty };
+                        seed.deserialize(de)
+                    }
+                }
+                visitor.visit_map(MapAccessImpl { keys, values, value_ty, idx: 0, cap })
+            }
+
+            (Value::Int8(i), _) => visitor.visit_i8(*i),
+            (Value::Int16(i), _) => visitor.visit_i16(*i),
+            (Value::Int32(i), _) => visitor.visit_i32(*i),
+            (Value::Int64(i), _) => visitor.visit_i64(*i),
+            (Value::UInt8(i), _) => visitor.visit_u8(*i),
+            (Value::UInt16(i), _) => visitor.visit_u16(*i),
+            (Value::UInt32(i), _) => visitor.visit_u32(*i),
+            (Value::UInt64(i), _) => visitor.visit_u64(*i),
+            (Value::Int128(i), _) => visitor.visit_string(i.to_string()),
+            (Value::UInt128(i), _) => visitor.visit_string(i.to_string()),
+            (Value::Int256(i), _) => visitor.visit_string(i.to_string()),
+            (Value::UInt256(i), _) => visitor.visit_string(i.to_string()),
+
+            (Value::Float32(f), _) => {
+                if f.is_finite() {
+                    visitor.visit_f32(*f)
+                } else {
+                    visitor.visit_none()
+                }
+            }
+            (Value::Float64(f), _) => {
+                if f.is_finite() {
+                    visitor.visit_f64(*f)
+                } else {
+                    visitor.visit_none()
+                }
+            }
+
+            (Value::Decimal32(scale, v), _) => {
+                visitor.visit_string(super::super::format_decimal(v.to_string(), *scale))
+            }
+            (Value::Decimal64(scale, v), _) => {
+                visitor.visit_string(super::super::format_decimal(v.to_string(), *scale))
+            }
+            (Value::Decimal128(scale, v), _) => {
+                visitor.visit_string(super::super::format_decimal(v.to_string(), *scale))
+            }
+            (Value::Decimal256(scale, v), _) => {
+                visitor.visit_string(super::super::format_decimal(v.to_string(), *scale))
+            }
+
+            (Value::String(bytes), _) => {
+                visitor.visit_string(String::from_utf8_lossy(bytes).into_owned())
+            }
+            (Value::Uuid(u), _) => visitor.visit_string(u.to_string()),
+            (Value::Ipv4(ip), _) => visitor.visit_string(ip.to_string()),
+            (Value::Ipv6(ip), _) => visitor.visit_string(ip.to_string()),
+            (Value::Enum8(name, _), _) | (Value::Enum16(name, _), _) => {
+                visitor.visit_string(name.clone())
+            }
+
+            (Value::Date(date), _) => {
+                let d: NaiveDate = (*date).into();
+                visitor.visit_string(d.format("%Y-%m-%d").to_string())
+            }
+            (Value::Date32(date), _) => {
+                let d: NaiveDate = (*date).into();
+                visitor.visit_string(d.format("%Y-%m-%d").to_string())
+            }
+            (Value::DateTime(datetime), Type::DateTime(_tz)) => {
+                let ch: chrono::DateTime<Tz> =
+                    (*datetime).try_into().map_err(|_| de::Error::custom("Invalid DateTime"))?;
+                visitor.visit_string(ch.format("%Y-%m-%d %H:%M:%S").to_string())
+            }
+            (Value::DateTime64(datetime), Type::DateTime64(scale, tz)) => {
+                let ty = Type::DateTime64(*scale, *tz);
+                let value = Value::DateTime64(*datetime);
+                let ch: chrono::DateTime<Tz> = FromSql::from_sql(&ty, value)
+                    .map_err(|e| de::Error::custom(format!("Invalid DateTime64: {e}")))?;
+                let formatted = match *scale {
+                    0 => ch.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    3 => ch.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+                    6 => ch.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+                    9 => ch.format("%Y-%m-%d %H:%M:%S%.9f").to_string(),
+                    other => {
+                        let nanos = ch.timestamp_subsec_nanos();
+                        let divisor = 10_u32.saturating_pow(9_u32.saturating_sub(other as u32));
+                        let subsec = if divisor == 0 { nanos } else { nanos / divisor };
+                        format!(
+                            "{}.{subsec:0width$}",
+                            ch.format("%Y-%m-%d %H:%M:%S"),
+                            width = other
+                        )
+                    }
+                };
+                visitor.visit_string(formatted)
+            }
+
+            (Value::Point(point), Type::Point) => {
+                visitor.visit_seq(PointAccess { point: *point, idx: 0 })
+            }
+            (Value::Ring(ring), Type::Ring) => {
+                visitor.visit_seq(RingAccess { points: &ring.0, idx: 0 })
+            }
+            (Value::Polygon(polygon), Type::Polygon) => {
+                visitor.visit_seq(PolygonAccess { rings: &polygon.0, idx: 0 })
+            }
+            (Value::MultiPolygon(multi), Type::MultiPolygon) => {
+                visitor.visit_seq(MultiPolygonAccess { polygons: &multi.0, idx: 0 })
+            }
+
+            (Value::Variant(_, inner), _) => {
+                let inner_ty = inner.guess_type();
+                TypedDeserializer { v: inner, t: &inner_ty }.deserialize_any(visitor)
+            }
+            (Value::Dynamic(_, inner), _) => {
+                let inner_ty = inner.guess_type();
+                TypedDeserializer { v: inner, t: &inner_ty }.deserialize_any(visitor)
+            }
+            (Value::Json(json), _) => json.clone().into_deserializer().deserialize_any(visitor),
+            (Value::Object(bytes), _) => {
+                let json: serde_json::Value = serde_json::from_slice(bytes)
+                    .map_err(|e| de::Error::custom(format!("Invalid JSON in Object: {e}")))?;
+                json.into_deserializer().deserialize_any(visitor)
             }
 
             // Fallback: delegate to JSON rendering for primitives/others
@@ -240,6 +502,9 @@ impl<'de> Deserializer<'de> for TypedDeserializer<'_> {
             (Value::Null, _) => visitor.visit_none(),
             (v, Type::Nullable(inner)) => {
                 TypedDeserializer { v, t: inner }.deserialize_any(visitor)
+            }
+            (v, Type::LowCardinality(inner)) => {
+                TypedDeserializer { v, t: inner }.deserialize_option(visitor)
             }
             _ => self.deserialize_any(visitor),
         }
@@ -486,6 +751,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::native::values::MultiPolygon;
 
     #[test]
     fn transcode_named_tuple_via_deserializer() {
@@ -504,5 +770,159 @@ mod tests {
         }
         let got: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(got, json!({"my_tuple": {"a":"x","b":7}}));
+    }
+
+    #[test]
+    fn typed_deserializer_transcodes_primitives() {
+        let ty = Type::Int32;
+        let v = Value::Int32(42);
+        let mut out = Vec::new();
+        {
+            let de = TypedDeserializer { v: &v, t: &ty };
+            let mut ser = serde_json::Serializer::new(&mut out);
+            serde_transcode::transcode(de, &mut ser).unwrap();
+        }
+        assert_eq!(serde_json::from_slice::<i32>(&out).unwrap(), 42);
+    }
+
+    #[test]
+    fn typed_deserializer_transcodes_decimal_as_string() {
+        let ty = Type::Decimal64(2);
+        let v = Value::Decimal64(2, 1234);
+        let mut out = Vec::new();
+        {
+            let de = TypedDeserializer { v: &v, t: &ty };
+            let mut ser = serde_json::Serializer::new(&mut out);
+            serde_transcode::transcode(de, &mut ser).unwrap();
+        }
+        let got: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(got, json!("12.34"));
+    }
+
+    #[test]
+    fn typed_deserializer_transcodes_map_with_stringified_keys() {
+        let ty = Type::Map(Box::new(Type::Int64), Box::new(Type::String));
+        let v = Value::Map(vec![Value::Int64(7), Value::Int64(42)], vec![
+            Value::string("x"),
+            Value::string("y"),
+        ]);
+        let mut out = Vec::new();
+        {
+            let de = TypedDeserializer { v: &v, t: &ty };
+            let mut ser = serde_json::Serializer::new(&mut out);
+            serde_transcode::transcode(de, &mut ser).unwrap();
+        }
+        let got: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(got, json!({"7": "x", "42": "y"}));
+    }
+
+    #[test]
+    fn typed_deserializer_transcodes_float_nan_to_null() {
+        let ty = Type::Float64;
+        let v = Value::Float64(f64::NAN);
+        let mut out = Vec::new();
+        {
+            let de = TypedDeserializer { v: &v, t: &ty };
+            let mut ser = serde_json::Serializer::new(&mut out);
+            serde_transcode::transcode(de, &mut ser).unwrap();
+        }
+        let got: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(got, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn typed_deserializer_transcodes_point() {
+        let ty = Type::Point;
+        let v = Value::Point(Point([1.0, -2.5]));
+        let mut out = Vec::new();
+        {
+            let de = TypedDeserializer { v: &v, t: &ty };
+            let mut ser = serde_json::Serializer::new(&mut out);
+            serde_transcode::transcode(de, &mut ser).unwrap();
+        }
+        let got: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(got, json!([1.0, -2.5]));
+    }
+
+    #[test]
+    fn typed_deserializer_transcodes_ring() {
+        let ty = Type::Ring;
+        let v = Value::Ring(Ring(vec![Point([0.0, 0.0]), Point([1.0, 1.0])]));
+        let mut out = Vec::new();
+        {
+            let de = TypedDeserializer { v: &v, t: &ty };
+            let mut ser = serde_json::Serializer::new(&mut out);
+            serde_transcode::transcode(de, &mut ser).unwrap();
+        }
+        let got: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(got, json!([[0.0, 0.0], [1.0, 1.0]]));
+    }
+
+    #[test]
+    fn typed_deserializer_transcodes_polygon() {
+        let ty = Type::Polygon;
+        let v = Value::Polygon(Polygon(vec![Ring(vec![
+            Point([0.0, 0.0]),
+            Point([1.0, 0.0]),
+            Point([1.0, 1.0]),
+            Point([0.0, 0.0]),
+        ])]));
+        let mut out = Vec::new();
+        {
+            let de = TypedDeserializer { v: &v, t: &ty };
+            let mut ser = serde_json::Serializer::new(&mut out);
+            serde_transcode::transcode(de, &mut ser).unwrap();
+        }
+        let got: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(got, json!([[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]]]));
+    }
+
+    #[test]
+    fn typed_deserializer_transcodes_multi_polygon() {
+        let ty = Type::MultiPolygon;
+        let v = Value::MultiPolygon(MultiPolygon(vec![
+            Polygon(vec![Ring(vec![Point([0.0, 0.0]), Point([1.0, 0.0]), Point([1.0, 1.0])])]),
+            Polygon(vec![Ring(vec![Point([2.0, 2.0]), Point([3.0, 2.0]), Point([3.0, 3.0])])]),
+        ]));
+        let mut out = Vec::new();
+        {
+            let de = TypedDeserializer { v: &v, t: &ty };
+            let mut ser = serde_json::Serializer::new(&mut out);
+            serde_transcode::transcode(de, &mut ser).unwrap();
+        }
+        let got: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            got,
+            json!([[[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]], [[[2.0, 2.0], [3.0, 2.0], [3.0, 3.0]]]])
+        );
+    }
+
+    #[test]
+    fn typed_deserializer_transcodes_object_bytes() {
+        let ty = Type::Object;
+        let bytes = serde_json::to_vec(&json!({"k": [1, 2, 3]})).unwrap();
+        let v = Value::Object(bytes);
+        let mut out = Vec::new();
+        {
+            let de = TypedDeserializer { v: &v, t: &ty };
+            let mut ser = serde_json::Serializer::new(&mut out);
+            serde_transcode::transcode(de, &mut ser).unwrap();
+        }
+        let got: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(got, json!({"k": [1, 2, 3]}));
+    }
+
+    #[test]
+    fn typed_deserializer_transcodes_variant_inner() {
+        let ty = Type::Variant(vec![Type::Int64]);
+        let v = Value::Variant(0, Box::new(Value::Int64(9)));
+        let mut out = Vec::new();
+        {
+            let de = TypedDeserializer { v: &v, t: &ty };
+            let mut ser = serde_json::Serializer::new(&mut out);
+            serde_transcode::transcode(de, &mut ser).unwrap();
+        }
+        let got: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(got, json!(9));
     }
 }

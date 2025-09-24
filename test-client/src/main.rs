@@ -11,13 +11,14 @@ use clap::Parser;
 use clickhouse_arrow::file_stream::FileStreamWriter;
 use clickhouse_arrow::native::types::Type;
 use clickhouse_arrow::native::values::Value as ChValue;
-use clickhouse_arrow::native::values::serde::RowSerializer;
+use clickhouse_arrow::native::values::serde::RowDeserializer;
 use clickhouse_arrow::{
     ArrowOptions, Client, CompressionMethod, NativeFormat, Qid, QueryParams, SettingValue, Settings,
 };
 use client::ClickHouseClient;
 use futures::StreamExt as _;
 use serde_json::Value;
+use serde_transcode::transcode;
 use tokio::io::{
     AsyncBufReadExt, AsyncWriteExt as _, BufReader as AsyncBufReader, BufWriter as AsyncBufWriter,
 };
@@ -36,7 +37,23 @@ struct DataEvent<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id:  Option<&'a str>,
     #[serde(rename = "data")]
-    data:        RowSerializer<'a>,
+    data:        RowSerde<'a>,
+}
+
+struct RowSerde<'a> {
+    cols: &'a [(String, Type)],
+    row:  &'a [ChValue],
+}
+
+impl<'a> RowSerde<'a> {
+    fn new(cols: &'a [(String, Type)], row: &'a [ChValue]) -> Self { Self { cols, row } }
+}
+
+impl Serialize for RowSerde<'_> {
+    fn serialize<S: ::serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let de = RowDeserializer { cols: self.cols, row: self.row };
+        transcode(de, serializer)
+    }
 }
 
 enum WriterCmd {
@@ -254,10 +271,7 @@ fn spawn_stdout_writer(is_pretty: bool) -> mpsc::Sender<WriterCmd> {
                         let event = DataEvent {
                             output_type: "data",
                             request_id,
-                            data: RowSerializer {
-                                cols: payload.cols.as_slice(),
-                                row:  payload.row.as_slice(),
-                            },
+                            data: RowSerde::new(payload.cols.as_slice(), payload.row.as_slice()),
                         };
                         if is_pretty {
                             serde_json::to_writer_pretty(&mut writer, &event)
@@ -1356,6 +1370,7 @@ async fn handle_session_cancel(
     }
 }
 
+// TODO: should we only work in the command oriented mode?
 async fn execute_insert(
     client: ClickHouseClient,
     table: &str,

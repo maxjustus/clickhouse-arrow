@@ -1,12 +1,12 @@
 use std::hint::black_box;
 
+use ::serde::{Deserialize, Serialize};
 use clickhouse::{Client as ClickHouseRsClient, Row as ClickHouseRow};
 use clickhouse_arrow::prelude::*;
 use clickhouse_arrow::test_utils::{ClickHouseContainer, init_tracing};
 use clickhouse_arrow::{CompressionMethod, Row, Uuid};
 use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, BenchmarkId};
-use ::serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
 #[allow(unused)]

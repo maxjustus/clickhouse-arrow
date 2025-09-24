@@ -371,7 +371,7 @@ impl Serialize for TypedWith<'_> {
     }
 }
 
-fn stringify_key_for_json(k: &Value) -> String {
+pub(super) fn stringify_key_for_json(k: &Value) -> String {
     match k {
         Value::String(bytes) => String::from_utf8_lossy(bytes).to_string(),
         _ => match k.to_json() {

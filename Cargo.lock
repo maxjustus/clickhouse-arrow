@@ -911,6 +911,7 @@ dependencies = [
  "futures",
  "hex",
  "serde",
+ "serde-transcode",
  "serde_json",
  "tokio",
  "tracing",

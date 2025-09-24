@@ -340,8 +340,8 @@ pub async fn test_json_minimal_insert_into(ch: Arc<ClickHouseContainer>) {
 ///
 /// # Panics
 pub async fn test_json_direct_deserialize(ch: Arc<ClickHouseContainer>) {
-    use clickhouse_arrow::native::values::json::Json;
     use ::serde::{Deserialize, Serialize};
+    use clickhouse_arrow::native::values::json::Json;
 
     let client = ClientBuilder::default()
         .with_endpoint(ch.get_native_url())

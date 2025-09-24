@@ -1841,6 +1841,7 @@ impl InsertInto<'_> {
     pub async fn finish(mut self) -> Result<()> { self.flush().await }
 }
 
+// TODO: should this go in the coerce module + the other coerce functions in here?
 #[cfg(feature = "serde")]
 fn map_cell_to_value(
     cell: Option<&serde_json::Value>,
