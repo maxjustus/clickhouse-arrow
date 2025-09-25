@@ -4,6 +4,7 @@ use super::DeserializerState;
 use super::protocol_data::{EmptyBlock, ProtocolData};
 use crate::Type;
 use crate::client::connection::ClientMetadata;
+use crate::compression::{StreamingCompressor, StreamingDecompressor};
 use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::block::Block;
 use crate::native::protocol::CompressionMethod;
@@ -40,8 +41,7 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
             Block::read_async(reader, revision, None, state).await?.into_option()
         } else {
             // Stream-decompress all chunks for this packet and read block asynchronously
-            let mut decompressor =
-                crate::compression::DecompressionReader::new(metadata.compression, reader).await?;
+            let mut decompressor = StreamingDecompressor::new(metadata.compression, reader).await?;
             Block::read_async(&mut decompressor, revision, None, state).await?.into_option()
         })
     }
@@ -64,7 +64,7 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
         } else {
             // Stream-compress while writing the block to avoid buffering the whole block in memory
             use tokio::io::AsyncWriteExt as _;
-            let mut sc = crate::compression::StreamingCompressor::new(
+            let mut sc = StreamingCompressor::new(
                 writer,
                 metadata.compression,
                 1 << 20, // 1 MiB chunks (consider exposing via ClientOptions in the future)

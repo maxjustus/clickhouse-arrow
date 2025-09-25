@@ -7,7 +7,7 @@ use super::DeserializerState;
 use super::protocol_data::{EmptyBlock, ProtocolData};
 use crate::Type;
 use crate::arrow::ArrowDeserializerState;
-use crate::compression::{DecompressionReader, StreamingCompressor};
+use crate::compression::{StreamingCompressor, StreamingDecompressor};
 use crate::connection::ClientMetadata;
 use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::protocol::CompressionMethod;
@@ -81,7 +81,7 @@ impl super::sealed::ClientFormatImpl<RecordBatch> for ArrowFormat {
             RecordBatch::read_async(reader, revision, arrow_options, state).await
         } else {
             // Stream-decompress compressed Arrow blocks and read via async path
-            let mut decompressor = DecompressionReader::new(metadata.compression, reader).await?;
+            let mut decompressor = StreamingDecompressor::new(metadata.compression, reader).await?;
             RecordBatch::read_async(&mut decompressor, revision, arrow_options, state).await
         }
         .inspect_err(|error| error!(?error, "deserializing arrow record batch"))
