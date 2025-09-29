@@ -31,9 +31,9 @@ use crate::{ArrowOptions, Result, Type};
 #[derive(Default)]
 pub(crate) struct ArrowDeserializerState {
     pub(crate) builders: Vec<TypedBuilder>,
-    pub(crate) buffer:   Vec<u8>,
-    fields:              Vec<FieldRef>,
-    arrays:              Vec<ArrayRef>,
+    pub(crate) buffer: Vec<u8>,
+    fields: Vec<FieldRef>,
+    arrays: Vec<ArrayRef>,
 }
 
 impl ArrowDeserializerState {
@@ -525,9 +525,10 @@ mod tests {
         assert_eq!(list_array.len(), 3);
         assert_eq!(values, &Int32Array::from(vec![1, 2, 3, 4, 5]));
         assert_eq!(list_array.offsets().iter().copied().collect::<Vec<i32>>(), vec![0, 2, 2, 5]);
-        assert_eq!(list_array.nulls().unwrap().iter().collect::<Vec<bool>>(), vec![
-            true, false, true
-        ]);
+        assert_eq!(
+            list_array.nulls().unwrap().iter().collect::<Vec<bool>>(),
+            vec![true, false, true]
+        );
     }
 
     /// Tests deserialization of `Map(String, Int32)` with non-nullable key-value pairs.

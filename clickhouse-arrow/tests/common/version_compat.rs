@@ -11,7 +11,9 @@ pub struct Version {
 }
 
 impl Version {
-    pub fn new(major: u32, minor: u32, patch: u32) -> Self { Self { major, minor, patch } }
+    pub fn new(major: u32, minor: u32, patch: u32) -> Self {
+        Self { major, minor, patch }
+    }
 
     /// Parse version string like "24.3.5.46" or "25.1.2.3-testing"
     pub fn parse(version_str: &str) -> Option<Self> {
@@ -38,19 +40,29 @@ impl Version {
     }
 
     /// Check if this version supports the Dynamic type (requires 24.8+)
-    pub fn supports_dynamic(&self) -> bool { self >= &Version::new(24, 8, 0) }
+    pub fn supports_dynamic(&self) -> bool {
+        self >= &Version::new(24, 8, 0)
+    }
 
     /// Check if this version supports the JSON type (requires 25.1+)
-    pub fn supports_json(&self) -> bool { self >= &Version::new(25, 1, 0) }
+    pub fn supports_json(&self) -> bool {
+        self >= &Version::new(25, 1, 0)
+    }
 
     /// Check if this version supports JSON v3 object serialization (requires 25.6+)
-    pub fn supports_json_v3(&self) -> bool { self >= &Version::new(25, 6, 0) }
+    pub fn supports_json_v3(&self) -> bool {
+        self >= &Version::new(25, 6, 0)
+    }
 
     /// Check if this version supports Variant type (requires 25.1+)
-    pub fn supports_variant(&self) -> bool { self >= &Version::new(25, 1, 0) }
+    pub fn supports_variant(&self) -> bool {
+        self >= &Version::new(25, 1, 0)
+    }
 
     /// Check if this version has stable Dynamic/JSON support (requires 25.6+)
-    pub fn has_stable_dynamic_json(&self) -> bool { self >= &Version::new(25, 6, 0) }
+    pub fn has_stable_dynamic_json(&self) -> bool {
+        self >= &Version::new(25, 6, 0)
+    }
 }
 
 impl FromStr for Version {
@@ -84,7 +96,9 @@ impl VersionChecker {
         Self { version }
     }
 
-    pub fn version(&self) -> Option<&Version> { self.version.as_ref() }
+    pub fn version(&self) -> Option<&Version> {
+        self.version.as_ref()
+    }
 
     /// Generic method to check feature support and skip test if not available
     fn require_feature<F>(

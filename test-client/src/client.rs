@@ -42,7 +42,9 @@ impl ClickHouseClient {
         Ok(Self { client })
     }
 
-    pub fn native_client(&self) -> &Client<NativeFormat> { &self.client }
+    pub fn native_client(&self) -> &Client<NativeFormat> {
+        &self.client
+    }
 
     /// Execute a query and return results as Serde JSON
     pub async fn execute_query(

@@ -12,43 +12,43 @@ use uuid::Uuid;
 #[cfg_attr(feature = "derive", derive(Row))]
 #[cfg_attr(feature = "derive", clickhouse_arrow(schema = get_testrowall_schema))]
 pub struct TestRowAll {
-    id:                        u64,
-    int8_col:                  i8,
-    int16_col:                 i16,
-    int32_col:                 i32,
-    int64_col:                 i64,
-    uint8_col:                 u8,
-    uint16_col:                u16,
-    uint32_col:                u32,
-    uint64_col:                u64,
-    uint128_col:               u128,
-    uint256_col:               u256,
-    date_col:                  Date,
-    datetime_col:              DateTime,
-    datetime64_col:            DateTime64<3>,
+    id: u64,
+    int8_col: i8,
+    int16_col: i16,
+    int32_col: i32,
+    int64_col: i64,
+    uint8_col: u8,
+    uint16_col: u16,
+    uint32_col: u32,
+    uint64_col: u64,
+    uint128_col: u128,
+    uint256_col: u256,
+    date_col: Date,
+    datetime_col: DateTime,
+    datetime64_col: DateTime64<3>,
     #[cfg(feature = "rust_decimal")]
-    decimal32_col:             rust_decimal::Decimal,
+    decimal32_col: rust_decimal::Decimal,
     #[cfg(not(feature = "rust_decimal"))]
-    decimal32_col:             FixedPoint32<4>,
+    decimal32_col: FixedPoint32<4>,
     #[cfg(feature = "rust_decimal")]
-    decimal64_col:             rust_decimal::Decimal,
+    decimal64_col: rust_decimal::Decimal,
     #[cfg(not(feature = "rust_decimal"))]
-    decimal64_col:             FixedPoint64<6>,
+    decimal64_col: FixedPoint64<6>,
     #[cfg(feature = "rust_decimal")]
-    decimal128_col:            rust_decimal::Decimal,
+    decimal128_col: rust_decimal::Decimal,
     #[cfg(not(feature = "rust_decimal"))]
-    decimal128_col:            FixedPoint128<8>,
-    decimal256_col:            FixedPoint256<10>,
-    nullable_string_col:       Option<String>,
-    nullable_int32_col:        Option<i32>,
-    nullable_uint64_col:       Option<u64>,
-    array_uint64_col:          Vec<u64>,
-    array_string_col:          Vec<String>,
-    array_nullable_int32_col:  Vec<Option<i32>>,
+    decimal128_col: FixedPoint128<8>,
+    decimal256_col: FixedPoint256<10>,
+    nullable_string_col: Option<String>,
+    nullable_int32_col: Option<i32>,
+    nullable_uint64_col: Option<u64>,
+    array_uint64_col: Vec<u64>,
+    array_string_col: Vec<String>,
+    array_nullable_int32_col: Vec<Option<i32>>,
     array_nullable_string_col: Vec<Option<String>>,
-    string_col:                String,
-    fixed_string_col:          String, // FixedString(5) trimmed to String
-    uuid_col:                  Uuid,
+    string_col: String,
+    fixed_string_col: String, // FixedString(5) trimmed to String
+    uuid_col: Uuid,
 }
 
 pub fn get_testrowall_schema() -> Vec<ColumnDefinition> {
@@ -412,9 +412,9 @@ pub fn generate_test_block() -> Block {
 #[cfg_attr(feature = "derive", derive(Row))]
 #[cfg_attr(feature = "derive", clickhouse_arrow(schema = get_variant_schema))]
 pub struct TestRowVariant {
-    id:                 u64,
-    simple_variant:     Value, // Variant(String, UInt64)
-    complex_variant:    Value, // Variant(Array(String), UUID, Tuple(String, UInt64))
+    id: u64,
+    simple_variant: Value,     // Variant(String, UInt64)
+    complex_variant: Value,    // Variant(Array(String), UUID, Tuple(String, UInt64))
     multi_type_variant: Value, // Variant(String, UInt64, Float64, Array(UInt8))
 }
 
@@ -449,9 +449,9 @@ pub fn generate_variant_test_block() -> Block {
     let test_data = vec![
         // Test different variant types
         TestRowVariant {
-            id:                 1,
-            simple_variant:     Value::Variant(0, Box::new(Value::String(b"hello".to_vec()))), /* String (discriminator 0) */
-            complex_variant:    Value::Variant(
+            id: 1,
+            simple_variant: Value::Variant(0, Box::new(Value::String(b"hello".to_vec()))), /* String (discriminator 0) */
+            complex_variant: Value::Variant(
                 0,
                 Box::new(Value::Array(vec![
                     Value::String(b"a".to_vec()),
@@ -461,18 +461,18 @@ pub fn generate_variant_test_block() -> Block {
             multi_type_variant: Value::Variant(1, Box::new(Value::Float64(std::f64::consts::PI))), /* Float64 (discriminator 1) */
         },
         TestRowVariant {
-            id:                 2,
-            simple_variant:     Value::Variant(1, Box::new(Value::UInt64(123))), // UInt64
-            complex_variant:    Value::Variant(2, Box::new(Value::Uuid(Uuid::new_v4()))), /* UUID (discriminator 2) */
+            id: 2,
+            simple_variant: Value::Variant(1, Box::new(Value::UInt64(123))), // UInt64
+            complex_variant: Value::Variant(2, Box::new(Value::Uuid(Uuid::new_v4()))), /* UUID (discriminator 2) */
             multi_type_variant: Value::Variant(
                 0,
                 Box::new(Value::Array(vec![Value::UInt8(1), Value::UInt8(2), Value::UInt8(3)])),
             ), /* Array(UInt8) */
         },
         TestRowVariant {
-            id:                 3,
-            simple_variant:     Value::Variant(0, Box::new(Value::String(b"world".to_vec()))), /* String */
-            complex_variant:    Value::Variant(
+            id: 3,
+            simple_variant: Value::Variant(0, Box::new(Value::String(b"world".to_vec()))), /* String */
+            complex_variant: Value::Variant(
                 1,
                 Box::new(Value::Tuple(vec![Value::String(b"test".to_vec()), Value::UInt64(42)])),
             ), /* Tuple (discriminator 1) */
@@ -480,9 +480,9 @@ pub fn generate_variant_test_block() -> Block {
         },
         // Test NULL variant values
         TestRowVariant {
-            id:                 4,
-            simple_variant:     Value::Variant(0xFF, Box::new(Value::Null)), // NULL variant
-            complex_variant:    Value::Variant(0xFF, Box::new(Value::Null)), // NULL variant
+            id: 4,
+            simple_variant: Value::Variant(0xFF, Box::new(Value::Null)), // NULL variant
+            complex_variant: Value::Variant(0xFF, Box::new(Value::Null)), // NULL variant
             multi_type_variant: Value::Variant(3, Box::new(Value::UInt64(999))), // UInt64
         },
     ];
@@ -523,10 +523,10 @@ pub fn generate_dynamic_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
         column_types: vec![("dynamic_col".to_string(), Type::Dynamic { max_types: None })],
-        column_data:  rows,
+        column_data: rows,
     }
 }
 
@@ -539,16 +539,19 @@ pub fn generate_json_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
-        column_types: vec![("json_col".to_string(), Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        })],
-        column_data:  rows,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
+        column_types: vec![(
+            "json_col".to_string(),
+            Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: None,
+                typed_paths: vec![],
+                skip_exact: vec![],
+                skip_regex: vec![],
+            },
+        )],
+        column_data: rows,
     }
 }
 
@@ -567,16 +570,19 @@ pub fn generate_json_array_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
-        column_types: vec![("json_col".to_string(), Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        })],
-        column_data:  rows,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
+        column_types: vec![(
+            "json_col".to_string(),
+            Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: None,
+                typed_paths: vec![],
+                skip_exact: vec![],
+                skip_regex: vec![],
+            },
+        )],
+        column_data: rows,
     }
 }
 
@@ -592,19 +598,22 @@ pub fn generate_json_typed_paths_variant_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
-        column_types: vec![("json_col".to_string(), Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![(
-                "value".to_string(),
-                Box::new(Type::variant(vec![Type::String, Type::Int64, Type::Float64])),
-            )],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        })],
-        column_data:  rows,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
+        column_types: vec![(
+            "json_col".to_string(),
+            Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: None,
+                typed_paths: vec![(
+                    "value".to_string(),
+                    Box::new(Type::variant(vec![Type::String, Type::Int64, Type::Float64])),
+                )],
+                skip_exact: vec![],
+                skip_regex: vec![],
+            },
+        )],
+        column_data: rows,
     }
 }
 
@@ -628,19 +637,22 @@ pub fn generate_mixed_dynamic_json_test_block() -> Block {
     mixed_data.extend(json_data.clone()); // All JSON column values
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         dynamic_data.len() as u64, // Number of rows
+        info: BlockInfo::default(),
+        rows: dynamic_data.len() as u64, // Number of rows
         column_types: vec![
             ("dynamic_col".to_string(), Type::Dynamic { max_types: None }),
-            ("json_col".to_string(), Type::JSON {
-                max_dynamic_paths: None,
-                max_dynamic_types: None,
-                typed_paths:       vec![],
-                skip_exact:        vec![],
-                skip_regex:        vec![],
-            }),
+            (
+                "json_col".to_string(),
+                Type::JSON {
+                    max_dynamic_paths: None,
+                    max_dynamic_types: None,
+                    typed_paths: vec![],
+                    skip_exact: vec![],
+                    skip_regex: vec![],
+                },
+            ),
         ],
-        column_data:  mixed_data,
+        column_data: mixed_data,
     }
 }
 
@@ -694,16 +706,19 @@ pub fn generate_evil_heterogeneous_json_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
-        column_types: vec![("evil_json_col".to_string(), Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        })],
-        column_data:  rows,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
+        column_types: vec![(
+            "evil_json_col".to_string(),
+            Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: None,
+                typed_paths: vec![],
+                skip_exact: vec![],
+                skip_regex: vec![],
+            },
+        )],
+        column_data: rows,
     }
 }
 
@@ -741,29 +756,33 @@ pub fn generate_evil_heterogeneous_dynamic_test_block() -> Block {
             ]),
         ]),
         // Heterogeneous as map values
-        Value::Map(vec![Value::String(b"chaos".to_vec())], vec![Value::Array(vec![
-            Value::Int32(1),
-            Value::String(b"mixed_in_map".to_vec()),
-            Value::Tuple(vec![Value::Int8(1), Value::Float64(2.0)]),
-        ])]),
+        Value::Map(
+            vec![Value::String(b"chaos".to_vec())],
+            vec![Value::Array(vec![
+                Value::Int32(1),
+                Value::String(b"mixed_in_map".to_vec()),
+                Value::Tuple(vec![Value::Int8(1), Value::Float64(2.0)]),
+            ])],
+        ),
         // NULL value to verify it doesn't break anything
         Value::Null,
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
-        column_types: vec![("evil_heterogeneous_dynamic".to_string(), Type::Dynamic {
-            max_types: None,
-        })],
-        column_data:  rows,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
+        column_types: vec![(
+            "evil_heterogeneous_dynamic".to_string(),
+            Type::Dynamic { max_types: None },
+        )],
+        column_data: rows,
     }
 }
 
 /// Higher-level test harness for native roundtrip tests
 pub struct NativeRoundtripTestHarness<'a> {
-    pub container:   &'a clickhouse_arrow::test_utils::ClickHouseContainer,
-    pub require_v3:  bool, // TODO: too general, should say require_dynamic_flattened_format
+    pub container: &'a clickhouse_arrow::test_utils::ClickHouseContainer,
+    pub require_v3: bool, // TODO: too general, should say require_dynamic_flattened_format
     pub compression: CompressionMethod,
 }
 
@@ -924,10 +943,10 @@ impl<'a> NativeRoundtripTestHarness<'a> {
         }
 
         let result_block = Block {
-            info:         BlockInfo::default(),
-            rows:         total_rows,
+            info: BlockInfo::default(),
+            rows: total_rows,
             column_types: combined_types,
-            column_data:  combined_data,
+            column_data: combined_data,
         };
 
         // Verify the data matches expectations

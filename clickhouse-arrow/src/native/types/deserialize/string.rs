@@ -7,6 +7,29 @@ use crate::Result;
 use crate::io::ClickHouseRead;
 use crate::native::values::Value;
 
+/// Read a single string or binary value from the reader
+pub(crate) async fn read_single_string_value<R: ClickHouseRead>(
+    type_: &Type,
+    reader: &mut R,
+) -> Result<Value> {
+    Ok(match type_ {
+        Type::String | Type::Binary => Value::String(reader.read_string().await?),
+        Type::FixedSizedString(size) | Type::FixedSizedBinary(size) => {
+            let mut buf = Vec::with_capacity(*size);
+            unsafe { buf.set_len(*size) };
+            let _ = reader.read_exact(&mut buf[..]).await?;
+            let first_null = buf.iter().position(|x| *x == 0).unwrap_or(buf.len());
+            buf.truncate(first_null);
+            Value::String(buf)
+        }
+        _ => {
+            return Err(crate::Error::DeserializeError(format!(
+                "read_single_string_value: unsupported type: {type_:?}"
+            )));
+        }
+    })
+}
+
 pub(crate) struct StringDeserializer;
 
 impl Deserializer for StringDeserializer {
@@ -45,29 +68,9 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
         )
         .await;
     }
-    match type_ {
-        Type::String | Type::Binary => {
-            let mut out = Vec::with_capacity(rows);
-            for _ in 0..rows {
-                out.push(Value::String(reader.read_string().await?));
-            }
-            Ok(out)
-        }
-        Type::FixedSizedString(n) | Type::FixedSizedBinary(n) => {
-            let mut out = Vec::with_capacity(rows);
-            #[expect(clippy::uninit_vec)]
-            for _ in 0..rows {
-                let mut buf = Vec::with_capacity(*n);
-                unsafe { buf.set_len(*n) };
-                let _ = reader.read_exact(&mut buf[..]).await?;
-                let first_null = buf.iter().position(|x| *x == 0).unwrap_or(buf.len());
-                buf.truncate(first_null);
-                out.push(Value::String(buf));
-            }
-            Ok(out)
-        }
-        _ => Err(crate::Error::DeserializeError(
-            "StringDeserializer called with non-string type".to_string(),
-        )),
+    let mut out = Vec::with_capacity(rows);
+    for _ in 0..rows {
+        out.push(read_single_string_value(type_, reader).await?);
     }
+    Ok(out)
 }

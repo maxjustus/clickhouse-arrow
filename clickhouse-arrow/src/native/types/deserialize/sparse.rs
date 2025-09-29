@@ -1,8 +1,7 @@
-// no extra imports
-
+use super::sized::read_single_primitive_value;
+use super::string::read_single_string_value;
 use super::{DeserializerState, Type};
 use crate::Result;
-// no need for SparseState/TypeSpecificState with plan-based sparse
 use crate::io::ClickHouseRead;
 use crate::native::values::Value;
 
@@ -13,101 +12,17 @@ async fn read_n_dense<R: ClickHouseRead>(
     reader: &mut R,
     n: usize,
 ) -> Result<Vec<Value>> {
-    use std::net::{Ipv4Addr, Ipv6Addr};
-
-    use tokio::io::AsyncReadExt;
-    use uuid::Uuid;
-
-    use crate::{Date, Date32, DateTime, DynDateTime64, i256, u256};
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         out.push(match type_ {
-            Type::Int8 => Value::Int8(reader.read_i8().await?),
-            Type::Int16 => Value::Int16(reader.read_i16_le().await?),
-            Type::Int32 => Value::Int32(reader.read_i32_le().await?),
-            Type::Int64 => Value::Int64(reader.read_i64_le().await?),
-            Type::Int128 => Value::Int128(reader.read_i128_le().await?),
-            Type::Int256 => {
-                let mut buf = [0u8; 32];
-                let _ = reader.read_exact(&mut buf[..]).await?;
-                buf.reverse();
-                Value::Int256(i256(buf))
+            Type::String | Type::Binary | Type::FixedSizedString(_) | Type::FixedSizedBinary(_) => {
+                read_single_string_value(type_, reader).await?
             }
-            Type::UInt8 => Value::UInt8(reader.read_u8().await?),
-            Type::UInt16 => Value::UInt16(reader.read_u16_le().await?),
-            Type::UInt32 => Value::UInt32(reader.read_u32_le().await?),
-            Type::UInt64 => Value::UInt64(reader.read_u64_le().await?),
-            Type::UInt128 => Value::UInt128(reader.read_u128_le().await?),
-            Type::UInt256 => {
-                let mut buf = [0u8; 32];
-                let _ = reader.read_exact(&mut buf[..]).await?;
-                buf.reverse();
-                Value::UInt256(u256(buf))
-            }
-            Type::Float32 => Value::Float32(f32::from_bits(reader.read_u32_le().await?)),
-            Type::Float64 => Value::Float64(f64::from_bits(reader.read_u64_le().await?)),
-            Type::Decimal32(s) => Value::Decimal32(*s, reader.read_i32_le().await?),
-            Type::Decimal64(s) => Value::Decimal64(*s, reader.read_i64_le().await?),
-            Type::Decimal128(s) => Value::Decimal128(*s, reader.read_i128_le().await?),
-            Type::Decimal256(s) => {
-                let mut buf = [0u8; 32];
-                let _ = reader.read_exact(&mut buf[..]).await?;
-                buf.reverse();
-                Value::Decimal256(*s, i256(buf))
-            }
-            Type::Uuid => Value::Uuid({
-                let n1 = reader.read_u64_le().await?;
-                let n2 = reader.read_u64_le().await?;
-                Uuid::from_u128((u128::from(n1) << 64) | u128::from(n2))
-            }),
-            Type::Date => Value::Date(Date(reader.read_u16_le().await?)),
-            Type::Date32 => Value::Date32(Date32(reader.read_i32_le().await?)),
-            Type::DateTime(tz) => Value::DateTime(DateTime(*tz, reader.read_u32_le().await?)),
-            Type::Ipv4 => Value::Ipv4(Ipv4Addr::from(reader.read_u32_le().await?).into()),
-            Type::Ipv6 => {
-                let mut octets = [0u8; 16];
-                let _ = reader.read_exact(&mut octets[..]).await?;
-                Value::Ipv6(Ipv6Addr::from(octets).into())
-            }
-            Type::DateTime64(precision, tz) => {
-                let raw = reader.read_u64_le().await?;
-                Value::DateTime64(DynDateTime64(*tz, raw, *precision))
-            }
-            Type::Enum8(pairs) => {
-                let idx = reader.read_i8().await?;
-                let value = pairs
-                    .iter()
-                    .find(|(_, i)| *i == idx)
-                    .ok_or(crate::Error::DeserializeError(format!("Invalid enum8 index: {idx}")))?;
-                Value::Enum8(value.0.clone(), idx)
-            }
-            Type::Enum16(pairs) => {
-                let idx = reader.read_i16_le().await?;
-                let value = pairs.iter().find(|(_, i)| *i == idx).ok_or(
-                    crate::Error::DeserializeError(format!("Invalid enum16 index: {idx}")),
-                )?;
-                Value::Enum16(value.0.clone(), idx)
-            }
-            Type::String | Type::Binary => Value::String(reader.read_string().await?),
-            Type::FixedSizedString(n) | Type::FixedSizedBinary(n) => {
-                let mut buf = Vec::with_capacity(*n);
-                unsafe { buf.set_len(*n) };
-                let _ = reader.read_exact(&mut buf[..]).await?;
-                let first_null = buf.iter().position(|x| *x == 0).unwrap_or(buf.len());
-                buf.truncate(first_null);
-                Value::String(buf)
-            }
-            _ => {
-                return Err(crate::Error::DeserializeError(format!(
-                    "Sparse dense-read not implemented for type: {type_:?}"
-                )));
-            }
+            _ => read_single_primitive_value(type_, reader).await?,
         });
     }
     Ok(out)
 }
-
-//
 
 pub(crate) async fn read_sparse_with_path<R: ClickHouseRead>(
     type_: &Type,

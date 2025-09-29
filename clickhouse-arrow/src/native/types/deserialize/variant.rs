@@ -13,7 +13,7 @@ const NULL_DISCRIMINATOR: u8 = 0xFF;
 #[derive(Debug, Clone)]
 pub(crate) struct DiscriminatorMap {
     /// Maps discriminator byte to (`type_string`, `type`)
-    types:                 HashMap<u8, (String, Type)>,
+    types: HashMap<u8, (String, Type)>,
     /// Sorted discriminators for iteration
     sorted_discriminators: Vec<u8>,
 }
@@ -50,7 +50,9 @@ impl DiscriminatorMap {
 
     /// Get all discriminators in order
     #[inline]
-    pub(crate) fn discriminators(&self) -> &[u8] { &self.sorted_discriminators }
+    pub(crate) fn discriminators(&self) -> &[u8] {
+        &self.sorted_discriminators
+    }
 }
 
 pub(crate) struct VariantDeserializer;
@@ -344,30 +346,33 @@ mod tests {
         let variant_type =
             Type::variant(vec![Type::Array(Box::new(Type::String)), Type::UInt64, Type::Date]);
         let date_bytes = 19723u16.to_le_bytes();
-        let data = create_test_data(&[0u8, 1u8, 2u8], &[
-            2,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0, // offset 2
-            1,
-            b'a', // 'a'
-            1,
-            b'b', // 'b'
-            date_bytes[0],
-            date_bytes[1], // Date
-            42,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0, // 42
-        ]);
+        let data = create_test_data(
+            &[0u8, 1u8, 2u8],
+            &[
+                2,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0, // offset 2
+                1,
+                b'a', // 'a'
+                1,
+                b'b', // 'b'
+                date_bytes[0],
+                date_bytes[1], // Date
+                42,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0, // 42
+            ],
+        );
         let mut reader = Cursor::new(data);
         let mut state = DeserializerState::default();
         VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state).await.unwrap();

@@ -51,7 +51,9 @@ impl DynamicSerializer {
     }
 
     /// Get Dynamic serialization version - always FLATTENED
-    fn get_version(_state: &SerializerState) -> u64 { DYNAMIC_VERSION_FLATTENED }
+    fn get_version(_state: &SerializerState) -> u64 {
+        DYNAMIC_VERSION_FLATTENED
+    }
 
     /// Build type registry from values
     fn build_type_registry(
@@ -398,12 +400,15 @@ mod tests {
                     $description
                 );
                 // Test both min and max discriminator values for this size
-                let max_disc = std::cmp::min($total_types - 1, match $expected_bytes {
-                    1 => 255,
-                    2 => 65535,
-                    4 => 4_294_967_295_usize,
-                    _ => $total_types - 1,
-                }) as u64;
+                let max_disc = std::cmp::min(
+                    $total_types - 1,
+                    match $expected_bytes {
+                        1 => 255,
+                        2 => 65535,
+                        4 => 4_294_967_295_usize,
+                        _ => $total_types - 1,
+                    },
+                ) as u64;
                 async_buffer.clear();
                 write_discriminator_async(&mut async_buffer, max_disc, $total_types).await.unwrap();
                 assert_eq!(

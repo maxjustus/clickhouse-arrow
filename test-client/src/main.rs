@@ -25,8 +25,8 @@ use tokio::io::{
 use tokio::sync::{Mutex, mpsc};
 
 struct DataPayload {
-    cols:       Arc<Vec<(String, Type)>>,
-    row:        Vec<ChValue>,
+    cols: Arc<Vec<(String, Type)>>,
+    row: Vec<ChValue>,
     request_id: Option<Arc<String>>,
 }
 
@@ -35,18 +35,20 @@ struct DataEvent<'a> {
     #[serde(rename = "type")]
     output_type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    request_id:  Option<&'a str>,
+    request_id: Option<&'a str>,
     #[serde(rename = "data")]
-    data:        RowSerde<'a>,
+    data: RowSerde<'a>,
 }
 
 struct RowSerde<'a> {
     cols: &'a [(String, Type)],
-    row:  &'a [ChValue],
+    row: &'a [ChValue],
 }
 
 impl<'a> RowSerde<'a> {
-    fn new(cols: &'a [(String, Type)], row: &'a [ChValue]) -> Self { Self { cols, row } }
+    fn new(cols: &'a [(String, Type)], row: &'a [ChValue]) -> Self {
+        Self { cols, row }
+    }
 }
 
 impl Serialize for RowSerde<'_> {
@@ -172,59 +174,59 @@ struct JsonOutput {
     #[serde(rename = "type")]
     output_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    data:        Option<serde_json::Value>,
+    data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error:       Option<String>,
+    error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    message:     Option<String>,
+    message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    level:       Option<String>,
+    level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    request_id:  Option<String>,
+    request_id: Option<String>,
 }
 
 impl JsonOutput {
     fn data(data: serde_json::Value) -> Self {
         Self {
             output_type: "data".to_string(),
-            data:        Some(data),
-            error:       None,
-            message:     None,
-            level:       None,
-            request_id:  None,
+            data: Some(data),
+            error: None,
+            message: None,
+            level: None,
+            request_id: None,
         }
     }
 
     fn error(error: String) -> Self {
         Self {
             output_type: "error".to_string(),
-            data:        None,
-            error:       Some(error),
-            message:     None,
-            level:       None,
-            request_id:  None,
+            data: None,
+            error: Some(error),
+            message: None,
+            level: None,
+            request_id: None,
         }
     }
 
     fn message(message: String, level: &str) -> Self {
         Self {
             output_type: "message".to_string(),
-            data:        None,
-            error:       None,
-            message:     Some(message),
-            level:       Some(level.to_string()),
-            request_id:  None,
+            data: None,
+            error: None,
+            message: Some(message),
+            level: Some(level.to_string()),
+            request_id: None,
         }
     }
 
     fn event(kind: &str, payload: serde_json::Value) -> Self {
         Self {
             output_type: kind.to_string(),
-            data:        Some(payload),
-            error:       None,
-            message:     None,
-            level:       None,
-            request_id:  None,
+            data: Some(payload),
+            error: None,
+            message: None,
+            level: None,
+            request_id: None,
         }
     }
 
@@ -317,7 +319,7 @@ enum ActiveKind {
 #[derive(Clone)]
 struct ActiveRequest {
     request_id: String,
-    kind:       ActiveKind,
+    kind: ActiveKind,
 }
 
 #[derive(Clone, Default)]
@@ -735,11 +737,7 @@ async fn execute_query(
             for row in block.take_iter_rows() {
                 let row_values: Vec<clickhouse_arrow::Value> =
                     row.into_iter().map(|(_name, _ty, v)| v).collect();
-                let payload = DataPayload {
-                    cols:       cols.clone(),
-                    row:        row_values,
-                    request_id: None,
-                };
+                let payload = DataPayload { cols: cols.clone(), row: row_values, request_id: None };
                 let _ = tx_events.send(WriterCmd::Data(payload)).await;
             }
         }
@@ -762,30 +760,30 @@ async fn execute_query(
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SessionCommand {
     Query {
-        sql:        String,
+        sql: String,
         #[serde(default)]
-        params:     Option<HashMap<String, Value>>,
+        params: Option<HashMap<String, Value>>,
         #[serde(default)]
-        settings:   Option<HashMap<String, Value>>,
+        settings: Option<HashMap<String, Value>>,
         #[serde(default)]
         request_id: Option<String>,
     },
     Insert {
-        table:      String,
-        rows:       Vec<Value>,
+        table: String,
+        rows: Vec<Value>,
         #[serde(default)]
-        columns:    Option<Vec<String>>,
+        columns: Option<Vec<String>>,
         #[serde(default)]
         request_id: Option<String>,
     },
     InsertBegin {
-        table:      String,
+        table: String,
         #[serde(default)]
-        columns:    Option<Vec<String>>,
+        columns: Option<Vec<String>>,
         request_id: String,
     },
     InsertRows {
-        rows:       Vec<Value>,
+        rows: Vec<Value>,
         request_id: String,
     },
     InsertEnd {
@@ -977,8 +975,8 @@ async fn handle_session_query(
                 let row_values: Vec<clickhouse_arrow::Value> =
                     row.into_iter().map(|(_name, _ty, v)| v).collect();
                 let payload = DataPayload {
-                    cols:       cols.clone(),
-                    row:        row_values,
+                    cols: cols.clone(),
+                    row: row_values,
                     request_id: Some(Arc::clone(&request_arc)),
                 };
                 let _ = tx.send(WriterCmd::Data(payload)).await;
@@ -1154,11 +1152,14 @@ async fn session_insert_begin(
     columns: Option<Vec<String>>,
 ) -> Result<(), ()> {
     if let Err(existing) = session_state
-        .activate(request_id.to_string(), ActiveKind::Insert {
-            table:      table.to_string(),
-            columns:    columns.clone(),
-            total_rows: 0,
-        })
+        .activate(
+            request_id.to_string(),
+            ActiveKind::Insert {
+                table: table.to_string(),
+                columns: columns.clone(),
+                total_rows: 0,
+            },
+        )
         .await
     {
         let msg = JsonOutput::error(format!(

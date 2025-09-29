@@ -20,11 +20,11 @@ where
     T: ClientFormat,
     W: ClickHouseWrite,
 {
-    writer:   W,
+    writer: W,
     metadata: ClientMetadata,
     revision: u64,
-    header:   Option<Vec<(String, Type)>>,
-    _fmt:     PhantomData<T>,
+    header: Option<Vec<(String, Type)>>,
+    _fmt: PhantomData<T>,
 }
 
 impl<T, W> FileStreamWriter<T, W>
@@ -85,10 +85,14 @@ where
     }
 
     /// Access the inner writer (by reference).
-    pub fn writer(&self) -> &W { &self.writer }
+    pub fn writer(&self) -> &W {
+        &self.writer
+    }
 
     /// Access the inner writer (by mutable reference).
-    pub fn writer_mut(&mut self) -> &mut W { &mut self.writer }
+    pub fn writer_mut(&mut self) -> &mut W {
+        &mut self.writer
+    }
 }
 
 /// A generic file-backed stream reader for `ClickHouse` native blocks.
@@ -99,11 +103,11 @@ where
     T: ClientFormat,
     R: ClickHouseRead,
 {
-    reader:   R,
+    reader: R,
     metadata: ClientMetadata,
     revision: u64,
-    state:    DeserializerState<<T as ClientFormatImpl<T::Data>>::Deser>,
-    _fmt:     PhantomData<T>,
+    state: DeserializerState<<T as ClientFormatImpl<T::Data>>::Deser>,
+    _fmt: PhantomData<T>,
 }
 
 impl<T, R> FileStreamReader<T, R>
@@ -162,10 +166,14 @@ where
     }
 
     /// Access the inner reader (by reference).
-    pub fn reader(&self) -> &R { &self.reader }
+    pub fn reader(&self) -> &R {
+        &self.reader
+    }
 
     /// Access the inner reader (by mutable reference).
-    pub fn reader_mut(&mut self) -> &mut R { &mut self.reader }
+    pub fn reader_mut(&mut self) -> &mut R {
+        &mut self.reader
+    }
 }
 
 /// Convenience wrapper to stream native blocks to `stdout`.
@@ -191,16 +199,24 @@ where
     }
 
     /// Write a block to the underlying writer.
-    pub async fn write(&mut self, block: Block) -> Result<()> { self.inner.write(block).await }
+    pub async fn write(&mut self, block: Block) -> Result<()> {
+        self.inner.write(block).await
+    }
 
     /// Finish writing; appends a terminator block and flushes.
-    pub async fn finish(&mut self) -> Result<()> { self.inner.finish().await }
+    pub async fn finish(&mut self) -> Result<()> {
+        self.inner.finish().await
+    }
 
     /// Access the underlying `FileStreamWriter`.
-    pub fn inner(&self) -> &FileStreamWriter<NativeFormat, W> { &self.inner }
+    pub fn inner(&self) -> &FileStreamWriter<NativeFormat, W> {
+        &self.inner
+    }
 
     /// Access the underlying `FileStreamWriter` mutably.
-    pub fn inner_mut(&mut self) -> &mut FileStreamWriter<NativeFormat, W> { &mut self.inner }
+    pub fn inner_mut(&mut self) -> &mut FileStreamWriter<NativeFormat, W> {
+        &mut self.inner
+    }
 }
 
 impl NativeStdStreamWriter<BufWriter<tokio::io::Stdout>> {
@@ -231,16 +247,24 @@ where
     }
 
     /// Read the next native block.
-    pub async fn next(&mut self) -> Result<Option<Block>> { self.inner.next().await }
+    pub async fn next(&mut self) -> Result<Option<Block>> {
+        self.inner.next().await
+    }
 
     /// Read all remaining native blocks.
-    pub async fn read_all(&mut self) -> Result<Vec<Block>> { self.inner.read_all().await }
+    pub async fn read_all(&mut self) -> Result<Vec<Block>> {
+        self.inner.read_all().await
+    }
 
     /// Access the underlying `FileStreamReader`.
-    pub fn inner(&self) -> &FileStreamReader<NativeFormat, R> { &self.inner }
+    pub fn inner(&self) -> &FileStreamReader<NativeFormat, R> {
+        &self.inner
+    }
 
     /// Access the underlying `FileStreamReader` mutably.
-    pub fn inner_mut(&mut self) -> &mut FileStreamReader<NativeFormat, R> { &mut self.inner }
+    pub fn inner_mut(&mut self) -> &mut FileStreamReader<NativeFormat, R> {
+        &mut self.inner
+    }
 }
 
 impl NativeStdStreamReader<BufReader<tokio::io::Stdin>> {
@@ -272,15 +296,21 @@ mod tests {
             Field::new("id", DataType::Int32, false),
             Field::new("name", DataType::Utf8, true),
         ]));
-        let b1 = RecordBatch::try_new(Arc::clone(&schema), vec![
-            Arc::new(Int32Array::from(vec![1, 2])),
-            Arc::new(StringArray::from(vec!["a", "b"])),
-        ])
+        let b1 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
         .unwrap();
-        let b2 = RecordBatch::try_new(Arc::clone(&schema), vec![
-            Arc::new(Int32Array::from(vec![3, 4, 5])),
-            Arc::new(StringArray::from(vec!["c", "d", "e"])),
-        ])
+        let b2 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![3, 4, 5])),
+                Arc::new(StringArray::from(vec!["c", "d", "e"])),
+            ],
+        )
         .unwrap();
 
         // Write two batches with LZ4 compression
@@ -310,9 +340,10 @@ mod tests {
         assert_eq!(out[0].num_rows(), 2);
         assert_eq!(out[1].num_rows(), 3);
         // Spot-check values
-        assert_eq!(out[0].column(0).as_any().downcast_ref::<Int32Array>().unwrap().values(), &[
-            1, 2
-        ]);
+        assert_eq!(
+            out[0].column(0).as_any().downcast_ref::<Int32Array>().unwrap().values(),
+            &[1, 2]
+        );
         assert_eq!(out[1].column(1).as_any().downcast_ref::<StringArray>().unwrap().value(2), "e");
     }
 
@@ -322,10 +353,10 @@ mod tests {
         // Prepare two simple blocks: (id Int32, name String)
         let schema = vec![("id".to_string(), Type::Int32), ("name".to_string(), Type::String)];
         let blk1 = Block {
-            info:         Default::default(),
-            rows:         2,
+            info: Default::default(),
+            rows: 2,
             column_types: schema.clone(),
-            column_data:  vec![
+            column_data: vec![
                 // id column (2 rows)
                 crate::native::values::Value::Int32(10),
                 crate::native::values::Value::Int32(20),
@@ -335,10 +366,10 @@ mod tests {
             ],
         };
         let blk2 = Block {
-            info:         Default::default(),
-            rows:         1,
+            info: Default::default(),
+            rows: 1,
             column_types: schema.clone(),
-            column_data:  vec![
+            column_data: vec![
                 crate::native::values::Value::Int32(-1),
                 // single row in id, then single row in name
                 crate::native::values::Value::String(b"z".to_vec()),
@@ -376,10 +407,10 @@ mod tests {
     async fn native_std_stream_round_trip() {
         let schema = vec![("id".to_string(), Type::Int32), ("name".to_string(), Type::String)];
         let block = Block {
-            info:         Default::default(),
-            rows:         2,
+            info: Default::default(),
+            rows: 2,
             column_types: schema.clone(),
-            column_data:  vec![
+            column_data: vec![
                 crate::native::values::Value::Int32(1),
                 crate::native::values::Value::Int32(2),
                 crate::native::values::Value::String(b"foo".to_vec()),

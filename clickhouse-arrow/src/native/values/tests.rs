@@ -296,9 +296,9 @@ fn fromsql_json_value_fastpath() {
     let ty = Type::JSON {
         max_dynamic_paths: None,
         max_dynamic_types: None,
-        typed_paths:       vec![],
-        skip_exact:        vec![],
-        skip_regex:        vec![],
+        typed_paths: vec![],
+        skip_exact: vec![],
+        skip_regex: vec![],
     };
     // Fast-path: Value::Json should return directly
     let got: serde_json::Value = FromSql::from_sql(&ty, Value::Json(v.clone())).unwrap();
@@ -678,11 +678,10 @@ fn test_value_display_formatting() {
     assert_eq!(Value::Null.to_string(), "NULL");
 
     // Test Map display
-    let map =
-        Value::Map(vec![Value::String(b"key1".to_vec()), Value::String(b"key2".to_vec())], vec![
-            Value::Int32(1),
-            Value::Int32(2),
-        ]);
+    let map = Value::Map(
+        vec![Value::String(b"key1".to_vec()), Value::String(b"key2".to_vec())],
+        vec![Value::Int32(1), Value::Int32(2)],
+    );
     assert_eq!(map.to_string(), "{'key1':1,'key2':2}");
     assert_eq!(Value::Map(vec![], vec![]).to_string(), "{}");
 

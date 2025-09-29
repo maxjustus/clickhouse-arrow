@@ -24,7 +24,7 @@ enum SegmentRef<'a> {
 
 struct PathEntry<'a> {
     segments: SegmentRef<'a>,
-    values:   &'a [Value],
+    values: &'a [Value],
 }
 
 impl JsonDeserializer {
@@ -575,9 +575,9 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
+            typed_paths: vec![],
+            skip_exact: vec![],
+            skip_regex: vec![],
         };
 
         JsonDeserializer::read_prefix(&type_, &mut reader, &mut state).await.unwrap();
@@ -585,10 +585,13 @@ mod tests {
             JsonDeserializer::read(&type_, &mut reader, rows.len(), &mut state).await.unwrap();
 
         {
-            assert_eq!(values, vec![
-                Value::Json(serde_json::json!({"a": 1})),
-                Value::Json(serde_json::json!({"b": "x"})),
-            ]);
+            assert_eq!(
+                values,
+                vec![
+                    Value::Json(serde_json::json!({"a": 1})),
+                    Value::Json(serde_json::json!({"b": "x"})),
+                ]
+            );
         }
     }
 

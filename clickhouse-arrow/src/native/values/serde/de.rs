@@ -28,7 +28,7 @@ macro_rules! forward_to_deserialize_any {
 
 struct PointAccess {
     point: Point,
-    idx:   usize,
+    idx: usize,
 }
 
 impl<'de> SeqAccess<'de> for PointAccess {
@@ -46,12 +46,14 @@ impl<'de> SeqAccess<'de> for PointAccess {
         seed.deserialize(coord.into_deserializer()).map(Some)
     }
 
-    fn size_hint(&self) -> Option<usize> { Some(2_usize.saturating_sub(self.idx)) }
+    fn size_hint(&self) -> Option<usize> {
+        Some(2_usize.saturating_sub(self.idx))
+    }
 }
 
 struct RingAccess<'a> {
     points: &'a [Point],
-    idx:    usize,
+    idx: usize,
 }
 
 impl<'de> SeqAccess<'de> for RingAccess<'_> {
@@ -70,12 +72,14 @@ impl<'de> SeqAccess<'de> for RingAccess<'_> {
         seed.deserialize(seq).map(Some).map_err(|err| DeError::custom(err))
     }
 
-    fn size_hint(&self) -> Option<usize> { Some(self.points.len().saturating_sub(self.idx)) }
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.points.len().saturating_sub(self.idx))
+    }
 }
 
 struct PolygonAccess<'a> {
     rings: &'a [Ring],
-    idx:   usize,
+    idx: usize,
 }
 
 impl<'de> SeqAccess<'de> for PolygonAccess<'_> {
@@ -94,12 +98,14 @@ impl<'de> SeqAccess<'de> for PolygonAccess<'_> {
         seed.deserialize(seq).map(Some).map_err(|err| DeError::custom(err))
     }
 
-    fn size_hint(&self) -> Option<usize> { Some(self.rings.len().saturating_sub(self.idx)) }
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.rings.len().saturating_sub(self.idx))
+    }
 }
 
 struct MultiPolygonAccess<'a> {
     polygons: &'a [Polygon],
-    idx:      usize,
+    idx: usize,
 }
 
 impl<'de> SeqAccess<'de> for MultiPolygonAccess<'_> {
@@ -118,7 +124,9 @@ impl<'de> SeqAccess<'de> for MultiPolygonAccess<'_> {
         seed.deserialize(seq).map(Some).map_err(|err| DeError::custom(err))
     }
 
-    fn size_hint(&self) -> Option<usize> { Some(self.polygons.len().saturating_sub(self.idx)) }
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.polygons.len().saturating_sub(self.idx))
+    }
 }
 
 /// A type-aware deserializer over a `Value` guided by a `Type` schema.
@@ -163,7 +171,7 @@ impl<'de> Deserializer<'de> for TypedDeserializer<'_> {
             (Value::Array(items), Type::Array(inner)) => {
                 struct ArrAccess<'a> {
                     items: &'a [Value],
-                    idx:   usize,
+                    idx: usize,
                     inner: &'a Type,
                 }
                 impl<'de> SeqAccess<'de> for ArrAccess<'_> {
@@ -193,8 +201,8 @@ impl<'de> Deserializer<'de> for TypedDeserializer<'_> {
                 struct NTAccess<'a> {
                     values: &'a [Value],
                     fields: &'a [(String, Type)],
-                    idx:    usize,
-                    cap:    usize,
+                    idx: usize,
+                    cap: usize,
                 }
                 impl<'de> MapAccess<'de> for NTAccess<'_> {
                     type Error = serde_json::Error;
@@ -229,9 +237,9 @@ impl<'de> Deserializer<'de> for TypedDeserializer<'_> {
                 let cap = core::cmp::min(values.len(), inner.len());
                 struct TupAccess<'a> {
                     values: &'a [Value],
-                    types:  &'a [Type],
-                    idx:    usize,
-                    cap:    usize,
+                    types: &'a [Type],
+                    idx: usize,
+                    cap: usize,
                 }
                 impl<'de> SeqAccess<'de> for TupAccess<'_> {
                     type Error = serde_json::Error;
@@ -258,11 +266,11 @@ impl<'de> Deserializer<'de> for TypedDeserializer<'_> {
             (Value::Map(keys, values), Type::Map(_key_ty, value_ty)) => {
                 let cap = core::cmp::min(keys.len(), values.len());
                 struct MapAccessImpl<'a> {
-                    keys:     &'a [Value],
-                    values:   &'a [Value],
+                    keys: &'a [Value],
+                    values: &'a [Value],
                     value_ty: &'a Type,
-                    idx:      usize,
-                    cap:      usize,
+                    idx: usize,
+                    cap: usize,
                 }
                 impl<'de> MapAccess<'de> for MapAccessImpl<'_> {
                     type Error = serde_json::Error;
@@ -454,7 +462,7 @@ impl<'de> Deserializer<'de> for TypedDeserializer<'_> {
                     serde_json::Value::Object(obj) => {
                         struct JsonMapAccess {
                             iter: std::collections::btree_map::IntoIter<String, serde_json::Value>,
-                            cur:  Option<(String, serde_json::Value)>,
+                            cur: Option<(String, serde_json::Value)>,
                         }
                         impl<'de> MapAccess<'de> for JsonMapAccess {
                             type Error = serde_json::Error;
@@ -600,7 +608,7 @@ impl<'de> Deserializer<'de> for TypedDeserializer<'_> {
 /// Row-level deserializer: emits a map of column name -> typed value
 pub struct RowDeserializer<'a> {
     pub cols: &'a [(String, Type)],
-    pub row:  &'a [Value],
+    pub row: &'a [Value],
 }
 
 impl<'de> Deserializer<'de> for RowDeserializer<'_> {
@@ -625,9 +633,9 @@ impl<'de> Deserializer<'de> for RowDeserializer<'_> {
         let cap = core::cmp::min(self.cols.len(), self.row.len());
         struct RowAccess<'a> {
             cols: &'a [(String, Type)],
-            row:  &'a [Value],
-            idx:  usize,
-            cap:  usize,
+            row: &'a [Value],
+            idx: usize,
+            cap: usize,
         }
         impl<'de> MapAccess<'de> for RowAccess<'_> {
             type Error = serde_json::Error;
@@ -802,10 +810,10 @@ mod tests {
     #[test]
     fn typed_deserializer_transcodes_map_with_stringified_keys() {
         let ty = Type::Map(Box::new(Type::Int64), Box::new(Type::String));
-        let v = Value::Map(vec![Value::Int64(7), Value::Int64(42)], vec![
-            Value::string("x"),
-            Value::string("y"),
-        ]);
+        let v = Value::Map(
+            vec![Value::Int64(7), Value::Int64(42)],
+            vec![Value::string("x"), Value::string("y")],
+        );
         let mut out = Vec::new();
         {
             let de = TypedDeserializer { v: &v, t: &ty };
