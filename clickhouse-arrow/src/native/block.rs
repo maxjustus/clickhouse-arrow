@@ -20,14 +20,14 @@ use crate::{Error, Result, Row, Type};
 /// A chunk of data in columnar form.
 pub struct Block {
     /// Metadata about the block
-    pub info: BlockInfo,
+    pub info:         BlockInfo,
     /// The number of rows contained in the block
-    pub rows: u64,
+    pub rows:         u64,
     /// The type of each column by name, in order.
     pub column_types: Vec<(String, Type)>,
     /// The data of each column by name, in order. All `Value` should correspond to the associated
     /// type in `column_types`.
-    pub column_data: Vec<Value>,
+    pub column_data:  Vec<Value>,
 }
 
 // Iterator type for `take_iter_rows`
@@ -161,6 +161,7 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::sync::ReadAheadReader;
     use crate::client::connection::ClientMetadata;
     use crate::formats::sealed::ClientFormatImpl;
     use crate::native::protocol::{CompressionMethod, DBMS_TCP_PROTOCOL_VERSION};
@@ -169,16 +170,16 @@ mod tests {
     async fn multiblock_roundtrip_int32(compression: CompressionMethod) {
         let column_types = vec![("n".to_string(), Type::Int32)];
         let block1 = Block {
-            info: BlockInfo::default(),
-            rows: 3,
+            info:         BlockInfo::default(),
+            rows:         3,
             column_types: column_types.clone(),
-            column_data: vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)],
+            column_data:  vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)],
         };
         let block2 = Block {
-            info: BlockInfo::default(),
-            rows: 2,
+            info:         BlockInfo::default(),
+            rows:         2,
             column_types: column_types.clone(),
-            column_data: vec![Value::Int32(10), Value::Int32(20)],
+            column_data:  vec![Value::Int32(10), Value::Int32(20)],
         };
         let metadata = ClientMetadata {
             client_id: 9,
@@ -209,7 +210,7 @@ mod tests {
         .await
         .expect("write second block");
 
-        let mut cursor = std::io::Cursor::new(buffer);
+        let mut cursor = ReadAheadReader::new(std::io::Cursor::new(buffer));
         let mut state = DeserializerState::default();
         let read_block1 =
             NativeFormat::read(&mut cursor, DBMS_TCP_PROTOCOL_VERSION, metadata, &mut state)
@@ -251,22 +252,20 @@ mod tests {
         let column_types = vec![
             ("m".to_string(), Type::Map(Box::new(Type::String), Box::new(Type::Int32))),
             ("d".to_string(), Type::Dynamic { max_types: None }),
-            (
-                "j".to_string(),
-                Type::JSON {
-                    max_dynamic_paths: None,
-                    max_dynamic_types: None,
-                    typed_paths: vec![],
-                    skip_exact: vec![],
-                    skip_regex: vec![],
-                },
-            ),
+            ("j".to_string(), Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: None,
+                typed_paths:       vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
+            }),
         ];
 
-        let map_row0 = Value::Map(
-            vec![Value::String(b"k1".to_vec()), Value::String(b"k2".to_vec())],
-            vec![Value::Int32(10), Value::Int32(20)],
-        );
+        let map_row0 =
+            Value::Map(vec![Value::String(b"k1".to_vec()), Value::String(b"k2".to_vec())], vec![
+                Value::Int32(10),
+                Value::Int32(20),
+            ]);
         let map_row1 = Value::Map(vec![Value::String(b"a".to_vec())], vec![Value::Int32(-1)]);
 
         #[cfg(feature = "serde")]
@@ -301,9 +300,9 @@ mod tests {
 
         // Write compressed
         let metadata = ClientMetadata {
-            client_id: 1,
-            compression: CompressionMethod::LZ4,
-            arrow_options: ArrowOptions::default(),
+            client_id:      1,
+            compression:    CompressionMethod::LZ4,
+            arrow_options:  ArrowOptions::default(),
             server_version: None,
         };
         let mut buffer = Vec::new();
@@ -319,7 +318,7 @@ mod tests {
         .expect("write compressed block");
 
         // Read back
-        let mut cursor = std::io::Cursor::new(buffer);
+        let mut cursor = ReadAheadReader::new(std::io::Cursor::new(buffer));
         let mut state = DeserializerState::default();
         let read_block =
             NativeFormat::read(&mut cursor, DBMS_TCP_PROTOCOL_VERSION, metadata, &mut state)
@@ -415,7 +414,10 @@ impl ProtocolData<Self, ()> for Block {
         revision: u64,
         _options: Self::Options,
         state: &mut DeserializerState,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        R: crate::native::sync::ReadAheadBuffer,
+    {
         let info =
             if revision > 0 { BlockInfo::read_async(reader).await? } else { BlockInfo::default() };
 
@@ -538,7 +540,12 @@ impl ProtocolData<Self, ()> for Block {
 
                 #[allow(clippy::cast_possible_truncation)]
                 type_
-                    .deserialize_column(reader, rows as usize, state)
+                    .deserialize_column_sync_with_path(
+                        reader,
+                        rows as usize,
+                        state,
+                        &mut Vec::new(),
+                    )
                     .await
                     .inspect_err(|e| error!("deserialize (name {name}): {e}"))?
             } else {

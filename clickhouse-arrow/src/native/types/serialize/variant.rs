@@ -107,7 +107,9 @@ impl VariantSerializer {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+use std::io::Cursor;
+
+use crate::native::sync::ReadAheadReader;
 
     use super::*;
     use crate::formats::DeserializerState;
@@ -136,7 +138,7 @@ mod tests {
                 .await
                 .unwrap();
 
-                let mut async_reader = Cursor::new(&async_buffer);
+                let mut async_reader = ReadAheadReader::new(Cursor::new(&async_buffer));
                 let mut async_deser_state = DeserializerState::default();
                 let _ = {
                     use tokio::io::AsyncReadExt;
@@ -279,7 +281,7 @@ mod tests {
             .unwrap();
 
         // Verify wire format
-        let mut reader = Cursor::new(&buffer);
+        let mut reader = ReadAheadReader::new(Cursor::new(&buffer));
         assert_eq!(reader.read_u64_le().await.unwrap(), 0); // Version
         for _ in 0..4 {
             assert_eq!(reader.read_u8().await.unwrap(), 0xFF); // All NULL discriminators

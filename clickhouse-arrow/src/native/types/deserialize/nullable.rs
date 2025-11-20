@@ -1,7 +1,6 @@
-use tokio::io::AsyncReadExt;
-
 use super::{ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
 use crate::io::ClickHouseRead;
+use crate::native::sync::{ParseStatus, SyncReader};
 use crate::native::values::Value;
 use crate::{Error, Result};
 
@@ -21,50 +20,39 @@ impl Deserializer for NullableDeserializer {
         };
         inner_type.deserialize_prefix_async(reader, state).await
     }
-
-    async fn read<R: ClickHouseRead>(
-        type_: &Type,
-        reader: &mut R,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        // if mask[i] == 0, item is present
-        let mut mask = vec![0u8; rows];
-        let _ = reader.read_exact(&mut mask).await?;
-
-        let mut out = type_.strip_null().deserialize_column(reader, rows, state).await?;
-
-        for (i, mask) in mask.iter().enumerate() {
-            if *mask != 0 {
-                out[i] = Value::Null;
-            }
-        }
-
-        Ok(out)
-    }
 }
 
-pub(crate) async fn read_with_path<R: ClickHouseRead>(
+pub(crate) fn parse_with_path(
     type_: &Type,
-    reader: &mut R,
     rows: usize,
     state: &mut DeserializerState,
     path: &mut Vec<u16>,
-) -> Result<Vec<Value>> {
-    // if mask[i] == 0, item is present
-    let mut mask = vec![0u8; rows];
-    let _ = reader.read_exact(&mut mask).await?;
+    reader: &mut SyncReader<'_>,
+) -> Result<ParseStatus<Vec<Value>>> {
+    // mask: if mask[i] == 0, item is present
+    let mask = match crate::native::sync::parse_fixed_bytes(rows, reader.remaining())? {
+        ParseStatus::Complete { value, consumed } => {
+            reader.advance(consumed)?;
+            value
+        }
+        ParseStatus::NeedMore { needed } => return Ok(ParseStatus::NeedMore { needed }),
+    };
 
     path.push(0);
-    let mut out =
-        type_.strip_null().deserialize_column_with_path(reader, rows, state, path).await?;
+    let mut out = match type_.strip_null().parse_column_sync_with_path(rows, state, path, reader)? {
+        ParseStatus::Complete { value, .. } => value,
+        ParseStatus::NeedMore { needed } => {
+            let _ = path.pop();
+            return Ok(ParseStatus::NeedMore { needed });
+        }
+    };
     let _ = path.pop();
 
-    for (i, mask) in mask.iter().enumerate() {
-        if *mask != 0 {
+    for (i, mask_byte) in mask.iter().enumerate() {
+        if *mask_byte != 0 {
             out[i] = Value::Null;
         }
     }
 
-    Ok(out)
+    Ok(ParseStatus::Complete { value: out, consumed: reader.consumed() })
 }

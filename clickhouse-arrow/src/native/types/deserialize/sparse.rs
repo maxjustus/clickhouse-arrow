@@ -1,36 +1,21 @@
-use super::sized::read_single_primitive_value;
-use super::string::read_single_string_value;
 use super::{DeserializerState, Type};
 use crate::Result;
+#[cfg(test)]
 use crate::io::ClickHouseRead;
+#[cfg(test)]
+use crate::native::sync::AsyncParseAdapter;
+use crate::native::sync::{ParseStatus, SyncReader, parse_var_uint};
 use crate::native::values::Value;
 
 const END_OF_GRANULE_FLAG: u64 = 1u64 << 62;
 
-async fn read_n_dense<R: ClickHouseRead>(
+pub(crate) fn parse_sparse_with_path(
     type_: &Type,
-    reader: &mut R,
-    n: usize,
-) -> Result<Vec<Value>> {
-    let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
-        out.push(match type_ {
-            Type::String | Type::Binary | Type::FixedSizedString(_) | Type::FixedSizedBinary(_) => {
-                read_single_string_value(type_, reader).await?
-            }
-            _ => read_single_primitive_value(type_, reader).await?,
-        });
-    }
-    Ok(out)
-}
-
-pub(crate) async fn read_sparse_with_path<R: ClickHouseRead>(
-    type_: &Type,
-    reader: &mut R,
+    reader: &mut SyncReader<'_>,
     rows: usize,
     state: &mut DeserializerState,
     path: &mut Vec<u16>,
-) -> Result<Vec<Value>> {
+) -> Result<ParseStatus<Vec<Value>>> {
     // Parse offsets
     let mut indices: Vec<usize> = Vec::new();
     let mut total_rows: usize;
@@ -58,8 +43,15 @@ pub(crate) async fn read_sparse_with_path<R: ClickHouseRead>(
     }
 
     loop {
-        let mut v = reader.read_var_uint().await?;
+        let v = match parse_var_uint(reader.remaining())? {
+            ParseStatus::Complete { value, consumed } => {
+                reader.advance(consumed)?;
+                value.0
+            }
+            ParseStatus::NeedMore { needed } => return Ok(ParseStatus::NeedMore { needed }),
+        };
         let end = (v & END_OF_GRANULE_FLAG) != 0;
+        let mut v = v;
         if end {
             v &= !END_OF_GRANULE_FLAG;
         }
@@ -98,10 +90,16 @@ pub(crate) async fn read_sparse_with_path<R: ClickHouseRead>(
     let _ = state.sparse_runtime.insert(key.clone(), (trailing_defaults, has_value_after_defaults));
 
     if skipped_values_rows > 0 {
-        drop(read_n_dense(type_, reader, skipped_values_rows).await?);
+        match parse_dense_for_sparse(type_, skipped_values_rows, state, path, reader)? {
+            ParseStatus::Complete { .. } => {}
+            ParseStatus::NeedMore { needed } => return Ok(ParseStatus::NeedMore { needed }),
+        }
     }
     let values = if !indices.is_empty() {
-        read_n_dense(type_, reader, indices.len()).await?
+        match parse_dense_for_sparse(type_, indices.len(), state, path, reader)? {
+            ParseStatus::Complete { value, .. } => value,
+            ParseStatus::NeedMore { needed } => return Ok(ParseStatus::NeedMore { needed }),
+        }
     } else {
         Vec::new()
     };
@@ -114,7 +112,49 @@ pub(crate) async fn read_sparse_with_path<R: ClickHouseRead>(
             out[i] = v;
         }
     }
-    Ok(out)
+    Ok(ParseStatus::Complete { value: out, consumed: reader.consumed() })
+}
+
+#[cfg(test)]
+pub(crate) async fn read_sparse_with_path<R>(
+    type_: &Type,
+    reader: &mut R,
+    rows: usize,
+    state: &mut DeserializerState,
+    path: &mut Vec<u16>,
+) -> Result<Vec<Value>>
+where
+    R: ClickHouseRead + crate::native::sync::ReadAheadBuffer,
+{
+    let mut scratch = std::mem::take(&mut state.sync_buffer);
+    let read_ahead = state.sync_read_ahead_bytes;
+    let mut adapter = AsyncParseAdapter::new(reader, &mut scratch, read_ahead);
+    let out = adapter
+        .parse(|buf| {
+            let mut sr = SyncReader::new(buf);
+            parse_sparse_with_path(type_, &mut sr, rows, state, path)
+        })
+        .await;
+    state.sync_buffer = scratch;
+    out
+}
+
+fn parse_dense_for_sparse(
+    type_: &Type,
+    rows: usize,
+    state: &mut DeserializerState,
+    path: &mut Vec<u16>,
+    reader: &mut SyncReader<'_>,
+) -> Result<ParseStatus<Vec<Value>>> {
+    // Temporarily remove sparse marking for this path so dense parse doesn't recurse into sparse.
+    let removed = state.kind_plan.as_mut().and_then(|plan| plan.remove(path));
+    let res = type_.parse_column_sync_with_path(rows, state, path, reader);
+    if let Some(plan) = state.kind_plan.as_mut() {
+        if let Some(val) = removed {
+            let _ = plan.insert(path.clone(), val);
+        }
+    }
+    res
 }
 
 #[cfg(test)]
@@ -123,6 +163,7 @@ mod tests {
     use tokio::io::{AsyncRead, ReadBuf};
 
     use super::*;
+    use crate::native::sync::ReadAheadReader;
 
     // Minimal AsyncRead over Bytes
     struct BytesReader(bytes::Bytes);
@@ -172,7 +213,7 @@ mod tests {
         put_var_uint(&mut bytes, 3);
         bytes.extend_from_slice(b"bbb");
 
-        let mut reader = BytesReader(bytes.freeze());
+        let mut reader = ReadAheadReader::new(BytesReader(bytes.freeze()));
         let ty = Type::String;
         let mut state = DeserializerState::default();
         // No plan needed when calling read_sparse_async directly; runtime state starts empty

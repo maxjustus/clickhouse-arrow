@@ -2,6 +2,7 @@ use tokio::io::AsyncReadExt;
 
 use super::{Deserializer, DeserializerState, Type};
 use crate::io::ClickHouseRead;
+use crate::native::sync::{ParseStatus, SyncReader, parse_string_column};
 use crate::native::values::Value;
 use crate::{Error, Result};
 
@@ -26,29 +27,29 @@ impl Deserializer for ObjectDeserializer {
         }
         Ok(())
     }
+}
 
-    async fn read<R: ClickHouseRead>(
-        type_: &Type,
-        reader: &mut R,
-        rows: usize,
-        _state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        match type_ {
-            Type::Object | Type::String | Type::Binary => {
-                let mut out = Vec::with_capacity(rows);
-                for _ in 0..rows {
-                    let value = reader.read_string().await?;
-                    out.push(if matches!(type_, Type::Object) {
-                        Value::Object(value)
-                    } else {
-                        Value::String(value)
-                    });
-                }
-                Ok(out)
-            }
-            _ => Err(Error::DeserializeError(
+pub(crate) fn parse_with_path(
+    type_: &Type,
+    rows: usize,
+    _state: &mut DeserializerState,
+    _path: &mut Vec<u16>,
+    reader: &mut SyncReader<'_>,
+) -> Result<ParseStatus<Vec<Value>>> {
+    match type_ {
+        Type::Object | Type::String | Type::Binary => {}
+        _ => {
+            return Err(Error::DeserializeError(
                 "ObjectDeserializer called with non-json type".to_string(),
-            )),
+            ));
         }
+    }
+
+    match parse_string_column(type_, rows, reader.remaining())? {
+        ParseStatus::Complete { value, consumed } => {
+            reader.advance(consumed)?;
+            Ok(ParseStatus::Complete { value, consumed: reader.consumed() })
+        }
+        ParseStatus::NeedMore { needed } => Ok(ParseStatus::NeedMore { needed }),
     }
 }

@@ -28,9 +28,9 @@ struct JsonData {
     /// Map from path to values for dynamic paths
     dynamic_path_columns: BTreeMap<String, Vec<Value>>,
     /// Map from path to values for typed paths
-    typed_path_columns: BTreeMap<String, Vec<Value>>,
+    typed_path_columns:   BTreeMap<String, Vec<Value>>,
     /// Number of rows
-    rows: usize,
+    rows:                 usize,
 }
 
 impl JsonData {
@@ -609,6 +609,7 @@ mod tests {
 
     use super::*;
     use crate::formats::{DeserializerState, SerializerState};
+    use crate::native::sync::ReadAheadReader;
     use crate::native::types::deserialize::ClickHouseNativeDeserializer;
     use crate::native::types::serialize::ClickHouseNativeSerializer;
 
@@ -617,9 +618,9 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
         let values_len = values.len();
 
@@ -633,7 +634,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut state).await?;
 
         // Deserialize it back
-        let mut input = Cursor::new(output);
+        let mut input = ReadAheadReader::new(Cursor::new(output));
         let mut state = DeserializerState::default();
 
         type_.deserialize_prefix_async(&mut input, &mut state).await?;
@@ -721,9 +722,9 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
         let mut output = vec![];
         let mut state = SerializerState::default();
@@ -785,9 +786,9 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
         let mut output = vec![];
         let mut state = SerializerState::default();
@@ -838,9 +839,9 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
         let type_specific_state = JsonSerializer::analyze_values(&values, &type_)?;
 
@@ -867,12 +868,12 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![
+            typed_paths:       vec![
                 ("id".to_string(), Box::new(Type::UInt32)),
                 ("name".to_string(), Box::new(Type::String)),
             ],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Analyze values
@@ -918,9 +919,9 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![("id".to_string(), Box::new(Type::UInt32))],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            typed_paths:       vec![("id".to_string(), Box::new(Type::UInt32))],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -931,7 +932,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
 
         // Deserialize
-        let mut cursor = Cursor::new(output);
+        let mut cursor = ReadAheadReader::new(Cursor::new(output));
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
         let deserialized =
@@ -977,12 +978,12 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![(
+            typed_paths:       vec![(
                 "status".to_string(),
                 Box::new(Type::LowCardinality(Box::new(Type::String))),
             )],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -993,7 +994,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
 
         // Deserialize
-        let mut cursor = Cursor::new(output);
+        let mut cursor = ReadAheadReader::new(Cursor::new(output));
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
         let deserialized =
@@ -1039,12 +1040,12 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![(
+            typed_paths:       vec![(
                 "value".to_string(),
                 Box::new(Type::variant(vec![Type::String, Type::UInt64])),
             )],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1055,7 +1056,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
 
         // Deserialize
-        let mut cursor = Cursor::new(output);
+        let mut cursor = ReadAheadReader::new(Cursor::new(output));
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
         let deserialized =
@@ -1103,9 +1104,9 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![],
-            skip_exact: vec!["password".to_string()],
-            skip_regex: vec![".*_key".to_string(), "secret.*".to_string()],
+            typed_paths:       vec![],
+            skip_exact:        vec!["password".to_string()],
+            skip_regex:        vec![".*_key".to_string(), "secret.*".to_string()],
         };
 
         // Analyze values
@@ -1142,12 +1143,12 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![
+            typed_paths:       vec![
                 ("id".to_string(), Box::new(Type::UInt32)),
                 ("name".to_string(), Box::new(Type::String)),
             ],
-            skip_exact: vec!["password".to_string()],
-            skip_regex: vec![".*_key".to_string()],
+            skip_exact:        vec!["password".to_string()],
+            skip_regex:        vec![".*_key".to_string()],
         };
 
         // Analyze values
@@ -1181,9 +1182,9 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![("id".to_string(), Box::new(Type::UInt32))],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            typed_paths:       vec![("id".to_string(), Box::new(Type::UInt32))],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Just test analyze for now
@@ -1225,9 +1226,9 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1238,7 +1239,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
 
         // Deserialize
-        let mut cursor = Cursor::new(output);
+        let mut cursor = ReadAheadReader::new(Cursor::new(output));
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
         let deserialized = type_.deserialize_column(&mut cursor, 2, &mut de_state).await?;
@@ -1291,13 +1292,13 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![(
+            typed_paths:       vec![(
                 "a".to_string(),
                 // This will be sorted alphabetically: Int64, String
                 Box::new(Type::Array(Box::new(Type::variant(vec![Type::String, Type::Int64])))),
             )],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Analyze values
@@ -1350,12 +1351,12 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![
+            typed_paths:       vec![
                 ("id".to_string(), Box::new(Type::UInt32)),
                 ("name".to_string(), Box::new(Type::String)),
             ],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1366,7 +1367,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
 
         // Deserialize
-        let mut cursor = Cursor::new(output);
+        let mut cursor = ReadAheadReader::new(Cursor::new(output));
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
         let deserialized = type_.deserialize_column(&mut cursor, 3, &mut de_state).await?;
@@ -1432,7 +1433,7 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![
+            typed_paths:       vec![
                 ("int8".to_string(), Box::new(Type::Int8)),
                 ("int16".to_string(), Box::new(Type::Int16)),
                 ("int32".to_string(), Box::new(Type::Int32)),
@@ -1442,8 +1443,8 @@ mod tests {
                 ("float32".to_string(), Box::new(Type::Float32)),
                 ("float64".to_string(), Box::new(Type::Float64)),
             ],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1454,7 +1455,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
 
         // Deserialize
-        let mut cursor = Cursor::new(output);
+        let mut cursor = ReadAheadReader::new(Cursor::new(output));
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
         let deserialized = type_.deserialize_column(&mut cursor, 2, &mut de_state).await?;
@@ -1520,9 +1521,9 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![],
-            skip_exact: vec!["password".to_string()],
-            skip_regex: vec![".*_key".to_string(), "secret.*".to_string()],
+            typed_paths:       vec![],
+            skip_exact:        vec!["password".to_string()],
+            skip_regex:        vec![".*_key".to_string(), "secret.*".to_string()],
         };
 
         // Serialize
@@ -1533,7 +1534,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
 
         // Deserialize
-        let mut cursor = Cursor::new(output);
+        let mut cursor = ReadAheadReader::new(Cursor::new(output));
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
         let deserialized = type_.deserialize_column(&mut cursor, 2, &mut de_state).await?;
@@ -1626,7 +1627,7 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![
+            typed_paths:       vec![
                 ("overflow_u8".to_string(), Box::new(Type::UInt8)),
                 ("underflow_i8".to_string(), Box::new(Type::Int8)),
                 ("big_to_small".to_string(), Box::new(Type::UInt8)),
@@ -1634,8 +1635,8 @@ mod tests {
                 ("negative_to_u16".to_string(), Box::new(Type::UInt16)),
                 ("negative_to_u32".to_string(), Box::new(Type::UInt32)),
             ],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1646,7 +1647,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
 
         // Deserialize and check values
-        let mut input = output.as_slice();
+        let mut input = ReadAheadReader::new(Cursor::new(output));
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
         let result_values = type_.deserialize_column(&mut input, 2, &mut de_state).await?;
@@ -1697,7 +1698,7 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![
+            typed_paths:       vec![
                 ("str_int".to_string(), Box::new(Type::Int32)),
                 ("str_float".to_string(), Box::new(Type::Float64)),
                 ("str_uint".to_string(), Box::new(Type::UInt8)),
@@ -1705,8 +1706,8 @@ mod tests {
                 ("digit_u8_1".to_string(), Box::new(Type::UInt8)),
                 ("digit_u8_0".to_string(), Box::new(Type::UInt8)),
             ],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1717,7 +1718,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
 
         // Deserialize and verify
-        let mut input = output.as_slice();
+        let mut input = ReadAheadReader::new(Cursor::new(output));
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
         let result_values = type_.deserialize_column(&mut input, 1, &mut de_state).await?;
@@ -1752,7 +1753,7 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![
+            typed_paths:       vec![
                 // Array with element conversion (256 wraps to 0 as UInt8)
                 ("int_array".to_string(), Box::new(Type::Array(Box::new(Type::UInt8)))),
                 // Nested array
@@ -1771,8 +1772,8 @@ mod tests {
                     Box::new(Type::Map(Box::new(Type::String), Box::new(Type::Int16))),
                 ),
             ],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1783,7 +1784,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
 
         // Deserialize and verify
-        let mut input = output.as_slice();
+        let mut input = ReadAheadReader::new(Cursor::new(output));
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
         let result_values = type_.deserialize_column(&mut input, 1, &mut de_state).await?;
@@ -1830,7 +1831,7 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![
+            typed_paths:       vec![
                 // Array of Tuples with type conversion
                 (
                     "array_of_tuples".to_string(),
@@ -1850,8 +1851,8 @@ mod tests {
                     Box::new(Type::Array(Box::new(Type::Nullable(Box::new(Type::UInt32))))),
                 ),
             ],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Serialize
@@ -1862,7 +1863,7 @@ mod tests {
         type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
 
         // Deserialize
-        let mut input = output.as_slice();
+        let mut input = ReadAheadReader::new(Cursor::new(output));
         let mut de_state = DeserializerState::default();
         type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
         let result_values = type_.deserialize_column(&mut input, 1, &mut de_state).await?;
@@ -1913,12 +1914,12 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![(
+            typed_paths:       vec![(
                 "a".to_string(),
                 Box::new(Type::LowCardinality(Box::new(Type::String))),
             )],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         let mut output = vec![];
@@ -2010,12 +2011,12 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![(
+            typed_paths:       vec![(
                 "value".to_string(),
                 Box::new(Type::variant(vec![Type::Int64, Type::Float64])),
             )],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Analyze values
@@ -2079,7 +2080,7 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![(
+            typed_paths:       vec![(
                 "items".to_string(),
                 Box::new(Type::Array(Box::new(Type::variant(vec![
                     Type::String,
@@ -2087,8 +2088,8 @@ mod tests {
                     Type::Float64,
                 ])))),
             )],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Analyze values
@@ -2157,12 +2158,12 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![(
+            typed_paths:       vec![(
                 "strict_int".to_string(),
                 Box::new(Type::variant(vec![Type::UInt32, Type::Int32])), // Only numeric types
             )],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // This should fail since "not_a_number" cannot be converted to UInt32 or Int32
@@ -2186,10 +2187,10 @@ mod tests {
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![], /* Let these be dynamic for now since nested typed paths
-                                  * are complex */
-            skip_exact: vec![],
-            skip_regex: vec![],
+            typed_paths:       vec![], /* Let these be dynamic for now since nested typed paths
+                                        * are complex */
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         // Analyze values - this tests that nested structures work

@@ -18,6 +18,7 @@ use crate::native::block::Block;
 use crate::native::block_info::BlockInfo;
 use crate::native::client_info::ClientInfo;
 use crate::native::protocol::{QueryProcessingStage, ServerData, ServerHello, ServerPacket};
+use crate::native::sync::ReadAheadBuffer;
 use crate::prelude::*;
 use crate::query::QueryParams;
 use crate::settings::Settings;
@@ -38,11 +39,11 @@ pub(crate) enum Operation<Data: Send + Sync> {
     Ping { response: oneshot::Sender<Result<()>> },
     #[strum(serialize = "Query")]
     Query {
-        query: String,
+        query:    String,
         settings: Option<Arc<Settings>>,
-        params: Option<QueryParams>,
+        params:   Option<QueryParams>,
         response: oneshot::Sender<Result<ResponseReceiver<Data>>>,
-        header: Option<oneshot::Sender<Vec<(String, Type)>>>,
+        header:   Option<oneshot::Sender<Vec<(String, Type)>>>,
     },
     #[strum(serialize = "Insert")]
     Insert { data: Data, response: oneshot::Sender<Result<()>> },
@@ -59,9 +60,7 @@ enum OperationTask {
 }
 
 impl Default for OperationTask {
-    fn default() -> Self {
-        Self::Chunk(ChunkBoundary::default())
-    }
+    fn default() -> Self { Self::Chunk(ChunkBoundary::default()) }
 }
 
 /// Track chunk boundaries. NOTE: Only relevant with chunked protocol for writing
@@ -89,30 +88,30 @@ pub(super) enum InsertState<T> {
 }
 
 pub(super) struct ExecutingQuery<T: Send + Sync> {
-    qid: Qid,
-    state: QueryState,
-    header: Option<Vec<(String, Type)>>,
+    qid:             Qid,
+    state:           QueryState,
+    header:          Option<Vec<(String, Type)>>,
     header_response: Option<oneshot::Sender<Vec<(String, Type)>>>,
-    response: ResponseSender<T>,
+    response:        ResponseSender<T>,
 }
 
 pub(super) struct PendingQuery<T: Send + Sync> {
-    qid: Qid,
-    query: String,
+    qid:      Qid,
+    query:    String,
     settings: Option<Arc<Settings>>,
-    params: Option<QueryParams>,
+    params:   Option<QueryParams>,
     response: oneshot::Sender<Result<ResponseReceiver<T>>>,
-    header: Option<oneshot::Sender<Vec<(String, Type)>>>,
+    header:   Option<oneshot::Sender<Vec<(String, Type)>>>,
 }
 
 pub(super) struct InternalConn<T: ClientFormat> {
-    cid: &'static str,
+    cid:          &'static str,
     server_hello: Arc<ServerHello>,
-    pending: VecDeque<PendingQuery<T::Data>>,
-    executing: Option<ExecutingQuery<T::Data>>,
-    events: Arc<broadcast::Sender<Event>>,
-    metadata: ClientMetadata,
-    state: DeserializerState<T::Deser>,
+    pending:      VecDeque<PendingQuery<T::Data>>,
+    executing:    Option<ExecutingQuery<T::Data>>,
+    events:       Arc<broadcast::Sender<Event>>,
+    metadata:     ClientMetadata,
+    state:        DeserializerState<T::Deser>,
 }
 
 impl<T: ClientFormat> InternalConn<T> {
@@ -147,7 +146,7 @@ impl<T: ClientFormat> InternalConn<T> {
         fields(clickhouse.connection.id = self.cid),
         err
     )]
-    pub(super) async fn run<R: ClickHouseRead + 'static, W: ClickHouseWrite>(
+    pub(super) async fn run<R: ClickHouseRead + ReadAheadBuffer + 'static, W: ClickHouseWrite>(
         &mut self,
         mut reader: R,
         mut writer: W,
@@ -175,7 +174,10 @@ impl<T: ClientFormat> InternalConn<T> {
         fields(clickhouse.connection.id = self.cid),
         err
     )]
-    pub(super) async fn run_chunked<R: ClickHouseRead + 'static, W: ClickHouseWrite>(
+    pub(super) async fn run_chunked<
+        R: ClickHouseRead + ReadAheadBuffer + 'static,
+        W: ClickHouseWrite,
+    >(
         &mut self,
         mut reader: R,
         mut writer: ChunkWriter<W>,
@@ -200,7 +202,7 @@ impl<T: ClientFormat> InternalConn<T> {
         }
     }
 
-    async fn run_inner<R: ClickHouseRead + 'static, W: ClickHouseWrite>(
+    async fn run_inner<R: ClickHouseRead + ReadAheadBuffer + 'static, W: ClickHouseWrite>(
         &mut self,
         reader: &mut R,
         writer: &mut W,
@@ -327,7 +329,10 @@ impl<T: ClientFormat> InternalConn<T> {
         ),
         err
     )]
-    async fn receive_packet<R: ClickHouseRead + 'static>(&mut self, reader: &mut R) -> Result<()> {
+    async fn receive_packet<R: ClickHouseRead + ReadAheadBuffer + 'static>(
+        &mut self,
+        reader: &mut R,
+    ) -> Result<()> {
         let cid = self.cid;
         let client_id = self.metadata.client_id;
         let revision = self.server_hello.revision_version;
@@ -406,7 +411,7 @@ impl<T: ClientFormat> InternalConn<T> {
         Ok(())
     }
 
-    async fn receive_ping<R: ClickHouseRead + 'static>(
+    async fn receive_ping<R: ClickHouseRead + ReadAheadBuffer + 'static>(
         reader: &mut R,
         revision: u64,
         metadata: ClientMetadata,
@@ -534,17 +539,11 @@ impl<Data: Send + Sync + 'static> Operation<Data> {
     }
 
     // Helper functions to account for full weight across common operations
-    pub(crate) fn weight_query() -> u8 {
-        1
-    }
+    pub(crate) fn weight_query() -> u8 { 1 }
 
-    pub(crate) fn weight_insert() -> u8 {
-        5
-    }
+    pub(crate) fn weight_insert() -> u8 { 5 }
 
-    pub(crate) fn weight_insert_many() -> u8 {
-        6
-    }
+    pub(crate) fn weight_insert_many() -> u8 { 6 }
 }
 
 impl<Data: Send + Sync + 'static> std::fmt::Debug for Message<Data> {

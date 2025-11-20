@@ -14,6 +14,7 @@ use futures_util::FutureExt;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+#[cfg(test)]
 use super::protocol::MAX_STRING_SIZE;
 
 // Default parameter values based on ClickHouse documentation and clickhouse-go
@@ -26,6 +27,7 @@ use super::values::{
 };
 use crate::formats::{DeserializerState, SerializerState};
 use crate::io::{ClickHouseRead, ClickHouseWrite};
+use crate::native::sync::{ParseStatus, SyncReader};
 use crate::{Date32, Error, Result};
 
 /// A raw `ClickHouse` type.
@@ -93,11 +95,11 @@ pub enum Type {
         max_types: Option<u32>, // Default: 32 if None
     },
     JSON {
-        max_dynamic_paths: Option<u32>,        // Default: 1024 if None
-        max_dynamic_types: Option<u32>,        // Default: 32 if None
-        typed_paths: Vec<(String, Box<Type>)>, // (path, type) pairs like ("Name", String)
-        skip_exact: Vec<String>,               // Exact paths to skip
-        skip_regex: Vec<String>,               // Regex patterns to skip
+        max_dynamic_paths: Option<u32>,              // Default: 1024 if None
+        max_dynamic_types: Option<u32>,              // Default: 32 if None
+        typed_paths:       Vec<(String, Box<Type>)>, // (path, type) pairs like ("Name", String)
+        skip_exact:        Vec<String>,              // Exact paths to skip
+        skip_regex:        Vec<String>,              // Regex patterns to skip
     },
 
     Object,
@@ -244,14 +246,10 @@ impl Type {
     }
 
     /// Check if this is a Dynamic type
-    pub fn is_dynamic(&self) -> bool {
-        matches!(self, Type::Dynamic { .. })
-    }
+    pub fn is_dynamic(&self) -> bool { matches!(self, Type::Dynamic { .. }) }
 
     /// Check if this is a JSON type  
-    pub fn is_json(&self) -> bool {
-        matches!(self, Type::JSON { .. })
-    }
+    pub fn is_json(&self) -> bool { matches!(self, Type::JSON { .. }) }
 
     pub fn strip_null(&self) -> &Type {
         match self {
@@ -260,9 +258,7 @@ impl Type {
         }
     }
 
-    pub fn is_nullable(&self) -> bool {
-        matches!(self, Type::Nullable(_))
-    }
+    pub fn is_nullable(&self) -> bool { matches!(self, Type::Nullable(_)) }
 
     pub fn strip_low_cardinality(&self) -> &Type {
         match self {
@@ -474,14 +470,17 @@ impl Display for Type {
 }
 
 impl Type {
-    pub(crate) fn deserialize_column_with_path<'a, R: ClickHouseRead>(
+    #[cfg(test)]
+    pub(crate) fn deserialize_column_with_path<
+        'a,
+        R: ClickHouseRead + crate::native::sync::ReadAheadBuffer,
+    >(
         &'a self,
         reader: &'a mut R,
         rows: usize,
         state: &'a mut DeserializerState,
         path: &'a mut Vec<u16>,
     ) -> impl Future<Output = Result<Vec<Value>>> + Send + 'a {
-        // dispatch handled explicitly below (path-aware)
         async move {
             if rows > MAX_STRING_SIZE {
                 return Err(Error::Protocol(format!(
@@ -489,99 +488,17 @@ impl Type {
                 )));
             }
 
-            Ok(match self {
-                // Sized primitives
-                Type::Int8
-                | Type::Int16
-                | Type::Int32
-                | Type::Int64
-                | Type::Int128
-                | Type::Int256
-                | Type::UInt8
-                | Type::UInt16
-                | Type::UInt32
-                | Type::UInt64
-                | Type::UInt128
-                | Type::UInt256
-                | Type::Float32
-                | Type::Float64
-                | Type::Decimal32(_)
-                | Type::Decimal64(_)
-                | Type::Decimal128(_)
-                | Type::Decimal256(_)
-                | Type::Uuid
-                | Type::Date
-                | Type::Date32
-                | Type::DateTime(_)
-                | Type::DateTime64(_, _)
-                | Type::Ipv4
-                | Type::Ipv6
-                | Type::Enum8(_)
-                | Type::Enum16(_) => {
-                    deserialize::sized::read_with_path(self, reader, rows, state, path).await?
-                }
-                // Strings
-                Type::String
-                | Type::FixedSizedString(_)
-                | Type::Binary
-                | Type::FixedSizedBinary(_) => {
-                    deserialize::string::read_with_path(self, reader, rows, state, path).await?
-                }
-                // Composites (path-aware)
-                Type::Array(_) => {
-                    deserialize::array::read_with_path(self, reader, rows, state, path).await?
-                }
-                Type::Tuple(_) | Type::TupleNamed(_) => {
-                    deserialize::tuple::read_with_path(self, reader, rows, state, path).await?
-                }
-                Type::Nullable(_) => {
-                    deserialize::nullable::read_with_path(self, reader, rows, state, path).await?
-                }
-                Type::Map(_, _) => {
-                    deserialize::map::read_with_path(self, reader, rows, state, path).await?
-                }
-
-                // Existing implementations unaffected
-                Type::Ring => {
-                    deserialize::geo::RingDeserializer::read(self, reader, rows, state).await?
-                }
-                Type::Polygon => {
-                    deserialize::geo::PolygonDeserializer::read(self, reader, rows, state).await?
-                }
-                Type::MultiPolygon => {
-                    deserialize::geo::MultiPolygonDeserializer::read(self, reader, rows, state)
-                        .await?
-                }
-                Type::LowCardinality(_) => {
-                    deserialize::low_cardinality::LowCardinalityDeserializer::read(
-                        self, reader, rows, state,
-                    )
-                    .await?
-                }
-                Type::Point => {
-                    deserialize::geo::PointDeserializer::read(self, reader, rows, state).await?
-                }
-                Type::Variant(_) => {
-                    deserialize::variant::VariantDeserializer::read_async(self, reader, rows, state)
-                        .await?
-                }
-                Type::Dynamic { .. } => {
-                    deserialize::dynamic::DynamicDeserializer::read_async(self, reader, rows, state)
-                        .await?
-                }
-                Type::JSON { .. } => {
-                    deserialize::json::JsonDeserializer::read(self, reader, rows, state).await?
-                }
-                Type::Object => {
-                    deserialize::object::ObjectDeserializer::read(self, reader, rows, state).await?
-                }
-            })
+            self.deserialize_column_sync_with_path(reader, rows, state, path).await
         }
         .boxed()
     }
 
     // TODO: is this needed since it just wraps _with_path?
-    pub(crate) fn deserialize_column<'a, R: ClickHouseRead>(
+    #[cfg(test)]
+    pub(crate) fn deserialize_column<
+        'a,
+        R: ClickHouseRead + crate::native::sync::ReadAheadBuffer,
+    >(
         &'a self,
         reader: &'a mut R,
         rows: usize,
@@ -592,6 +509,117 @@ impl Type {
             self.deserialize_column_with_path(reader, rows, state, &mut path).await
         }
         .boxed()
+    }
+
+    /// Sync-first deserialization entrypoint for types that have been migrated to synchronous
+    /// parsers (backed by the shared AsyncParseAdapter for refill). Falls back to the legacy async
+    /// path for types not yet migrated.
+    pub(crate) fn deserialize_column_sync_with_path<
+        'a,
+        R: ClickHouseRead + crate::native::sync::ReadAheadBuffer,
+    >(
+        &'a self,
+        reader: &'a mut R,
+        rows: usize,
+        state: &'a mut DeserializerState,
+        path: &'a mut Vec<u16>,
+    ) -> impl Future<Output = Result<Vec<Value>>> + Send + 'a {
+        async move {
+            let mut scratch = std::mem::take(&mut state.sync_buffer);
+            let read_ahead = state.sync_read_ahead_bytes;
+            let mut adapter =
+                crate::native::sync::AsyncParseAdapter::new(reader, &mut scratch, read_ahead);
+            let out = adapter
+                .parse(|buf| {
+                    let mut sr = SyncReader::new(buf);
+                    self.parse_column_sync_with_path(rows, state, path, &mut sr)
+                })
+                .await;
+            state.sync_buffer = scratch;
+            out
+        }
+        .boxed()
+    }
+
+    pub(crate) fn parse_column_sync_with_path(
+        &self,
+        rows: usize,
+        state: &mut DeserializerState,
+        path: &mut Vec<u16>,
+        reader: &mut SyncReader<'_>,
+    ) -> Result<ParseStatus<Vec<Value>>> {
+        match self {
+            _ if state.is_sparse_path(path) => {
+                return deserialize::sparse::parse_sparse_with_path(
+                    self, reader, rows, state, path,
+                );
+            }
+            Type::Int8
+            | Type::Int16
+            | Type::Int32
+            | Type::Int64
+            | Type::Int128
+            | Type::Int256
+            | Type::UInt8
+            | Type::UInt16
+            | Type::UInt32
+            | Type::UInt64
+            | Type::UInt128
+            | Type::UInt256
+            | Type::Float32
+            | Type::Float64
+            | Type::Decimal32(_)
+            | Type::Decimal64(_)
+            | Type::Decimal128(_)
+            | Type::Decimal256(_)
+            | Type::Uuid
+            | Type::Date
+            | Type::Date32
+            | Type::DateTime(_)
+            | Type::DateTime64(_, _)
+            | Type::Ipv4
+            | Type::Ipv6
+            | Type::Enum8(_)
+            | Type::Enum16(_) => {
+                deserialize::sized::parse_with_path(self, rows, state, path, reader)
+            }
+
+            Type::String | Type::FixedSizedString(_) | Type::Binary | Type::FixedSizedBinary(_) => {
+                deserialize::string::parse_with_path(self, rows, state, path, reader)
+            }
+
+            Type::Array(_) => deserialize::array::parse_with_path(self, rows, state, path, reader),
+            Type::Tuple(_) | Type::TupleNamed(_) => {
+                deserialize::tuple::parse_with_path(self, rows, state, path, reader)
+            }
+            Type::Nullable(_) => {
+                deserialize::nullable::parse_with_path(self, rows, state, path, reader)
+            }
+            Type::Map(_, _) => deserialize::map::parse_with_path(self, rows, state, path, reader),
+            Type::LowCardinality(_) => {
+                deserialize::low_cardinality::parse_with_path(self, rows, state, path, reader)
+            }
+            Type::Variant(_) => deserialize::variant::VariantDeserializer::parse_with_path(
+                self, rows, state, path, reader,
+            ),
+            Type::Point => deserialize::geo::parse_point_with_path(rows, state, path, reader),
+            Type::Ring => deserialize::geo::parse_geo_array_with_path::<
+                deserialize::geo::RingDeserializer,
+            >(self, rows, state, path, reader),
+            Type::Polygon => deserialize::geo::parse_geo_array_with_path::<
+                deserialize::geo::PolygonDeserializer,
+            >(self, rows, state, path, reader),
+            Type::MultiPolygon => deserialize::geo::parse_geo_array_with_path::<
+                deserialize::geo::MultiPolygonDeserializer,
+            >(self, rows, state, path, reader),
+            Type::Dynamic { .. } => deserialize::dynamic::DynamicDeserializer::parse_with_path(
+                self, rows, state, path, reader,
+            ),
+            Type::JSON { .. } => deserialize::json::JsonDeserializer::parse_with_path(
+                self, rows, state, path, reader,
+            ),
+            Type::Object => deserialize::object::parse_with_path(self, rows, state, path, reader),
+        }
     }
 
     pub(crate) fn serialize_column<'a, W: ClickHouseWrite>(
@@ -1059,14 +1087,6 @@ pub(crate) trait Deserializer {
     ) -> impl Future<Output = Result<()>> {
         async { Ok(()) }
     }
-
-    // TODO: should this include path and we get rid of the read_with_path vs read?
-    fn read<R: ClickHouseRead>(
-        type_: &Type,
-        reader: &mut R,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> impl Future<Output = Result<Vec<Value>>>;
 }
 
 pub(crate) trait Serializer {

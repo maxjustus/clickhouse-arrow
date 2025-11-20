@@ -20,20 +20,6 @@ pub(crate) mod sparse;
 // no direct use here; imported where needed
 use super::*;
 
-/// Macro to read discriminator based on size
-/// Used by Dynamic and JSON deserializers for variable-sized discriminators
-macro_rules! read_discriminator {
-    (async $reader:expr, $total_types:expr) => {
-        match $total_types {
-            0..=255 => u64::from($reader.read_u8().await?),
-            256..=65535 => u64::from($reader.read_u16_le().await?),
-            65536..=4_294_967_295 => u64::from($reader.read_u32_le().await?),
-            _ => $reader.read_u64_le().await?,
-        }
-    };
-}
-pub(crate) use read_discriminator;
-
 // Core protocol parsing
 pub(crate) trait ClickHouseNativeDeserializer {
     fn deserialize_prefix_async<'a, R: ClickHouseRead>(
@@ -705,9 +691,9 @@ impl FromStr for Type {
                     Type::JSON {
                         max_dynamic_paths: None,
                         max_dynamic_types: None,
-                        typed_paths: Vec::new(),
-                        skip_exact: Vec::new(),
-                        skip_regex: Vec::new(),
+                        typed_paths:       Vec::new(),
+                        skip_exact:        Vec::new(),
+                        skip_regex:        Vec::new(),
                     }
                 } else {
                     let args = parse_variable_args(following)?;
@@ -769,9 +755,7 @@ fn parse_fixed_args<const N: usize>(input: &str) -> Result<([&str; N], usize)> {
 }
 
 /// Parse arguments into a Vec for types with variable numbers of args
-fn parse_variable_args(input: &str) -> Result<Vec<&str>> {
-    parse_args_iter(input)?.collect()
-}
+fn parse_variable_args(input: &str) -> Result<Vec<&str>> { parse_args_iter(input)?.collect() }
 
 fn parse_scale(from: &str) -> Result<usize> {
     from.parse().map_err(|_| Error::TypeParseError("couldn't parse scale".to_string()))
@@ -795,11 +779,11 @@ fn parse_args_iter(input: &str) -> Result<impl Iterator<Item = Result<&str, Erro
 }
 
 struct ArgsIterator<'a> {
-    input: &'a str,
+    input:      &'a str,
     last_start: usize,
-    in_parens: usize,
-    in_quotes: bool,
-    done: bool,
+    in_parens:  usize,
+    in_quotes:  bool,
+    done:       bool,
 }
 
 impl<'a> Iterator for ArgsIterator<'a> {
@@ -1066,16 +1050,13 @@ mod tests {
             Type::from_str("Map(String, Int32)").unwrap(),
             Type::Map(Box::new(Type::String), Box::new(Type::Int32))
         );
-        assert_eq!(
-            Type::from_str("JSON").unwrap(),
-            Type::JSON {
-                max_dynamic_paths: None,
-                max_dynamic_types: None,
-                typed_paths: vec![],
-                skip_exact: vec![],
-                skip_regex: vec![],
-            }
-        );
+        assert_eq!(Type::from_str("JSON").unwrap(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        });
         assert_eq!(Type::from_str("Object").unwrap(), Type::Object);
         assert_eq!(Type::from_str("Json").unwrap(), Type::Object);
 
@@ -1172,54 +1153,43 @@ mod tests {
     fn test_from_str_parameterized_types() {
         // Test Dynamic with parameters
         assert_eq!(Type::from_str("Dynamic").unwrap(), Type::Dynamic { max_types: None });
-        assert_eq!(
-            Type::from_str("Dynamic(max_types=16)").unwrap(),
-            Type::Dynamic { max_types: Some(16) }
-        );
-        assert_eq!(
-            Type::from_str("Dynamic(max_types=100)").unwrap(),
-            Type::Dynamic { max_types: Some(100) }
-        );
+        assert_eq!(Type::from_str("Dynamic(max_types=16)").unwrap(), Type::Dynamic {
+            max_types: Some(16),
+        });
+        assert_eq!(Type::from_str("Dynamic(max_types=100)").unwrap(), Type::Dynamic {
+            max_types: Some(100),
+        });
 
         // Test JSON with parameters
-        assert_eq!(
-            Type::from_str("JSON").unwrap(),
-            Type::JSON {
-                max_dynamic_paths: None,
-                max_dynamic_types: None,
-                typed_paths: vec![],
-                skip_exact: vec![],
-                skip_regex: vec![],
-            }
-        );
-        assert_eq!(
-            Type::from_str("JSON(max_dynamic_paths=16)").unwrap(),
-            Type::JSON {
-                max_dynamic_paths: Some(16),
-                max_dynamic_types: None,
-                typed_paths: vec![],
-                skip_exact: vec![],
-                skip_regex: vec![],
-            }
-        );
-        assert_eq!(
-            Type::from_str("JSON(max_dynamic_types=64)").unwrap(),
-            Type::JSON {
-                max_dynamic_paths: None,
-                max_dynamic_types: Some(64),
-                typed_paths: vec![],
-                skip_exact: vec![],
-                skip_regex: vec![],
-            }
-        );
+        assert_eq!(Type::from_str("JSON").unwrap(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        });
+        assert_eq!(Type::from_str("JSON(max_dynamic_paths=16)").unwrap(), Type::JSON {
+            max_dynamic_paths: Some(16),
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        });
+        assert_eq!(Type::from_str("JSON(max_dynamic_types=64)").unwrap(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: Some(64),
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        });
         assert_eq!(
             Type::from_str("JSON(max_dynamic_paths=100, max_dynamic_types=32)").unwrap(),
             Type::JSON {
                 max_dynamic_paths: Some(100),
                 max_dynamic_types: Some(32),
-                typed_paths: vec![],
-                skip_exact: vec![],
-                skip_regex: vec![],
+                typed_paths:       vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             }
         );
         assert_eq!(
@@ -1227,9 +1197,9 @@ mod tests {
             Type::JSON {
                 max_dynamic_paths: Some(100),
                 max_dynamic_types: Some(32),
-                typed_paths: vec![],
-                skip_exact: vec![],
-                skip_regex: vec![],
+                typed_paths:       vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             }
         );
 
@@ -1245,24 +1215,21 @@ mod tests {
             Type::JSON {
                 max_dynamic_paths: Some(100),
                 max_dynamic_types: None,
-                typed_paths: vec![("Name".to_string(), Box::new(Type::String))],
-                skip_exact: vec![],
-                skip_regex: vec![],
+                typed_paths:       vec![("Name".to_string(), Box::new(Type::String))],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             }
         );
-        assert_eq!(
-            Type::from_str("JSON(Name String, Age Int64)").unwrap(),
-            Type::JSON {
-                max_dynamic_paths: None,
-                max_dynamic_types: None,
-                typed_paths: vec![
-                    ("Name".to_string(), Box::new(Type::String)),
-                    ("Age".to_string(), Box::new(Type::Int64))
-                ],
-                skip_exact: vec![],
-                skip_regex: vec![],
-            }
-        );
+        assert_eq!(Type::from_str("JSON(Name String, Age Int64)").unwrap(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![
+                ("Name".to_string(), Box::new(Type::String)),
+                ("Age".to_string(), Box::new(Type::Int64))
+            ],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        });
 
         // Test skip paths parsing
         assert_eq!(
@@ -1270,21 +1237,18 @@ mod tests {
             Type::JSON {
                 max_dynamic_paths: None,
                 max_dynamic_types: Some(32),
-                typed_paths: vec![],
-                skip_exact: vec!["fake.field".to_string()],
-                skip_regex: vec![],
+                typed_paths:       vec![],
+                skip_exact:        vec!["fake.field".to_string()],
+                skip_regex:        vec![],
             }
         );
-        assert_eq!(
-            Type::from_str("JSON(SKIP REGEXP '.*\\.debug')").unwrap(),
-            Type::JSON {
-                max_dynamic_paths: None,
-                max_dynamic_types: None,
-                typed_paths: vec![],
-                skip_exact: vec![],
-                skip_regex: vec![".*\\.debug".to_string()],
-            }
-        );
+        assert_eq!(Type::from_str("JSON(SKIP REGEXP '.*\\.debug')").unwrap(), Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![".*\\.debug".to_string()],
+        });
 
         // Test combined typed paths and skip paths
         assert_eq!(
@@ -1295,12 +1259,12 @@ mod tests {
             Type::JSON {
                 max_dynamic_paths: None,
                 max_dynamic_types: None,
-                typed_paths: vec![
+                typed_paths:       vec![
                     ("Name".to_string(), Box::new(Type::String)),
                     ("Age".to_string(), Box::new(Type::Int64))
                 ],
-                skip_exact: vec!["temp.field".to_string()],
-                skip_regex: vec![".*\\.debug".to_string()],
+                skip_exact:        vec!["temp.field".to_string()],
+                skip_regex:        vec![".*\\.debug".to_string()],
             }
         );
     }
@@ -1445,37 +1409,37 @@ mod tests {
             Type::JSON {
                 max_dynamic_paths: None,
                 max_dynamic_types: None,
-                typed_paths: vec![],
-                skip_exact: vec![],
-                skip_regex: vec![],
+                typed_paths:       vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             },
             Type::JSON {
                 max_dynamic_paths: Some(16),
                 max_dynamic_types: None,
-                typed_paths: vec![],
-                skip_exact: vec![],
-                skip_regex: vec![],
+                typed_paths:       vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             },
             Type::JSON {
                 max_dynamic_paths: None,
                 max_dynamic_types: Some(64),
-                typed_paths: vec![],
-                skip_exact: vec![],
-                skip_regex: vec![],
+                typed_paths:       vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             },
             Type::JSON {
                 max_dynamic_paths: Some(100),
                 max_dynamic_types: Some(32),
-                typed_paths: vec![],
-                skip_exact: vec![],
-                skip_regex: vec![],
+                typed_paths:       vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             },
             Type::JSON {
                 max_dynamic_paths: None,
                 max_dynamic_types: None,
-                typed_paths: vec![("Name".to_string(), Box::new(Type::String))],
-                skip_exact: vec!["debug.field".to_string()],
-                skip_regex: vec![],
+                typed_paths:       vec![("Name".to_string(), Box::new(Type::String))],
+                skip_exact:        vec!["debug.field".to_string()],
+                skip_regex:        vec![],
             },
         ];
 

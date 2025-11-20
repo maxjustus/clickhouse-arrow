@@ -4,6 +4,9 @@ use tokio::io::AsyncReadExt;
 
 use crate::Result;
 use crate::io::ClickHouseRead;
+#[cfg(test)]
+use crate::native::sync::AsyncParseAdapter;
+use crate::native::sync::{ParseStatus, SyncReader};
 use crate::native::types::deserialize::{ClickHouseNativeDeserializer, DeserializerState};
 use crate::native::types::{Type, Value};
 
@@ -13,7 +16,7 @@ const NULL_DISCRIMINATOR: u8 = 0xFF;
 #[derive(Debug, Clone)]
 pub(crate) struct DiscriminatorMap {
     /// Maps discriminator byte to (`type_string`, `type`)
-    types: HashMap<u8, (String, Type)>,
+    types:                 HashMap<u8, (String, Type)>,
     /// Sorted discriminators for iteration
     sorted_discriminators: Vec<u8>,
 }
@@ -50,9 +53,7 @@ impl DiscriminatorMap {
 
     /// Get all discriminators in order
     #[inline]
-    pub(crate) fn discriminators(&self) -> &[u8] {
-        &self.sorted_discriminators
-    }
+    pub(crate) fn discriminators(&self) -> &[u8] { &self.sorted_discriminators }
 }
 
 pub(crate) struct VariantDeserializer;
@@ -117,21 +118,28 @@ impl VariantDeserializer {
     }
 
     /// Read Variant data (async version)
-    async fn read_internal_async<R: ClickHouseRead>(
+    pub(crate) fn parse_with_path(
         type_: &Type,
-        reader: &mut R,
         rows: usize,
         state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
+        path: &mut Vec<u16>,
+        reader: &mut SyncReader<'_>,
+    ) -> Result<ParseStatus<Vec<Value>>> {
+        if rows == 0 {
+            return Ok(ParseStatus::Complete { value: Vec::new(), consumed: reader.consumed() });
+        }
+
         let variant_types = type_.unwrap_variant()?;
         let discriminator_map = DiscriminatorMap::new(variant_types);
 
         // Read discriminators
-        let mut discriminators = vec![0u8; rows];
-        let _ = reader.read_exact(&mut discriminators).await?;
+        let discriminators = match reader.take_exact(rows)? {
+            ParseStatus::Complete { value, .. } => value,
+            ParseStatus::NeedMore { needed } => return Ok(ParseStatus::NeedMore { needed }),
+        };
 
         // Build offsets and count rows per type
-        let (offsets, row_count_by_type) = Self::build_offsets_and_counts(&discriminators, rows);
+        let (offsets, row_count_by_type) = Self::build_offsets_and_counts(discriminators, rows);
 
         // Read column data for each type
         let mut columns = HashMap::new();
@@ -141,14 +149,20 @@ impl VariantDeserializer {
                 && count > 0
                 && let Some(inner_type) = discriminator_map.get_type(discriminator)
             {
-                let column_values = inner_type.deserialize_column(reader, count, state).await?;
+                let column_values =
+                    match inner_type.parse_column_sync_with_path(count, state, path, reader)? {
+                        ParseStatus::Complete { value, .. } => value,
+                        ParseStatus::NeedMore { needed } => {
+                            return Ok(ParseStatus::NeedMore { needed });
+                        }
+                    };
                 let old = columns.insert(discriminator, column_values);
                 debug_assert!(old.is_none(), "Duplicate discriminator column");
             }
         }
 
-        // Reconstruct values in original order
-        Self::reconstruct_values(&discriminators, &offsets, &columns)
+        let vals = Self::reconstruct_values(discriminators, &offsets, &columns)?;
+        Ok(ParseStatus::Complete { value: vals, consumed: reader.consumed() })
     }
 
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
@@ -169,19 +183,36 @@ impl VariantDeserializer {
         Ok(())
     }
 
-    pub(crate) async fn read_async<R: ClickHouseRead>(
+    #[cfg(test)]
+    pub(crate) async fn read_async<R>(
         type_: &Type,
         reader: &mut R,
         rows: usize,
         state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        Self::read_internal_async(type_, reader, rows, state).await
+    ) -> Result<Vec<Value>>
+    where
+        R: ClickHouseRead + crate::native::sync::ReadAheadBuffer,
+    {
+        // Drive sync parser via adapter for consistency
+        let mut scratch = std::mem::take(&mut state.sync_buffer);
+        let read_ahead = state.sync_read_ahead_bytes;
+        let mut adapter = AsyncParseAdapter::new(reader, &mut scratch, read_ahead);
+        let out = adapter
+            .parse(|buf| {
+                let mut sr = SyncReader::new(buf);
+                Self::parse_with_path(type_, rows, state, &mut Vec::new(), &mut sr)
+            })
+            .await;
+        state.sync_buffer = scratch;
+        out
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+use std::io::Cursor;
+
+use crate::native::sync::ReadAheadReader;
 
     use super::*;
 
@@ -224,7 +255,7 @@ mod tests {
                 let test_data = create_test_data(discriminators, data);
 
                 // Test async path
-                let mut async_reader = Cursor::new(test_data);
+                let mut async_reader = ReadAheadReader::new(Cursor::new(test_data));
                 let mut async_state = DeserializerState::default();
                 VariantDeserializer::read_prefix(
                     &variant_type,
@@ -346,34 +377,31 @@ mod tests {
         let variant_type =
             Type::variant(vec![Type::Array(Box::new(Type::String)), Type::UInt64, Type::Date]);
         let date_bytes = 19723u16.to_le_bytes();
-        let data = create_test_data(
-            &[0u8, 1u8, 2u8],
-            &[
-                2,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0, // offset 2
-                1,
-                b'a', // 'a'
-                1,
-                b'b', // 'b'
-                date_bytes[0],
-                date_bytes[1], // Date
-                42,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0, // 42
-            ],
-        );
-        let mut reader = Cursor::new(data);
+        let data = create_test_data(&[0u8, 1u8, 2u8], &[
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0, // offset 2
+            1,
+            b'a', // 'a'
+            1,
+            b'b', // 'b'
+            date_bytes[0],
+            date_bytes[1], // Date
+            42,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0, // 42
+        ]);
+        let mut reader = ReadAheadReader::new(Cursor::new(data));
         let mut state = DeserializerState::default();
         VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state).await.unwrap();
         let values = VariantDeserializer::read_async(&variant_type, &mut reader, 3, &mut state)
@@ -401,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn test_variant_multitype_discriminator_order() {
         let (variant_type, data) = create_multitype_test_data();
-        let mut reader = Cursor::new(data);
+        let mut reader = ReadAheadReader::new(Cursor::new(data));
         let mut state = DeserializerState::default();
         VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state).await.unwrap();
         let values = VariantDeserializer::read_async(&variant_type, &mut reader, 5, &mut state)
@@ -418,7 +446,7 @@ mod tests {
     #[tokio::test]
     async fn test_variant_multitype_array_handling() {
         let (variant_type, data) = create_multitype_test_data();
-        let mut reader = Cursor::new(data);
+        let mut reader = ReadAheadReader::new(Cursor::new(data));
         let mut state = DeserializerState::default();
         VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state).await.unwrap();
         let values = VariantDeserializer::read_async(&variant_type, &mut reader, 5, &mut state)
@@ -440,7 +468,7 @@ mod tests {
     #[tokio::test]
     async fn test_variant_multitype_datetime_handling() {
         let (variant_type, data) = create_multitype_test_data();
-        let mut reader = Cursor::new(data);
+        let mut reader = ReadAheadReader::new(Cursor::new(data));
         let mut state = DeserializerState::default();
         VariantDeserializer::read_prefix(&variant_type, &mut reader, &mut state).await.unwrap();
         let values = VariantDeserializer::read_async(&variant_type, &mut reader, 5, &mut state)

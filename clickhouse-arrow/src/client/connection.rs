@@ -20,6 +20,7 @@ use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::protocol::{
     ClientHello, DBMS_MIN_PROTOCOL_VERSION_WITH_ADDENDUM, DBMS_TCP_PROTOCOL_VERSION, ServerHello,
 };
+use crate::native::sync::ReadAheadReader;
 use crate::prelude::*;
 use crate::{ClientOptions, Message, Operation};
 
@@ -45,17 +46,15 @@ impl From<u8> for ConnectionStatus {
 }
 
 impl From<ConnectionStatus> for u8 {
-    fn from(value: ConnectionStatus) -> u8 {
-        value as u8
-    }
+    fn from(value: ConnectionStatus) -> u8 { value as u8 }
 }
 
 /// Client metadata passed around the internal client
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ClientMetadata {
-    pub(crate) client_id: u16,
-    pub(crate) compression: CompressionMethod,
-    pub(crate) arrow_options: ArrowOptions,
+    pub(crate) client_id:      u16,
+    pub(crate) compression:    CompressionMethod,
+    pub(crate) arrow_options:  ArrowOptions,
     pub(crate) server_version: Option<(u64, u64, u64)>,
 }
 
@@ -63,9 +62,9 @@ impl ClientMetadata {
     /// Helper function to disable compression on the metadata.
     pub(crate) fn disable_compression(self) -> Self {
         Self {
-            client_id: self.client_id,
-            compression: CompressionMethod::None,
-            arrow_options: self.arrow_options,
+            client_id:      self.client_id,
+            compression:    CompressionMethod::None,
+            arrow_options:  self.arrow_options,
             server_version: self.server_version,
         }
     }
@@ -86,25 +85,25 @@ impl ClientMetadata {
 /// A struct defining the information needed to connect over TCP.
 #[derive(Debug)]
 struct ConnectState<T: Send + Sync + 'static> {
-    status: Arc<AtomicU8>,
+    status:  Arc<AtomicU8>,
     channel: mpsc::Sender<Message<T>>,
     #[expect(unused)]
-    handle: AbortHandle,
+    handle:  AbortHandle,
 }
 
 // NOTE: ArcSwaps are used to support reconnects in the future.
 #[derive(Debug)]
 pub(super) struct Connection<T: ClientFormat> {
     #[expect(unused)]
-    addrs: Arc<[SocketAddr]>,
-    options: Arc<ClientOptions>,
-    io_task: Arc<Mutex<IoHandle<T::Data>>>,
-    metadata: ClientMetadata,
+    addrs:         Arc<[SocketAddr]>,
+    options:       Arc<ClientOptions>,
+    io_task:       Arc<Mutex<IoHandle<T::Data>>>,
+    metadata:      ClientMetadata,
     #[cfg(not(feature = "inner_pool"))]
-    state: Arc<ConnectState<T::Data>>,
+    state:         Arc<ConnectState<T::Data>>,
     /// NOTE: Max connections must remain at 4, unless algorithm changes
     #[cfg(feature = "inner_pool")]
-    state: Vec<ArcSwap<ConnectState<T::Data>>>,
+    state:         Vec<ArcSwap<ConnectState<T::Data>>>,
     #[cfg(feature = "inner_pool")]
     load_balancer: Arc<load::AtomicLoad>,
 }
@@ -236,21 +235,23 @@ impl<T: ClientFormat> Connection<T> {
 
                 let result = match (chunk_send, chunk_recv) {
                     (true, true) => {
-                        // let reader = ChunkReader::new(reader);
-                        let reader = ChunkReader::new(reader);
+                        let reader = ReadAheadReader::new(ChunkReader::new(reader));
                         let writer = ChunkWriter::new(writer);
                         internal.run_chunked(reader, writer, op_rx).await
                     }
                     (true, false) => {
+                        let reader = ReadAheadReader::new(reader);
                         let writer = ChunkWriter::new(writer);
                         internal.run_chunked(reader, writer, op_rx).await
                     }
                     (false, true) => {
-                        // let reader = ChunkReader::new(reader);
-                        let reader = ChunkReader::new(reader);
+                        let reader = ReadAheadReader::new(ChunkReader::new(reader));
                         internal.run(reader, writer, op_rx).await
                     }
-                    (false, false) => internal.run(reader, writer, op_rx).await,
+                    (false, false) => {
+                        let reader = ReadAheadReader::new(reader);
+                        internal.run(reader, writer, op_rx).await
+                    }
                 };
 
                 if let Err(error) = result {
@@ -422,8 +423,8 @@ impl<T: ClientFormat> Connection<T> {
 
         let client_hello = ClientHello {
             default_database: options.default_database.clone(),
-            username: options.username.clone(),
-            password: options.password.get().to_string(),
+            username:         options.username.clone(),
+            password:         options.password.get().to_string(),
         };
 
         // Send client hello
@@ -448,13 +449,9 @@ impl<T: ClientFormat> Connection<T> {
 }
 
 impl<T: ClientFormat> Connection<T> {
-    pub(crate) fn metadata(&self) -> ClientMetadata {
-        self.metadata
-    }
+    pub(crate) fn metadata(&self) -> ClientMetadata { self.metadata }
 
-    pub(crate) fn database(&self) -> &str {
-        &self.options.default_database
-    }
+    pub(crate) fn database(&self) -> &str { &self.options.default_database }
 
     #[cfg(feature = "inner_pool")]
     pub(crate) fn finish(&self, conn_idx: usize, weight: u8) {
@@ -509,7 +506,7 @@ mod load {
 
     #[derive(Debug)]
     pub(super) struct AtomicLoad {
-        load_counter: AtomicUsize,
+        load_counter:    AtomicUsize,
         max_connections: u8,
     }
 

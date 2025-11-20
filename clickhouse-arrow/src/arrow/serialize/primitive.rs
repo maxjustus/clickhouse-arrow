@@ -508,12 +508,11 @@ macro_rules! write_float_values {
 }
 
 write_float_values!(write_f32_values, f32, write_u32_le, [Float32Array, Float16Array]);
-write_float_values!(
-    write_f64_values,
-    f64,
-    write_u64_le,
-    [Float64Array, Float32Array, Float16Array]
-);
+write_float_values!(write_f64_values, f64, write_u64_le, [
+    Float64Array,
+    Float32Array,
+    Float16Array
+]);
 
 /// Swaps the endianness of a 256-bit (32-byte) array.
 ///

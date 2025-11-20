@@ -1,5 +1,6 @@
 use super::DeserializerState;
 use crate::io::{ClickHouseRead, ClickHouseWrite};
+use crate::native::sync::ReadAheadBuffer;
 use crate::{Result, Type};
 
 /// Trait for serializing and deserializing data into `ClickHouse`'s native block format.
@@ -43,7 +44,7 @@ pub(crate) trait ProtocolData<Return, Deser: Default> {
     /// # Returns
     /// A `Future` resolving to a `Result` of `Return` (e.g., `RecordBatch`) or
     /// a `Error` if deserialization fails.
-    fn read_async<R: ClickHouseRead>(
+    fn read_async<R: ClickHouseRead + ReadAheadBuffer>(
         reader: &mut R,
         revision: u64,
         options: Self::Options,
@@ -66,13 +67,9 @@ pub(crate) trait EmptyBlock {
 }
 
 impl EmptyBlock for crate::native::block::Block {
-    fn no_data(&self) -> bool {
-        self.column_data.is_empty() && self.column_types.is_empty()
-    }
+    fn no_data(&self) -> bool { self.column_data.is_empty() && self.column_types.is_empty() }
 }
 
 impl EmptyBlock for arrow::record_batch::RecordBatch {
-    fn no_data(&self) -> bool {
-        self.num_rows() == 0 && self.num_columns() == 0
-    }
+    fn no_data(&self) -> bool { self.num_rows() == 0 && self.num_columns() == 0 }
 }

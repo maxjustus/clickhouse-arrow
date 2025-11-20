@@ -1,7 +1,6 @@
-use tokio::io::AsyncReadExt;
-
 use super::{ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
 use crate::io::ClickHouseRead;
+use crate::native::sync::{ParseStatus, SyncReader, parse_array_offsets};
 use crate::{Result, Value};
 
 /// Trait to allow reading `Item`s and packing them into a `Value::*`.
@@ -20,17 +19,11 @@ pub(crate) struct ArrayDeserializer;
 impl ArrayDeserializerGeneric for ArrayDeserializer {
     type Item = Value;
 
-    fn inner_type(type_: &Type) -> Result<&Type> {
-        type_.unwrap_array()
-    }
+    fn inner_type(type_: &Type) -> Result<&Type> { type_.unwrap_array() }
 
-    fn inner_value(items: Vec<Self::Item>) -> Value {
-        Value::Array(items)
-    }
+    fn inner_value(items: Vec<Self::Item>) -> Value { Value::Array(items) }
 
-    fn item_mapping(value: Value) -> Value {
-        value
-    }
+    fn item_mapping(value: Value) -> Value { value }
 }
 
 impl<T: ArrayDeserializerGeneric + 'static> Deserializer for T {
@@ -42,76 +35,58 @@ impl<T: ArrayDeserializerGeneric + 'static> Deserializer for T {
         // Delegate to inner for non-sparse prefixes
         Self::inner_type(type_)?.deserialize_prefix_async(reader, state).await
     }
+}
 
-    async fn read<R: ClickHouseRead>(
-        type_: &Type,
-        reader: &mut R,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        if rows == 0 {
-            return Ok(vec![]);
+fn parse_offsets(rows: usize, reader: &mut SyncReader<'_>) -> Result<ParseStatus<Vec<u64>>> {
+    match parse_array_offsets(rows, reader.remaining())? {
+        ParseStatus::Complete { value, consumed } => {
+            reader.advance(consumed)?;
+            Ok(ParseStatus::Complete { value, consumed: reader.consumed() })
         }
-
-        let mut offsets = Vec::with_capacity(rows);
-        for _ in 0..rows {
-            offsets.push(reader.read_u64_le().await?);
-        }
-
-        let mut items = Self::inner_type(type_)?
-            .deserialize_column(reader, offsets[offsets.len() - 1] as usize, state)
-            .await?
-            .into_iter()
-            .map(Self::item_mapping);
-
-        let mut out = Vec::with_capacity(rows);
-        let mut read_offset = 0u64;
-        for offset in offsets {
-            let len = offset - read_offset;
-            read_offset = offset;
-            #[expect(clippy::cast_possible_truncation)]
-            out.push(Self::inner_value((&mut items).take(len as usize).collect()));
-        }
-
-        Ok(out)
+        ParseStatus::NeedMore { needed } => Ok(ParseStatus::NeedMore { needed }),
     }
 }
 
-pub(crate) async fn read_with_path<R: ClickHouseRead>(
+pub(crate) fn parse_with_path(
     type_: &Type,
-    reader: &mut R,
     rows: usize,
     state: &mut DeserializerState,
     path: &mut Vec<u16>,
-) -> Result<Vec<Value>> {
+    reader: &mut SyncReader<'_>,
+) -> Result<ParseStatus<Vec<Value>>> {
     if rows == 0 {
-        return Ok(vec![]);
+        return Ok(ParseStatus::Complete { value: Vec::new(), consumed: reader.consumed() });
     }
 
-    let mut offsets = Vec::with_capacity(rows);
-    for _ in 0..rows {
-        offsets.push(reader.read_u64_le().await?);
-    }
+    let offsets = match parse_offsets(rows, reader)? {
+        ParseStatus::Complete { value, .. } => value,
+        ParseStatus::NeedMore { needed } => return Ok(ParseStatus::NeedMore { needed }),
+    };
 
-    // Read flattened items
+    let total_items = *offsets.last().unwrap_or(&0) as usize;
+    let inner_type = ArrayDeserializer::inner_type(type_)?;
+
     path.push(0);
-    let mut items = ArrayDeserializer::inner_type(type_)?
-        .deserialize_column_with_path(reader, offsets[offsets.len() - 1] as usize, state, path)
-        .await?
-        .into_iter()
-        .map(ArrayDeserializer::item_mapping);
+    let items = match inner_type.parse_column_sync_with_path(total_items, state, path, reader)? {
+        ParseStatus::Complete { value, .. } => value,
+        ParseStatus::NeedMore { needed } => {
+            let _ = path.pop();
+            return Ok(ParseStatus::NeedMore { needed });
+        }
+    };
     let _ = path.pop();
 
     let mut out = Vec::with_capacity(rows);
-    let mut read_offset = 0u64;
+    let mut iter = items.into_iter();
+    let mut prev = 0u64;
     for offset in offsets {
-        let len = offset - read_offset;
-        read_offset = offset;
-        #[expect(clippy::cast_possible_truncation)]
-        out.push(ArrayDeserializer::inner_value((&mut items).take(len as usize).collect()));
+        let len = offset - prev;
+        prev = offset;
+        #[allow(clippy::cast_possible_truncation)]
+        out.push(ArrayDeserializer::inner_value((&mut iter).take(len as usize).collect()));
     }
 
-    Ok(out)
+    Ok(ParseStatus::Complete { value: out, consumed: reader.consumed() })
 }
 
 #[cfg(test)]
@@ -122,6 +97,7 @@ mod tests {
     use tokio::io::{AsyncRead, ReadBuf};
 
     use super::*;
+    use crate::native::sync::ReadAheadReader;
 
     // Minimal AsyncRead over Bytes
     struct BytesReader(bytes::Bytes);
@@ -185,7 +161,7 @@ mod tests {
         bytes.extend_from_slice(&200u64.to_le_bytes());
         bytes.extend_from_slice(&300u64.to_le_bytes());
 
-        let mut reader = BytesReader(bytes.freeze());
+        let mut reader = ReadAheadReader::new(BytesReader(bytes.freeze()));
         let mut state = DeserializerState::default();
         use crate::native::test_helpers::mk_kind_plan;
         // Plan kinds: [] for Array (ignored), [0] for inner tuple, then elements
@@ -270,7 +246,7 @@ mod tests {
         put_var_uint(&mut bytes, (1u64 << 62) | 1); // end with one trailing default
         bytes.extend_from_slice(&777u64.to_le_bytes());
 
-        let mut reader = BytesReader(bytes.freeze());
+        let mut reader = ReadAheadReader::new(BytesReader(bytes.freeze()));
         let mut state = DeserializerState::default();
         use crate::native::test_helpers::mk_kind_plan;
         state.kind_plan = Some(mk_kind_plan(&[
@@ -361,7 +337,7 @@ mod tests {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
 
-        let mut reader = BytesReader(bytes.freeze());
+        let mut reader = ReadAheadReader::new(BytesReader(bytes.freeze()));
         let mut state = DeserializerState::default();
 
         let out =

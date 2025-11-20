@@ -81,9 +81,7 @@ mod tests {
 
     type MockWriter = Vec<u8>;
 
-    fn wrap_tuple(inner: Vec<Type>) -> Type {
-        Type::Tuple(inner)
-    }
+    fn wrap_tuple(inner: Vec<Type>) -> Type { Type::Tuple(inner) }
 
     #[tokio::test]
     async fn test_serialize_tuple_int32_string() {

@@ -69,10 +69,10 @@ type BlockReadingFuture<'a, R> =
 /// let bytes_read = decompressor.read(&mut buffer).await.unwrap();
 /// ```
 pub(crate) struct StreamingDecompressor<'a, R: ClickHouseRead + 'static> {
-    mode: CompressionMethod,
-    inner: Option<&'a mut R>,
-    decompressed: Vec<u8>,
-    position: usize,
+    mode:                 CompressionMethod,
+    inner:                Option<&'a mut R>,
+    decompressed:         Vec<u8>,
+    position:             usize,
     block_reading_future: Option<BlockReadingFuture<'a, R>>,
 }
 
@@ -95,7 +95,7 @@ impl<'a, R: ClickHouseRead> StreamingDecompressor<'a, R> {
     /// - Decompression errors
     /// - I/O errors reading from the underlying stream
     /// - Memory safety violations (chunk sizes exceeding limits)
-    async fn read_chunk(inner: &mut R, mode: CompressionMethod) -> Result<Option<Vec<u8>>> {
+    pub(crate) async fn read_chunk(inner: &mut R, mode: CompressionMethod) -> Result<Option<Vec<u8>>> {
         let mut checksum_bytes = [0u8; 16];
         checksum_bytes[0] = match inner.read_u8().await {
             Ok(byte) => byte,
@@ -259,6 +259,14 @@ impl<R: ClickHouseRead> AsyncRead for StreamingDecompressor<'_, R> {
     }
 }
 
+/// Convenience helper to read and decompress a single compression frame.
+pub(crate) async fn read_compressed_block<R: ClickHouseRead + 'static>(
+    reader: &mut R,
+    mode: CompressionMethod,
+) -> Result<Option<Vec<u8>>> {
+    StreamingDecompressor::read_chunk(reader, mode).await
+}
+
 /// Async writer that frames and compresses data into `ClickHouse` compression chunks.
 /// Each chunk is written as:
 /// [16 bytes checksum][1 byte type][4 bytes `compressed_size_with_header`][4 bytes
@@ -266,12 +274,12 @@ impl<R: ClickHouseRead> AsyncRead for StreamingDecompressor<'_, R> {
 #[pin_project]
 pub(crate) struct StreamingCompressor<W: AsyncWrite + Unpin> {
     #[pin]
-    inner: W,
-    method: CompressionMethod,
+    inner:                  W,
+    method:                 CompressionMethod,
     max_uncompressed_chunk: usize,
-    in_buf: Vec<u8>,
-    out_buf: Vec<u8>,
-    out_pos: usize,
+    in_buf:                 Vec<u8>,
+    out_buf:                Vec<u8>,
+    out_pos:                usize,
 }
 
 impl<W: AsyncWrite + Unpin> StreamingCompressor<W> {
@@ -288,9 +296,7 @@ impl<W: AsyncWrite + Unpin> StreamingCompressor<W> {
 
     /// Consume the compressor and return the wrapped writer.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn into_inner(self) -> W {
-        self.inner
-    }
+    pub(crate) fn into_inner(self) -> W { self.inner }
 
     fn build_frame(
         method: CompressionMethod,
@@ -457,9 +463,7 @@ mod tests {
     }
 
     impl CollectingWriter {
-        fn into_inner(self) -> Vec<u8> {
-            self.data
-        }
+        fn into_inner(self) -> Vec<u8> { self.data }
     }
 
     impl AsyncWrite for CollectingWriter {

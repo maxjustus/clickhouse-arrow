@@ -7,6 +7,7 @@ pub use arrow::ArrowFormat;
 pub use native::NativeFormat;
 
 use crate::ArrowOptions;
+use crate::native::sync::DEFAULT_SYNC_READ_AHEAD_BYTES;
 // no futures needed after refactor
 // BTreeMap is imported later with HashMap
 
@@ -52,7 +53,7 @@ pub(crate) mod sealed {
             metadata: ClientMetadata,
         ) -> impl Future<Output = Result<()>> + Send + 'a;
 
-        fn read<'a, R: ClickHouseRead + 'static>(
+        fn read<'a, R: ClickHouseRead + crate::native::sync::ReadAheadBuffer + 'static>(
             reader: &'a mut R,
             revision: u64,
             metadata: ClientMetadata,
@@ -62,25 +63,45 @@ pub(crate) mod sealed {
 }
 
 /// Context maintained during deserialization
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeserializerState<T: Default = ()> {
-    pub(crate) options: Option<ArrowOptions>,
-    pub(crate) deserializer: T,
+    pub(crate) options:               Option<ArrowOptions>,
+    pub(crate) deserializer:          T,
+    /// Shared scratch buffer for sync parsers to reuse between columns.
+    pub(crate) sync_buffer:           Vec<u8>,
+    /// Minimum number of bytes to request when a sync parser asks for more data.
+    pub(crate) sync_read_ahead_bytes: usize,
     // TODO: just wondering out loud. We do kind_plan for all paths in one pass but we have a
     // single type_specific state. Are these sort of inconsistent patterns or does it make sense?
     // Type specific is sort of a container for state as we deserialize so maybe it makes sense?
-    pub(crate) type_specific: TypeSpecificState,
+    pub(crate) type_specific:         TypeSpecificState,
     // Sparse/custom plan and traversal state
     // When present, maps a type-path (sequence of child indexes from column root)
     // to a kind byte (0 = DEFAULT, non-zero = SPARSE).
     // TODO: kind is too general. Should this serialization_type_by_path?
-    pub(crate) kind_plan: Option<BTreeMap<Vec<u16>, u8>>,
+    pub(crate) kind_plan:             Option<BTreeMap<Vec<u16>, u8>>,
     // TODO: this feels like a bad name. Maybe `sparse_format_state`?
     // Runtime sparse state per leaf path: (num_trailing_defaults, has_value_after_defaults)
-    pub(crate) sparse_runtime: BTreeMap<Vec<u16>, (usize, bool)>,
+    pub(crate) sparse_runtime:        BTreeMap<Vec<u16>, (usize, bool)>,
 }
 
 impl<T: Default> DeserializerState<T> {
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) fn with_sync_read_ahead_bytes(mut self, bytes: usize) -> Self {
+        self.sync_read_ahead_bytes = bytes.max(1);
+        self
+    }
+
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) fn sync_read_ahead_bytes(&self) -> usize { self.sync_read_ahead_bytes }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_sync_read_ahead_bytes(&mut self, bytes: usize) {
+        self.sync_read_ahead_bytes = bytes.max(1);
+    }
+
     #[must_use]
     pub(crate) fn with_arrow_options(mut self, options: ArrowOptions) -> Self {
         self.options = Some(options);
@@ -88,9 +109,7 @@ impl<T: Default> DeserializerState<T> {
     }
 
     #[must_use]
-    pub(crate) fn deserializer(&mut self) -> &mut T {
-        &mut self.deserializer
-    }
+    pub(crate) fn deserializer(&mut self) -> &mut T { &mut self.deserializer }
 
     /// Look up the custom/sparse kind byte for a given path, falling back to parent paths.
     #[must_use]
@@ -116,13 +135,27 @@ impl<T: Default> DeserializerState<T> {
     }
 }
 
+impl<T: Default> Default for DeserializerState<T> {
+    fn default() -> Self {
+        Self {
+            options:               None,
+            deserializer:          T::default(),
+            sync_buffer:           Vec::new(),
+            sync_read_ahead_bytes: DEFAULT_SYNC_READ_AHEAD_BYTES,
+            type_specific:         TypeSpecificState::default(),
+            kind_plan:             None,
+            sparse_runtime:        BTreeMap::new(),
+        }
+    }
+}
+
 /// Context maintained during serialization
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct SerializerState<T: Default = ()> {
-    pub(crate) options: Option<ArrowOptions>,
-    pub(crate) serializer: T,
+    pub(crate) options:        Option<ArrowOptions>,
+    pub(crate) serializer:     T,
     pub(crate) server_version: Option<(u64, u64, u64)>,
-    pub(crate) type_specific: TypeSpecificState,
+    pub(crate) type_specific:  TypeSpecificState,
 }
 
 impl<T: Default> SerializerState<T> {
@@ -140,9 +173,7 @@ impl<T: Default> SerializerState<T> {
 
     #[expect(unused)]
     #[must_use]
-    pub(crate) fn serializer(&mut self) -> &mut T {
-        &mut self.serializer
-    }
+    pub(crate) fn serializer(&mut self) -> &mut T { &mut self.serializer }
 }
 
 use std::collections::{BTreeMap, HashMap};
@@ -156,37 +187,37 @@ pub(crate) type DynamicTypeData = Vec<(u64, Vec<(String, Type)>)>;
 /// Metadata for Dynamic type
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DynamicState {
-    pub version: Option<u64>,
+    pub version:     Option<u64>,
     pub total_types: u64,
-    pub type_names: Vec<String>,
-    pub type_map: HashMap<String, (usize, Type)>,
-    pub types: Vec<(String, Type)>,
+    pub type_names:  Vec<String>,
+    pub type_map:    HashMap<String, (usize, Type)>,
+    pub types:       Vec<(String, Type)>,
 }
 
 /// Metadata for JSON type
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JsonState {
-    pub version: Option<u64>,
+    pub version:                  Option<u64>,
     /// Dynamic paths that will use Dynamic serialization
-    pub dynamic_paths: Vec<String>,
+    pub dynamic_paths:            Vec<String>,
     /// Typed paths with their declared types
-    pub typed_paths: Vec<(String, Type)>,
+    pub typed_paths:              Vec<(String, Type)>,
     /// Column data for dynamic paths
-    pub dynamic_path_columns: Option<BTreeMap<String, Vec<Value>>>,
+    pub dynamic_path_columns:     Option<BTreeMap<String, Vec<Value>>>,
     /// Column data for typed paths (path -> values)
-    pub typed_path_columns: Option<BTreeMap<String, Vec<Value>>>,
-    pub rows: Option<usize>,
-    pub dynamic_data: Option<DynamicTypeData>,
+    pub typed_path_columns:       Option<BTreeMap<String, Vec<Value>>>,
+    pub rows:                     Option<usize>,
+    pub dynamic_data:             Option<DynamicTypeData>,
     /// Dynamic states for each dynamic path (filled during `write_prefix`)
-    pub path_dynamic_states: BTreeMap<String, DynamicState>,
+    pub path_dynamic_states:      BTreeMap<String, DynamicState>,
     /// Serialization states for each typed path (filled during `analyze_values`)
     pub(crate) typed_path_states: BTreeMap<String, SerializerState>,
     /// Cached path segmentation for faster nested JSON assembly (path -> segments)
-    pub path_segments: BTreeMap<String, Vec<String>>,
+    pub path_segments:            BTreeMap<String, Vec<String>>,
 
     // Deprecated - kept for compatibility during migration
     #[deprecated(note = "Use dynamic_paths instead")]
-    pub paths: Vec<String>,
+    pub paths:        Vec<String>,
     #[deprecated(note = "Use dynamic_path_columns instead")]
     pub path_columns: Option<BTreeMap<String, Vec<Value>>>,
 }

@@ -43,45 +43,14 @@ impl Deserializer for TupleDeserializer {
         }
         Ok(())
     }
-
-    async fn read<R: ClickHouseRead>(
-        type_: &Type,
-        reader: &mut R,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        let mut column_data = Vec::new();
-        let fields_len = match type_ {
-            Type::Tuple(inner_types) => {
-                column_data.reserve(inner_types.len());
-                for type_ in inner_types.iter() {
-                    let data = type_.deserialize_column(reader, rows, state).await?;
-                    column_data.push(data);
-                }
-                inner_types.len()
-            }
-            Type::TupleNamed(fields) => {
-                column_data.reserve(fields.len());
-                for (_, type_) in fields.iter() {
-                    let data = type_.deserialize_column(reader, rows, state).await?;
-                    column_data.push(data);
-                }
-                fields.len()
-            }
-            _ => unreachable!(),
-        };
-
-        Ok(build_tuples(rows, fields_len, column_data))
-    }
 }
-
-pub(crate) async fn read_with_path<R: ClickHouseRead>(
+pub(crate) fn parse_with_path(
     type_: &Type,
-    reader: &mut R,
     rows: usize,
     state: &mut DeserializerState,
     path: &mut Vec<u16>,
-) -> Result<Vec<Value>> {
+    reader: &mut crate::native::sync::SyncReader<'_>,
+) -> Result<crate::native::sync::ParseStatus<Vec<Value>>> {
     let mut column_data = Vec::new();
     let fields_len = match type_ {
         Type::Tuple(inner_types) => {
@@ -89,7 +58,13 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
             for (idx, type_) in inner_types.iter().enumerate() {
                 #[allow(clippy::cast_possible_truncation)]
                 path.push(idx as u16);
-                let data = type_.deserialize_column_with_path(reader, rows, state, path).await?;
+                let data = match type_.parse_column_sync_with_path(rows, state, path, reader)? {
+                    crate::native::sync::ParseStatus::Complete { value, .. } => value,
+                    crate::native::sync::ParseStatus::NeedMore { needed } => {
+                        let _ = path.pop();
+                        return Ok(crate::native::sync::ParseStatus::NeedMore { needed });
+                    }
+                };
                 let _ = path.pop();
                 column_data.push(data);
             }
@@ -100,7 +75,13 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
             for (idx, (_, type_)) in fields.iter().enumerate() {
                 #[allow(clippy::cast_possible_truncation)]
                 path.push(idx as u16);
-                let data = type_.deserialize_column_with_path(reader, rows, state, path).await?;
+                let data = match type_.parse_column_sync_with_path(rows, state, path, reader)? {
+                    crate::native::sync::ParseStatus::Complete { value, .. } => value,
+                    crate::native::sync::ParseStatus::NeedMore { needed } => {
+                        let _ = path.pop();
+                        return Ok(crate::native::sync::ParseStatus::NeedMore { needed });
+                    }
+                };
                 let _ = path.pop();
                 column_data.push(data);
             }
@@ -109,7 +90,10 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
         _ => unreachable!(),
     };
 
-    Ok(build_tuples(rows, fields_len, column_data))
+    Ok(crate::native::sync::ParseStatus::Complete {
+        value:    build_tuples(rows, fields_len, column_data),
+        consumed: reader.consumed(),
+    })
 }
 
 #[cfg(test)]
@@ -118,6 +102,7 @@ mod tests {
     use tokio::io::{AsyncRead, ReadBuf};
 
     use super::*;
+    use crate::native::sync::ReadAheadReader;
 
     // Minimal AsyncRead over Bytes
     struct BytesReader(bytes::Bytes);
@@ -190,7 +175,7 @@ mod tests {
         bytes.extend_from_slice(&u1a.to_le_bytes());
         bytes.extend_from_slice(&u1b.to_le_bytes());
 
-        let mut reader = BytesReader(bytes.freeze());
+        let mut reader = ReadAheadReader::new(BytesReader(bytes.freeze()));
 
         // Prepare state with kind plan
         let mut state = DeserializerState::default();
@@ -303,7 +288,7 @@ mod tests {
         bytes.extend_from_slice(&b1.to_le_bytes());
         bytes.extend_from_slice(&b2.to_le_bytes());
 
-        let mut reader = BytesReader(bytes.freeze());
+        let mut reader = ReadAheadReader::new(BytesReader(bytes.freeze()));
         let mut state = DeserializerState::default();
         use crate::native::test_helpers::mk_kind_plan;
         state.kind_plan = Some(mk_kind_plan(&[

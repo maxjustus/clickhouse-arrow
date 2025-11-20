@@ -1,8 +1,6 @@
-use tokio::io::AsyncReadExt;
-
 use super::{ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
 use crate::io::ClickHouseRead;
-use crate::native::protocol::MAX_STRING_SIZE;
+use crate::native::sync::{ParseStatus, SyncReader, parse_array_offsets};
 use crate::native::values::Value;
 use crate::{Error, Result};
 
@@ -28,114 +26,78 @@ impl Deserializer for MapDeserializer {
         }
         Ok(())
     }
+}
 
-    async fn read<R: ClickHouseRead>(
-        type_: &Type,
-        reader: &mut R,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        if rows > MAX_STRING_SIZE {
-            return Err(Error::Protocol(format!(
-                "read_n response size too large for map. {rows} > {MAX_STRING_SIZE}"
-            )));
+fn parse_offsets(rows: usize, reader: &mut SyncReader<'_>) -> Result<ParseStatus<Vec<u64>>> {
+    match parse_array_offsets(rows, reader.remaining())? {
+        ParseStatus::Complete { value, consumed } => {
+            reader.advance(consumed)?;
+            Ok(ParseStatus::Complete { value, consumed: reader.consumed() })
         }
-        if rows == 0 {
-            return Ok(vec![]);
-        }
-
-        let Type::Map(key, value) = type_ else {
-            return Err(Error::DeserializeError(
-                "MapDeserializer called with non-map type".to_string(),
-            ));
-        };
-
-        let mut offsets: Vec<u64> = Vec::with_capacity(rows);
-        for _ in 0..rows {
-            offsets.push(reader.read_u64_le().await?);
-        }
-
-        #[expect(clippy::cast_possible_truncation)]
-        let total_length = *offsets.last().unwrap() as usize;
-
-        let keys = key.deserialize_column(reader, total_length, state).await?;
-        assert_eq!(keys.len(), total_length);
-        let values = value.deserialize_column(reader, total_length, state).await?;
-        assert_eq!(values.len(), total_length);
-
-        let mut keys = keys.into_iter();
-        let mut values = values.into_iter();
-        let mut out = Vec::with_capacity(rows);
-        let mut last_offset = 0u64;
-        for offset in offsets {
-            let mut key_out = vec![];
-            let mut value_out = vec![];
-            while last_offset < offset {
-                key_out.push(keys.next().unwrap());
-                value_out.push(values.next().unwrap());
-                last_offset += 1;
-            }
-            out.push(Value::Map(key_out, value_out));
-        }
-        Ok(out)
+        ParseStatus::NeedMore { needed } => Ok(ParseStatus::NeedMore { needed }),
     }
 }
 
-pub(crate) async fn read_with_path<R: ClickHouseRead>(
+pub(crate) fn parse_with_path(
     type_: &Type,
-    reader: &mut R,
     rows: usize,
     state: &mut DeserializerState,
     path: &mut Vec<u16>,
-) -> Result<Vec<Value>> {
-    use crate::native::protocol::MAX_STRING_SIZE;
-    use crate::native::values::Value;
-    if rows > MAX_STRING_SIZE {
-        return Err(Error::Protocol(format!(
-            "read_n response size too large for map. {rows} > {MAX_STRING_SIZE}"
-        )));
-    }
+    reader: &mut SyncReader<'_>,
+) -> Result<ParseStatus<Vec<Value>>> {
     if rows == 0 {
-        return Ok(vec![]);
+        return Ok(ParseStatus::Complete { value: Vec::new(), consumed: reader.consumed() });
     }
-
     let Type::Map(key, value) = type_ else {
         return Err(Error::DeserializeError(
             "MapDeserializer called with non-map type".to_string(),
         ));
     };
 
-    let mut offsets: Vec<u64> = Vec::with_capacity(rows);
-    for _ in 0..rows {
-        offsets.push(reader.read_u64_le().await?);
-    }
+    let offsets = match parse_offsets(rows, reader)? {
+        ParseStatus::Complete { value, .. } => value,
+        ParseStatus::NeedMore { needed } => return Ok(ParseStatus::NeedMore { needed }),
+    };
+
+    #[expect(clippy::cast_possible_truncation)]
     let total_length = *offsets.last().unwrap() as usize;
 
-    // Read keys under path [0]
+    // keys path 0
     path.push(0);
-    let keys = key.deserialize_column_with_path(reader, total_length, state, path).await?;
+    let keys = match key.parse_column_sync_with_path(total_length, state, path, reader)? {
+        ParseStatus::Complete { value, .. } => value,
+        ParseStatus::NeedMore { needed } => {
+            let _ = path.pop();
+            return Ok(ParseStatus::NeedMore { needed });
+        }
+    };
     let _ = path.pop();
-    assert_eq!(keys.len(), total_length);
 
-    // Read values under path [1]
+    // values path 1
     path.push(1);
-    let values = value.deserialize_column_with_path(reader, total_length, state, path).await?;
+    let values = match value.parse_column_sync_with_path(total_length, state, path, reader)? {
+        ParseStatus::Complete { value, .. } => value,
+        ParseStatus::NeedMore { needed } => {
+            let _ = path.pop();
+            return Ok(ParseStatus::NeedMore { needed });
+        }
+    };
     let _ = path.pop();
-    assert_eq!(values.len(), total_length);
 
-    let mut keys = keys.into_iter();
-    let mut values = values.into_iter();
+    let mut keys_iter = keys.into_iter();
+    let mut vals_iter = values.into_iter();
     let mut out = Vec::with_capacity(rows);
     let mut last_offset = 0u64;
     for offset in offsets {
-        let mut key_out = vec![];
-        let mut value_out = vec![];
+        let mut kvec = Vec::new();
+        let mut vvec = Vec::new();
         while last_offset < offset {
-            key_out.push(keys.next().unwrap());
-            value_out.push(values.next().unwrap());
+            kvec.push(keys_iter.next().unwrap());
+            vvec.push(vals_iter.next().unwrap());
             last_offset += 1;
         }
-        out.push(Value::Map(key_out, value_out));
+        out.push(Value::Map(kvec, vvec));
     }
-    Ok(out)
+
+    Ok(ParseStatus::Complete { value: out, consumed: reader.consumed() })
 }

@@ -86,29 +86,29 @@ pub(crate) enum QueryProcessingStage {
 #[repr(u64)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ClientPacketId {
-    Hello = 0, // Name, version, revision, default DB
+    Hello                     = 0, // Name, version, revision, default DB
     // Query id, query settings, stage up to which the query must be executed, whether the
     // compression must be used, query text (without data for INSERTs).
-    Query = 1,
-    Data = 2,                // A block of data (compressed or not).
-    Cancel = 3,              // Cancel the query execution.
-    Ping = 4,                // Check that connection to the server is alive.
-    TablesStatusRequest = 5, // Check status of tables on the server.
-    KeepAlive = 6,           // Keep the connection alive
-    Scalar = 7,              // A block of data (compressed or not).
-    IgnoredPartUUIDs = 8,    // List of unique parts ids to exclude from query processing
-    ReadTaskResponse = 9,    // A filename to read from s3 (used in s3Cluster)
+    Query                     = 1,
+    Data                      = 2, // A block of data (compressed or not).
+    Cancel                    = 3, // Cancel the query execution.
+    Ping                      = 4, // Check that connection to the server is alive.
+    TablesStatusRequest       = 5, // Check status of tables on the server.
+    KeepAlive                 = 6, // Keep the connection alive
+    Scalar                    = 7, // A block of data (compressed or not).
+    IgnoredPartUUIDs          = 8, // List of unique parts ids to exclude from query processing
+    ReadTaskResponse          = 9, // A filename to read from s3 (used in s3Cluster)
     //Coordinator's decision with a modified set of mark ranges allowed to read
     MergeTreeReadTaskResponse = 10,
-    SSHChallengeRequest = 11,  // Request SSH signature challenge
-    SSHChallengeResponse = 12, // Reply to SSH signature challenge
-    QueryPlan = 13,            // Query plan
+    SSHChallengeRequest       = 11, // Request SSH signature challenge
+    SSHChallengeResponse      = 12, // Reply to SSH signature challenge
+    QueryPlan                 = 13, // Query plan
 }
 
 pub(crate) struct ClientHello {
     pub(crate) default_database: String,
-    pub(crate) username: String,
-    pub(crate) password: String,
+    pub(crate) username:         String,
+    pub(crate) password:         String,
 }
 
 /// `ServerPacketId` is the packet id read from `ClickHouse`.
@@ -117,25 +117,25 @@ pub(crate) struct ClientHello {
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, AsRefStr)]
 pub(crate) enum ServerPacketId {
-    Hello = 0,
-    Data = 1,
-    Exception = 2,
-    Progress = 3,
-    Pong = 4,
-    EndOfStream = 5,
-    ProfileInfo = 6,
-    Totals = 7,
-    Extremes = 8,
-    TablesStatusResponse = 9,
-    Log = 10,
-    TableColumns = 11,
-    PartUUIDs = 12,
-    ReadTaskRequest = 13,
-    ProfileEvents = 14,
+    Hello                          = 0,
+    Data                           = 1,
+    Exception                      = 2,
+    Progress                       = 3,
+    Pong                           = 4,
+    EndOfStream                    = 5,
+    ProfileInfo                    = 6,
+    Totals                         = 7,
+    Extremes                       = 8,
+    TablesStatusResponse           = 9,
+    Log                            = 10,
+    TableColumns                   = 11,
+    PartUUIDs                      = 12,
+    ReadTaskRequest                = 13,
+    ProfileEvents                  = 14,
     MergeTreeAllRangesAnnouncement = 15,
-    MergeTreeReadTaskRequest = 16, // Request from a MergeTree replica to a coordinator
-    TimezoneUpdate = 17,           // Receive server's (session-wide) default timezone
-    SSHChallenge = 18,             // Return challenge for SSH signature signing
+    MergeTreeReadTaskRequest       = 16, // Request from a MergeTree replica to a coordinator
+    TimezoneUpdate                 = 17, // Receive server's (session-wide) default timezone
+    SSHChallenge                   = 18, // Return challenge for SSH signature signing
 }
 
 impl ServerPacketId {
@@ -199,16 +199,16 @@ pub(crate) enum ServerPacket<T = Block> {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ServerHello {
     #[expect(unused)]
-    pub(crate) server_name: String,
-    pub(crate) version: (u64, u64, u64),
+    pub(crate) server_name:      String,
+    pub(crate) version:          (u64, u64, u64),
     pub(crate) revision_version: u64,
     #[expect(unused)]
-    pub(crate) timezone: Option<String>,
+    pub(crate) timezone:         Option<String>,
     #[expect(unused)]
-    pub(crate) display_name: Option<String>,
-    pub(crate) settings: Option<Settings>,
-    pub(crate) chunked_send: ChunkedProtocolMode,
-    pub(crate) chunked_recv: ChunkedProtocolMode,
+    pub(crate) display_name:     Option<String>,
+    pub(crate) settings:         Option<Settings>,
+    pub(crate) chunked_send:     ChunkedProtocolMode,
+    pub(crate) chunked_recv:     ChunkedProtocolMode,
 }
 
 impl ServerHello {
@@ -234,43 +234,41 @@ pub(crate) struct ServerData<T> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ServerException {
-    pub(crate) code: i32,
-    pub(crate) name: String,
-    pub(crate) message: String,
+    pub(crate) code:        i32,
+    pub(crate) name:        String,
+    pub(crate) message:     String,
     pub(crate) stack_trace: String,
     #[expect(unused)]
-    pub(crate) has_nested: bool,
+    pub(crate) has_nested:  bool,
 }
 
 impl ServerException {
-    pub(crate) fn emit(self) -> ServerError {
-        map_exception_to_error(self)
-    }
+    pub(crate) fn emit(self) -> ServerError { map_exception_to_error(self) }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ProfileInfo {
-    pub rows: u64,
-    pub blocks: u64,
-    pub bytes: u64,
-    pub applied_limit: bool,
-    pub rows_before_limit: u64,
+    pub rows:                         u64,
+    pub blocks:                       u64,
+    pub bytes:                        u64,
+    pub applied_limit:                bool,
+    pub rows_before_limit:            u64,
     pub calculated_rows_before_limit: bool,
-    pub applied_aggregation: bool,
-    pub rows_before_aggregation: u64,
+    pub applied_aggregation:          bool,
+    pub rows_before_aggregation:      u64,
 }
 
 #[expect(unused)]
 #[derive(Debug, Clone)]
 pub(crate) struct TableColumns {
-    pub(crate) name: String,
+    pub(crate) name:        String,
     pub(crate) description: String,
 }
 
 #[expect(unused)]
 #[derive(Debug, Clone)]
 pub(crate) struct TableStatus {
-    pub(crate) is_replicated: bool,
+    pub(crate) is_replicated:  bool,
     pub(crate) absolute_delay: u32,
 }
 
@@ -281,14 +279,14 @@ pub(crate) struct TablesStatusResponse {
 
 #[derive(Debug, Clone, Default)]
 pub struct LogData {
-    pub time: String,
+    pub time:              String,
     pub time_microseconds: u32,
-    pub host_name: String,
-    pub query_id: String,
-    pub thread_id: u64,
-    pub priority: i8,
-    pub source: String,
-    pub text: String,
+    pub host_name:         String,
+    pub query_id:          String,
+    pub thread_id:         u64,
+    pub priority:          i8,
+    pub source:            String,
+    pub text:              String,
 }
 
 impl LogData {
@@ -326,12 +324,12 @@ impl LogData {
 /// Emitted by `ClickHouse` during operations.
 #[derive(Debug, Clone, Default)]
 pub struct ProfileEvent {
-    pub host_name: String,
+    pub host_name:    String,
     pub current_time: String,
-    pub thread_id: u64,
-    pub type_name: String,
-    pub name: String,
-    pub value: i64,
+    pub thread_id:    u64,
+    pub type_name:    String,
+    pub name:         String,
+    pub value:        i64,
 }
 
 impl ProfileEvent {

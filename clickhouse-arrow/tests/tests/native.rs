@@ -194,7 +194,7 @@ pub async fn test_insert_into_nonjson_multi(ch: Arc<ClickHouseContainer>) {
 
     #[derive(clickhouse_arrow_derive::Row, Debug)]
     struct RowOut {
-        id: u32,
+        id:   u32,
         name: String,
     }
     let mut rows = client
@@ -264,7 +264,7 @@ pub async fn test_insert_into_mixed_json(ch: Arc<ClickHouseContainer>) {
 
     #[derive(clickhouse_arrow_derive::Row, Debug)]
     struct RowOut {
-        ts: u32,
+        ts:   u32,
         data: serde_json::Value,
     }
     let mut rows = client
@@ -409,7 +409,7 @@ pub async fn test_json_direct_deserialize(ch: Arc<ClickHouseContainer>) {
 
     #[derive(Deserialize, Serialize, Debug, PartialEq, Eq)]
     struct Data {
-        id: u32,
+        id:   u32,
         name: String,
     }
     #[derive(clickhouse_arrow_derive::Row, Debug)]

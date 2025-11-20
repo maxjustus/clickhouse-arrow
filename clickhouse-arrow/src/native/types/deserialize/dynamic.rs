@@ -5,7 +5,8 @@ use tokio::io::AsyncReadExt;
 use crate::Result;
 use crate::formats::{DeserializerState, DynamicState, TypeSpecificState};
 use crate::io::ClickHouseRead;
-use crate::native::types::deserialize::{ClickHouseNativeDeserializer, read_discriminator};
+use crate::native::sync::{ParseStatus, SyncReader, parse_discriminator};
+use crate::native::types::deserialize::ClickHouseNativeDeserializer;
 use crate::native::types::{Type, Value};
 
 // Using FLATTENED format (version 3) for client compatibility
@@ -71,58 +72,6 @@ impl DynamicDeserializer {
             .collect()
     }
 
-    /// Read Dynamic data (async version)
-    async fn read_internal_async<R: ClickHouseRead>(
-        _: &Type,
-        reader: &mut R,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        let (version, total_types, types) =
-            if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-                (
-                    dynamic_state.version.unwrap_or(DYNAMIC_VERSION_FLATTENED),
-                    dynamic_state.total_types,
-                    dynamic_state.types.clone(),
-                )
-            } else {
-                return Err(crate::Error::DeserializeError(
-                    "Dynamic metadata not set in state".to_string(),
-                ));
-            };
-
-        if version != DYNAMIC_VERSION_FLATTENED {
-            return Err(crate::Error::DeserializeError(format!(
-                "Dynamic type requires version 3, got version {version}. Please use ClickHouse \
-                 server >= 25.6"
-            )));
-        }
-
-        // v3 format: variable-sized discriminators
-        let mut discriminators = Vec::with_capacity(rows);
-        for _ in 0..rows {
-            discriminators.push(read_discriminator!(async reader, total_types));
-        }
-
-        // Build offsets and count rows
-        let (offsets, row_count_by_type) = Self::build_offsets(&discriminators, total_types);
-
-        // Read column data for each type
-        let mut columns = HashMap::new();
-        for (idx, (_, typ)) in types.iter().enumerate() {
-            let type_idx = idx as u64;
-            if let Some(&count) = row_count_by_type.get(&type_idx)
-                && count > 0
-            {
-                let column_values = typ.deserialize_column(reader, count, state).await?;
-                let old = columns.insert(type_idx, column_values);
-                debug_assert!(old.is_none(), "Duplicate type index");
-            }
-        }
-
-        Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)
-    }
-
     pub(crate) async fn read_prefix<R: ClickHouseRead>(
         _type: &Type,
         reader: &mut R,
@@ -168,17 +117,69 @@ impl DynamicDeserializer {
         Ok(())
     }
 
-    #[allow(clippy::used_underscore_binding)]
-    pub(crate) async fn read_async<R: ClickHouseRead>(
+    pub(crate) fn parse_with_path(
         _type: &Type,
-        reader: &mut R,
         rows: usize,
         state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        Self::read_internal_async(_type, reader, rows, state).await
-    }
+        _path: &mut Vec<u16>,
+        reader: &mut SyncReader<'_>,
+    ) -> Result<ParseStatus<Vec<Value>>> {
+        if rows == 0 {
+            return Ok(ParseStatus::Complete { value: Vec::new(), consumed: reader.consumed() });
+        }
 
-    // Removed sync read_prefix; async-only path is supported.
+        let (version, total_types, types) = match &state.type_specific {
+            TypeSpecificState::Dynamic(dynamic_state) => (
+                dynamic_state.version.unwrap_or(DYNAMIC_VERSION_FLATTENED),
+                dynamic_state.total_types,
+                dynamic_state.types.clone(),
+            ),
+            _ => {
+                return Err(crate::Error::DeserializeError(
+                    "Dynamic metadata not set in state".to_string(),
+                ));
+            }
+        };
+
+        if version != DYNAMIC_VERSION_FLATTENED {
+            return Err(crate::Error::DeserializeError(format!(
+                "Dynamic type requires version 3, got version {version}. Please use ClickHouse \
+                 server >= 25.6"
+            )));
+        }
+
+        let mut discriminators = Vec::with_capacity(rows);
+        for _ in 0..rows {
+            match parse_discriminator(total_types, reader)? {
+                ParseStatus::Complete { value, .. } => discriminators.push(value),
+                ParseStatus::NeedMore { needed } => return Ok(ParseStatus::NeedMore { needed }),
+            }
+        }
+
+        let (offsets, row_count_by_type) = Self::build_offsets(&discriminators, total_types);
+
+        let mut columns = HashMap::new();
+        for (idx, (_, typ)) in types.iter().enumerate() {
+            let type_idx = idx as u64;
+            if let Some(&count) = row_count_by_type.get(&type_idx)
+                && count > 0
+            {
+                let mut child_path = Vec::new();
+                match typ.parse_column_sync_with_path(count, state, &mut child_path, reader)? {
+                    ParseStatus::Complete { value, .. } => {
+                        let old = columns.insert(type_idx, value);
+                        debug_assert!(old.is_none(), "duplicate dynamic type index");
+                    }
+                    ParseStatus::NeedMore { needed } => {
+                        return Ok(ParseStatus::NeedMore { needed });
+                    }
+                }
+            }
+        }
+
+        let values = Self::reconstruct_values(&discriminators, &offsets, &columns, total_types)?;
+        Ok(ParseStatus::Complete { value: values, consumed: reader.consumed() })
+    }
 }
 
 #[cfg(test)]

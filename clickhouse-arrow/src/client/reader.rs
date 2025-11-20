@@ -23,6 +23,7 @@ use crate::native::protocol::{
     ProfileEvent, ProfileInfo, ServerData, ServerException, ServerHello, ServerPacket,
     ServerPacketId, TableColumns, TableStatus, TablesStatusResponse,
 };
+use crate::native::sync::ReadAheadBuffer;
 use crate::prelude::*;
 use crate::{Error, FxIndexMap, Result};
 
@@ -50,115 +51,6 @@ impl<R: ClickHouseRead + 'static> Reader<R> {
             ServerPacketId::Exception => Err(Self::read_exception(reader).await?.emit().into()),
             packet => {
                 Err(Error::Protocol(format!("Unexpected packet {packet:?}, expected server hello")))
-            }
-        }
-    }
-
-    /// Receive header packet (empty native block)
-    pub(super) async fn receive_header<T: ClientFormat>(
-        reader: &mut R,
-        revision: u64,
-        metadata: ClientMetadata,
-    ) -> Result<ServerPacket<T::Data>> {
-        let packet = ServerPacketId::from_u64(reader.read_var_uint().await?)
-            .inspect_err(|error| error!(?error, "Failed to read packet ID"))?;
-        trace!({ ATT_PID } = packet.as_ref(), "Read packet ID (header)");
-        match packet {
-            ServerPacketId::Data => Self::read_block(reader, revision, metadata)
-                .await?
-                .ok_or(Error::Protocol("Expected valid block for header".into()))
-                .map(ServerPacket::Header),
-            // NOTE: For DDL queries and some other cases, the server will not send a header but
-            // will send a progress packet or table columns instead.
-            ServerPacketId::Progress => {
-                Self::read_progress(reader, revision).await.map(ServerPacket::Progress)
-            }
-            // Accept pre-header events/logs/info as some servers may emit them early
-            ServerPacketId::ProfileEvents => Self::read_profile_events(reader, revision, metadata)
-                .await
-                .map(ServerPacket::ProfileEvents),
-            ServerPacketId::Log => {
-                Self::read_log_data(reader, revision, metadata).await.map(ServerPacket::Log)
-            }
-            ServerPacketId::ProfileInfo => {
-                Self::read_profile_info(reader, revision).await.map(ServerPacket::ProfileInfo)
-            }
-            ServerPacketId::TableColumns => {
-                Self::read_table_columns(reader).await.map(ServerPacket::TableColumns)
-            }
-            ServerPacketId::EndOfStream => Ok(ServerPacket::EndOfStream),
-            // Errors
-            ServerPacketId::Exception => {
-                Self::read_exception(reader).await.map(ServerPacket::Exception)
-            }
-            ServerPacketId::Hello => {
-                Err(Error::Protocol("Unexpected hello received from server".to_string()))
-            }
-            packet => {
-                Err(Error::Protocol(format!("expected header packet, got: {}", packet.as_ref())))
-            }
-        }
-    }
-
-    /// Receive any packet from the server
-    pub(super) async fn receive_packet<T: ClientFormat>(
-        reader: &mut R,
-        revision: u64,
-        metadata: ClientMetadata,
-        state: &mut DeserializerState<T::Deser>,
-    ) -> Result<ServerPacket<T::Data>> {
-        let packet_id = reader.read_var_uint().await?;
-        let packet = ServerPacketId::from_u64(packet_id)
-            .inspect_err(|error| error!(?error, "Failed to read packet ID"))?;
-        trace!({ ATT_PID } = packet.as_ref(), "Read packet ID");
-        match packet {
-            ServerPacketId::Pong => Ok(ServerPacket::Pong),
-            ServerPacketId::Data => Ok(Self::read_data::<T>(reader, revision, metadata, state)
-                .await?
-                .map_or(ServerPacket::Ignore(ServerPacketId::Data), ServerPacket::Data)),
-            ServerPacketId::Exception => {
-                Self::read_exception(reader).await.map(ServerPacket::Exception)
-            }
-            ServerPacketId::Progress => {
-                Self::read_progress(reader, revision).await.map(ServerPacket::Progress)
-            }
-            ServerPacketId::EndOfStream => Ok(ServerPacket::EndOfStream),
-            ServerPacketId::ProfileInfo => {
-                Self::read_profile_info(reader, revision).await.map(ServerPacket::ProfileInfo)
-            }
-            ServerPacketId::Totals => Ok(Self::read_data::<T>(reader, revision, metadata, state)
-                .await?
-                .map_or(ServerPacket::Ignore(ServerPacketId::Totals), ServerPacket::Totals)),
-            ServerPacketId::Extremes => Ok(Self::read_data::<T>(reader, revision, metadata, state)
-                .await?
-                .map_or(ServerPacket::Ignore(ServerPacketId::Extremes), ServerPacket::Extremes)),
-            ServerPacketId::TablesStatusResponse => Self::read_table_status_response(reader)
-                .await
-                .map(ServerPacket::TablesStatusResponse),
-            ServerPacketId::Log => {
-                Self::read_log_data(reader, revision, metadata).await.map(ServerPacket::Log)
-            }
-            ServerPacketId::TableColumns => {
-                Self::read_table_columns(reader).await.map(ServerPacket::TableColumns)
-            }
-            ServerPacketId::PartUUIDs => {
-                Self::read_part_uuids(reader).await.map(ServerPacket::PartUUIDs)
-            }
-            ServerPacketId::ReadTaskRequest => {
-                Self::read_task_request(reader).await.map(ServerPacket::ReadTaskRequest)
-            }
-            ServerPacketId::ProfileEvents => Self::read_profile_events(reader, revision, metadata)
-                .await
-                .map(ServerPacket::ProfileEvents),
-            // TODO: These currently are not correct. They are placeholders but must be deserialized
-            ServerPacketId::MergeTreeAllRangesAnnouncement => {
-                Ok(ServerPacket::MergeTreeAllRangesAnnouncement)
-            }
-            ServerPacketId::MergeTreeReadTaskRequest => Ok(ServerPacket::MergeTreeReadTaskRequest),
-            ServerPacketId::TimezoneUpdate => Ok(ServerPacket::TimezoneUpdate),
-            ServerPacketId::SSHChallenge => Ok(ServerPacket::SSHChallenge),
-            ServerPacketId::Hello => {
-                Err(Error::Protocol("Uexpected hello received from server".to_string()))
             }
         }
     }
@@ -295,6 +187,117 @@ impl<R: ClickHouseRead + 'static> Reader<R> {
             chunked_send,
             chunked_recv,
         })
+    }
+}
+
+impl<R: ClickHouseRead + ReadAheadBuffer + 'static> Reader<R> {
+    /// Receive header packet (empty native block)
+    pub(super) async fn receive_header<T: ClientFormat>(
+        reader: &mut R,
+        revision: u64,
+        metadata: ClientMetadata,
+    ) -> Result<ServerPacket<T::Data>> {
+        let packet = ServerPacketId::from_u64(reader.read_var_uint().await?)
+            .inspect_err(|error| error!(?error, "Failed to read packet ID"))?;
+        trace!({ ATT_PID } = packet.as_ref(), "Read packet ID (header)");
+        match packet {
+            ServerPacketId::Data => Self::read_block(reader, revision, metadata)
+                .await?
+                .ok_or(Error::Protocol("Expected valid block for header".into()))
+                .map(ServerPacket::Header),
+            // NOTE: For DDL queries and some other cases, the server will not send a header but
+            // will send a progress packet or table columns instead.
+            ServerPacketId::Progress => {
+                Self::read_progress(reader, revision).await.map(ServerPacket::Progress)
+            }
+            // Accept pre-header events/logs/info as some servers may emit them early
+            ServerPacketId::ProfileEvents => Self::read_profile_events(reader, revision, metadata)
+                .await
+                .map(ServerPacket::ProfileEvents),
+            ServerPacketId::Log => {
+                Self::read_log_data(reader, revision, metadata).await.map(ServerPacket::Log)
+            }
+            ServerPacketId::ProfileInfo => {
+                Self::read_profile_info(reader, revision).await.map(ServerPacket::ProfileInfo)
+            }
+            ServerPacketId::TableColumns => {
+                Self::read_table_columns(reader).await.map(ServerPacket::TableColumns)
+            }
+            ServerPacketId::EndOfStream => Ok(ServerPacket::EndOfStream),
+            // Errors
+            ServerPacketId::Exception => {
+                Self::read_exception(reader).await.map(ServerPacket::Exception)
+            }
+            ServerPacketId::Hello => {
+                Err(Error::Protocol("Unexpected hello received from server".to_string()))
+            }
+            packet => {
+                Err(Error::Protocol(format!("expected header packet, got: {}", packet.as_ref())))
+            }
+        }
+    }
+
+    /// Receive any packet from the server
+    pub(super) async fn receive_packet<T: ClientFormat>(
+        reader: &mut R,
+        revision: u64,
+        metadata: ClientMetadata,
+        state: &mut DeserializerState<T::Deser>,
+    ) -> Result<ServerPacket<T::Data>> {
+        let packet_id = reader.read_var_uint().await?;
+        let packet = ServerPacketId::from_u64(packet_id)
+            .inspect_err(|error| error!(?error, "Failed to read packet ID"))?;
+        trace!({ ATT_PID } = packet.as_ref(), "Read packet ID");
+        match packet {
+            ServerPacketId::Pong => Ok(ServerPacket::Pong),
+            ServerPacketId::Data => Ok(Self::read_data::<T>(reader, revision, metadata, state)
+                .await?
+                .map_or(ServerPacket::Ignore(ServerPacketId::Data), ServerPacket::Data)),
+            ServerPacketId::Exception => {
+                Self::read_exception(reader).await.map(ServerPacket::Exception)
+            }
+            ServerPacketId::Progress => {
+                Self::read_progress(reader, revision).await.map(ServerPacket::Progress)
+            }
+            ServerPacketId::EndOfStream => Ok(ServerPacket::EndOfStream),
+            ServerPacketId::ProfileInfo => {
+                Self::read_profile_info(reader, revision).await.map(ServerPacket::ProfileInfo)
+            }
+            ServerPacketId::Totals => Ok(Self::read_data::<T>(reader, revision, metadata, state)
+                .await?
+                .map_or(ServerPacket::Ignore(ServerPacketId::Totals), ServerPacket::Totals)),
+            ServerPacketId::Extremes => Ok(Self::read_data::<T>(reader, revision, metadata, state)
+                .await?
+                .map_or(ServerPacket::Ignore(ServerPacketId::Extremes), ServerPacket::Extremes)),
+            ServerPacketId::TablesStatusResponse => Self::read_table_status_response(reader)
+                .await
+                .map(ServerPacket::TablesStatusResponse),
+            ServerPacketId::Log => {
+                Self::read_log_data(reader, revision, metadata).await.map(ServerPacket::Log)
+            }
+            ServerPacketId::TableColumns => {
+                Self::read_table_columns(reader).await.map(ServerPacket::TableColumns)
+            }
+            ServerPacketId::PartUUIDs => {
+                Self::read_part_uuids(reader).await.map(ServerPacket::PartUUIDs)
+            }
+            ServerPacketId::ReadTaskRequest => {
+                Self::read_task_request(reader).await.map(ServerPacket::ReadTaskRequest)
+            }
+            ServerPacketId::ProfileEvents => Self::read_profile_events(reader, revision, metadata)
+                .await
+                .map(ServerPacket::ProfileEvents),
+            // TODO: These currently are not correct. They are placeholders but must be deserialized
+            ServerPacketId::MergeTreeAllRangesAnnouncement => {
+                Ok(ServerPacket::MergeTreeAllRangesAnnouncement)
+            }
+            ServerPacketId::MergeTreeReadTaskRequest => Ok(ServerPacket::MergeTreeReadTaskRequest),
+            ServerPacketId::TimezoneUpdate => Ok(ServerPacket::TimezoneUpdate),
+            ServerPacketId::SSHChallenge => Ok(ServerPacket::SSHChallenge),
+            ServerPacketId::Hello => {
+                Err(Error::Protocol("Uexpected hello received from server".to_string()))
+            }
+        }
     }
 
     async fn read_log_data(
@@ -463,7 +466,7 @@ impl<R: ClickHouseRead + 'static> Reader<R> {
 
     async fn read_table_columns(reader: &mut R) -> Result<TableColumns> {
         Ok(TableColumns {
-            name: reader.read_utf8_string().await?,
+            name:        reader.read_utf8_string().await?,
             description: reader.read_utf8_string().await?,
         })
     }

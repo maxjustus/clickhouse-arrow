@@ -8,6 +8,7 @@ use super::Type;
 use super::deserialize::ClickHouseNativeDeserializer;
 use super::serialize::ClickHouseNativeSerializer;
 use crate::formats::{DeserializerState, SerializerState};
+use crate::native::sync::ReadAheadReader;
 use crate::{
     Date, DateTime, DynDateTime64, MultiPolygon, Point, Polygon, Result, Ring, Value, i256, u256,
 };
@@ -18,7 +19,7 @@ async fn roundtrip_values(type_: &Type, values: &[Value]) -> Result<Vec<Value>> 
     let mut state = SerializerState::default();
     type_.serialize_prefix_async(&mut output, &mut state).await?;
     type_.serialize_column(values.to_vec(), &mut output, &mut state).await?;
-    let mut input = Cursor::new(output);
+    let mut input = ReadAheadReader::new(Cursor::new(output));
     let mut state = DeserializerState::default();
     type_.deserialize_prefix_async(&mut input, &mut state).await?;
     let deserialized = type_.deserialize_column(&mut input, values.len(), &mut state).await?;
@@ -479,10 +480,10 @@ async fn roundtrip_map() {
     let values = &[
         Value::Map(vec![], vec![]),
         Value::Map(vec![Value::UInt32(1)], vec![Value::UInt16(2)]),
-        Value::Map(
-            vec![Value::UInt32(5), Value::UInt32(3)],
-            vec![Value::UInt16(6), Value::UInt16(4)],
-        ),
+        Value::Map(vec![Value::UInt32(5), Value::UInt32(3)], vec![
+            Value::UInt16(6),
+            Value::UInt16(4),
+        ]),
     ];
     assert_eq!(
         &values[..],

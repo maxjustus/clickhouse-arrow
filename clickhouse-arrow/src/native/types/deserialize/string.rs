@@ -1,35 +1,12 @@
 use std::future::Future;
 
-use tokio::io::AsyncReadExt;
-
 use super::{Deserializer, DeserializerState, Type};
 use crate::Result;
 use crate::io::ClickHouseRead;
+use crate::native::sync::{ParseStatus, SyncReader, parse_string_column};
 use crate::native::values::Value;
 
 /// Read a single string or binary value from the reader
-pub(crate) async fn read_single_string_value<R: ClickHouseRead>(
-    type_: &Type,
-    reader: &mut R,
-) -> Result<Value> {
-    Ok(match type_ {
-        Type::String | Type::Binary => Value::String(reader.read_string().await?),
-        Type::FixedSizedString(size) | Type::FixedSizedBinary(size) => {
-            let mut buf = Vec::with_capacity(*size);
-            unsafe { buf.set_len(*size) };
-            let _ = reader.read_exact(&mut buf[..]).await?;
-            let first_null = buf.iter().position(|x| *x == 0).unwrap_or(buf.len());
-            buf.truncate(first_null);
-            Value::String(buf)
-        }
-        _ => {
-            return Err(crate::Error::DeserializeError(format!(
-                "read_single_string_value: unsupported type: {type_:?}"
-            )));
-        }
-    })
-}
-
 pub(crate) struct StringDeserializer;
 
 impl Deserializer for StringDeserializer {
@@ -40,37 +17,20 @@ impl Deserializer for StringDeserializer {
     ) -> impl Future<Output = Result<()>> {
         async move { Ok(()) }
     }
-
-    async fn read<R: ClickHouseRead>(
-        type_: &Type,
-        reader: &mut R,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        let mut path = Vec::new();
-        read_with_path(type_, reader, rows, state, &mut path).await
-    }
 }
 
-pub(crate) async fn read_with_path<R: ClickHouseRead>(
+pub(crate) fn parse_with_path(
     type_: &Type,
-    reader: &mut R,
     rows: usize,
-    state: &mut DeserializerState,
-    path: &mut Vec<u16>,
-) -> Result<Vec<Value>> {
-    // Decide sparse by plan for current path (non-zero = SPARSE)
-    let sparse_enabled =
-        state.kind_plan.as_ref().and_then(|p| p.get(path)).map(|&k| k != 0).unwrap_or(false);
-    if sparse_enabled {
-        return crate::native::types::deserialize::sparse::read_sparse_with_path(
-            type_, reader, rows, state, path,
-        )
-        .await;
+    _state: &mut DeserializerState,
+    _path: &mut Vec<u16>,
+    reader: &mut SyncReader<'_>,
+) -> Result<ParseStatus<Vec<Value>>> {
+    match parse_string_column(type_, rows, reader.remaining())? {
+        ParseStatus::Complete { value, consumed } => {
+            reader.advance(consumed)?;
+            Ok(ParseStatus::Complete { value, consumed: reader.consumed() })
+        }
+        ParseStatus::NeedMore { needed } => Ok(ParseStatus::NeedMore { needed }),
     }
-    let mut out = Vec::with_capacity(rows);
-    for _ in 0..rows {
-        out.push(read_single_string_value(type_, reader).await?);
-    }
-    Ok(out)
 }

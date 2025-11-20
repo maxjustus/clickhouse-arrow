@@ -174,9 +174,7 @@ mod tests {
 
     type MockWriter = Vec<u8>;
 
-    fn wrap_array(typ: Type) -> Type {
-        Type::Array(Box::new(typ))
-    }
+    fn wrap_array(typ: Type) -> Type { Type::Array(Box::new(typ)) }
 
     /// Helper function used by individual type serializers
     pub(crate) async fn test_type_serializer(

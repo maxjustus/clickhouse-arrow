@@ -2,11 +2,12 @@ use std::collections::BTreeMap;
 
 use tokio::io::AsyncReadExt;
 
-use super::{
-    ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type, read_discriminator,
-};
+use super::{ClickHouseNativeDeserializer, Deserializer, DeserializerState, Type};
 use crate::formats::{JsonState as JsonStateData, TypeSpecificState};
 use crate::io::ClickHouseRead;
+#[cfg(test)]
+use crate::native::sync::AsyncParseAdapter;
+use crate::native::sync::{ParseStatus, SyncReader, parse_discriminator, parse_string_column};
 use crate::native::values::Value;
 use crate::{Error, Result};
 
@@ -24,114 +25,10 @@ enum SegmentRef<'a> {
 
 struct PathEntry<'a> {
     segments: SegmentRef<'a>,
-    values: &'a [Value],
+    values:   &'a [Value],
 }
 
 impl JsonDeserializer {
-    /// Common logic for reading JSON data (async version)
-    async fn read_json_internal_async<R: ClickHouseRead>(
-        reader: &mut R,
-        rows: usize,
-        state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        let json_state = if let TypeSpecificState::Json(json_state) = &state.type_specific {
-            json_state.clone()
-        } else {
-            return Err(Error::DeserializeError("JSON metadata not set in state".to_string()));
-        };
-
-        let version = json_state.version.ok_or_else(|| {
-            Error::DeserializeError(
-                "JSON version not set. read_prefix must be called first".to_string(),
-            )
-        })?;
-
-        match version {
-            JSON_OBJECT_VERSION_FLATTENED => {
-                let dynamic_data = json_state.dynamic_data.clone().ok_or_else(|| {
-                    Error::DeserializeError("JSON object data not set".to_string())
-                })?;
-                let typed_paths = json_state.typed_paths.clone();
-                let path_names = json_state.dynamic_paths.clone();
-                let path_segments = json_state.path_segments.clone();
-
-                let mut path_values = Vec::with_capacity(typed_paths.len() + path_names.len());
-
-                // Typed path prefixes were already read in read_prefix; now read their data
-                for (_path_name, type_) in &typed_paths {
-                    let mut typed_state = DeserializerState::default();
-                    let values = type_.deserialize_column(reader, rows, &mut typed_state).await?;
-                    path_values.push(values);
-                }
-
-                for (path_idx, _path_name) in path_names.iter().enumerate() {
-                    let (total_types, types) = &dynamic_data[path_idx];
-
-                    // Read discriminators
-                    let mut discriminators = Vec::with_capacity(rows);
-                    for _ in 0..rows {
-                        discriminators.push(read_discriminator!(async reader, *total_types));
-                    }
-
-                    // Prepare offset bookkeeping
-                    let total_types_usize = (*total_types).try_into().map_err(|_| {
-                        Error::DeserializeError("Too many dynamic types in JSON column".to_string())
-                    })?;
-                    let (offsets, row_count_by_type) =
-                        Self::build_offsets(&discriminators, *total_types, total_types_usize);
-
-                    // Read column data
-                    let mut columns = vec![Vec::new(); total_types_usize];
-                    for (idx, (_type_name, typ)) in types.iter().enumerate() {
-                        if let Some(&count) = row_count_by_type.get(idx)
-                            && count > 0
-                        {
-                            let values = typ.deserialize_column(reader, count, state).await?;
-                            columns[idx] = values;
-                        }
-                    }
-
-                    // Reconstruct values
-                    let values = Self::reconstruct_path_values(
-                        &discriminators,
-                        &offsets,
-                        &columns,
-                        *total_types,
-                        rows,
-                    );
-                    path_values.push(values);
-                }
-
-                // Build JSON objects with all paths (typed and dynamic)
-                let all_paths: Vec<String> = typed_paths
-                    .iter()
-                    .map(|(name, _)| name.clone())
-                    .chain(path_names.iter().cloned())
-                    .collect();
-                Self::build_json_objects(&all_paths, &path_values, rows, &path_segments)
-            }
-            JSON_OBJECT_VERSION_STRING => {
-                let mut result = Vec::with_capacity(rows);
-                for _ in 0..rows {
-                    let raw = reader.read_string().await?;
-
-                    let parsed: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| {
-                        Error::DeserializeError(format!(
-                            "Failed to parse JSON string serialization: {e}"
-                        ))
-                    })?;
-
-                    result.push(Value::Json(parsed));
-                }
-
-                Ok(result)
-            }
-            _ => Err(Error::DeserializeError(format!(
-                "Unsupported JSON serialization version {version}."
-            ))),
-        }
-    }
-
     /// Optimized nested setter using pre-split segments and Map::entry
     fn set_nested_value_segments(
         object: &mut serde_json::Map<String, serde_json::Value>,
@@ -395,19 +292,184 @@ impl Deserializer for JsonDeserializer {
         });
         Ok(())
     }
+}
 
-    async fn read<R: ClickHouseRead>(
+impl JsonDeserializer {
+    #[cfg(test)]
+    pub(crate) async fn read<R>(
         _type_: &Type,
         reader: &mut R,
         rows: usize,
         state: &mut DeserializerState,
-    ) -> Result<Vec<Value>> {
-        Self::read_json_internal_async(reader, rows, state).await
+    ) -> Result<Vec<Value>>
+    where
+        R: ClickHouseRead + crate::native::sync::ReadAheadBuffer,
+    {
+        let mut scratch = std::mem::take(&mut state.sync_buffer);
+        let read_ahead = state.sync_read_ahead_bytes;
+        let mut adapter = AsyncParseAdapter::new(reader, &mut scratch, read_ahead);
+        let mut path = Vec::new();
+        let out = adapter
+            .parse(|buf| {
+                let mut sr = SyncReader::new(buf);
+                Self::parse_with_path(_type_, rows, state, &mut path, &mut sr)
+            })
+            .await;
+        state.sync_buffer = scratch;
+        out
     }
 }
 
 impl JsonDeserializer {
-    /* sync prefix removed; async-only */
+    pub(crate) fn parse_with_path(
+        _type: &Type,
+        rows: usize,
+        state: &mut DeserializerState,
+        _path: &mut Vec<u16>,
+        reader: &mut SyncReader<'_>,
+    ) -> Result<ParseStatus<Vec<Value>>> {
+        if rows == 0 {
+            return Ok(ParseStatus::Complete { value: Vec::new(), consumed: reader.consumed() });
+        }
+
+        let (version, typed_paths, dynamic_paths, dynamic_data, path_segments) = match &state
+            .type_specific
+        {
+            TypeSpecificState::Json(json_state) => (
+                json_state.version,
+                json_state.typed_paths.clone(),
+                json_state.dynamic_paths.clone(),
+                json_state.dynamic_data.clone(),
+                json_state.path_segments.clone(),
+            ),
+            _ => return Err(Error::DeserializeError("JSON metadata not set in state".to_string())),
+        };
+
+        let version = version.ok_or_else(|| {
+            Error::DeserializeError(
+                "JSON version not set. read_prefix must be called first".to_string(),
+            )
+        })?;
+
+        match version {
+            JSON_OBJECT_VERSION_FLATTENED => {
+                let dynamic_data = dynamic_data.ok_or_else(|| {
+                    Error::DeserializeError("JSON object data not set".to_string())
+                })?;
+
+                let mut path_values = Vec::with_capacity(typed_paths.len() + dynamic_paths.len());
+
+                for (_path_name, type_) in &typed_paths {
+                    let mut typed_state = DeserializerState::default();
+                    let mut inner_path = Vec::new();
+                    let values = match type_.parse_column_sync_with_path(
+                        rows,
+                        &mut typed_state,
+                        &mut inner_path,
+                        reader,
+                    )? {
+                        ParseStatus::Complete { value, .. } => value,
+                        ParseStatus::NeedMore { needed } => {
+                            return Ok(ParseStatus::NeedMore { needed });
+                        }
+                    };
+                    path_values.push(values);
+                }
+
+                for (path_idx, _path_name) in dynamic_paths.iter().enumerate() {
+                    let (total_types, types) = &dynamic_data[path_idx];
+
+                    let mut discriminators = Vec::with_capacity(rows);
+                    for _ in 0..rows {
+                        match parse_discriminator(*total_types, reader)? {
+                            ParseStatus::Complete { value, .. } => discriminators.push(value),
+                            ParseStatus::NeedMore { needed } => {
+                                return Ok(ParseStatus::NeedMore { needed });
+                            }
+                        }
+                    }
+
+                    let total_types_usize = (*total_types).try_into().map_err(|_| {
+                        Error::DeserializeError("Too many dynamic types in JSON column".to_string())
+                    })?;
+                    let (offsets, row_count_by_type) =
+                        Self::build_offsets(&discriminators, *total_types, total_types_usize);
+
+                    let mut columns = vec![Vec::new(); total_types_usize];
+                    for (idx, (_type_name, typ)) in types.iter().enumerate() {
+                        let count = row_count_by_type.get(idx).copied().unwrap_or(0);
+                        if count == 0 {
+                            continue;
+                        }
+
+                        let mut child_path = Vec::new();
+                        match typ.parse_column_sync_with_path(
+                            count,
+                            state,
+                            &mut child_path,
+                            reader,
+                        )? {
+                            ParseStatus::Complete { value, .. } => {
+                                columns[idx] = value;
+                            }
+                            ParseStatus::NeedMore { needed } => {
+                                return Ok(ParseStatus::NeedMore { needed });
+                            }
+                        }
+                    }
+
+                    let values = Self::reconstruct_path_values(
+                        &discriminators,
+                        &offsets,
+                        &columns,
+                        *total_types,
+                        rows,
+                    );
+                    path_values.push(values);
+                }
+
+                let all_paths: Vec<String> = typed_paths
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .chain(dynamic_paths.iter().cloned())
+                    .collect();
+
+                let result =
+                    Self::build_json_objects(&all_paths, &path_values, rows, &path_segments)?;
+                Ok(ParseStatus::Complete { value: result, consumed: reader.consumed() })
+            }
+            JSON_OBJECT_VERSION_STRING => {
+                let string_values =
+                    match parse_string_column(&Type::String, rows, reader.remaining())? {
+                        ParseStatus::Complete { value, consumed } => {
+                            reader.advance(consumed)?;
+                            value
+                        }
+                        ParseStatus::NeedMore { needed } => {
+                            return Ok(ParseStatus::NeedMore { needed });
+                        }
+                    };
+                let mut result = Vec::with_capacity(rows);
+                for raw in string_values {
+                    let bytes = match raw {
+                        Value::String(bytes) => bytes,
+                        _ => unreachable!("string parser returned non-string"),
+                    };
+                    let parsed: serde_json::Value =
+                        serde_json::from_slice(&bytes).map_err(|e| {
+                            Error::DeserializeError(format!(
+                                "Failed to parse JSON string serialization: {e}"
+                            ))
+                        })?;
+                    result.push(Value::Json(parsed));
+                }
+                Ok(ParseStatus::Complete { value: result, consumed: reader.consumed() })
+            }
+            _ => Err(Error::DeserializeError(format!(
+                "Unsupported JSON serialization version {version}."
+            ))),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -418,6 +480,7 @@ mod tests {
     use chrono_tz::UTC;
 
     use super::*;
+    use crate::native::sync::ReadAheadReader;
     use crate::native::values::{
         Date, Date32, DateTime, DynDateTime64, Ipv4, Ipv6, MultiPolygon, Point, Polygon, Ring,
         i256, u256,
@@ -570,14 +633,14 @@ mod tests {
             payload.extend_from_slice(row);
         }
 
-        let mut reader = Cursor::new(payload);
+        let mut reader = ReadAheadReader::new(Cursor::new(payload));
         let mut state = DeserializerState::default();
         let type_ = Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
-            typed_paths: vec![],
-            skip_exact: vec![],
-            skip_regex: vec![],
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
         };
 
         JsonDeserializer::read_prefix(&type_, &mut reader, &mut state).await.unwrap();
@@ -585,13 +648,10 @@ mod tests {
             JsonDeserializer::read(&type_, &mut reader, rows.len(), &mut state).await.unwrap();
 
         {
-            assert_eq!(
-                values,
-                vec![
-                    Value::Json(serde_json::json!({"a": 1})),
-                    Value::Json(serde_json::json!({"b": "x"})),
-                ]
-            );
+            assert_eq!(values, vec![
+                Value::Json(serde_json::json!({"a": 1})),
+                Value::Json(serde_json::json!({"b": "x"})),
+            ]);
         }
     }
 

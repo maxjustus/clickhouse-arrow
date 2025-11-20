@@ -1,16 +1,19 @@
+use std::io::Cursor;
+
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use tokio::io::AsyncWriteExt as _;
 
 // use bytes::BytesMut;
 use super::DeserializerState;
-use super::protocol_data::{EmptyBlock, ProtocolData};
+use super::protocol_data::ProtocolData;
 use crate::Type;
 use crate::arrow::ArrowDeserializerState;
-use crate::compression::{StreamingCompressor, StreamingDecompressor};
+use crate::compression::{StreamingCompressor, read_compressed_block};
 use crate::connection::ClientMetadata;
 use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::protocol::CompressionMethod;
+use crate::native::sync::ReadAheadReader;
 use crate::prelude::*;
 
 /// Marker trait for Arrow format.
@@ -70,21 +73,24 @@ impl super::sealed::ClientFormatImpl<RecordBatch> for ArrowFormat {
         Ok(())
     }
 
-    async fn read<R: ClickHouseRead + 'static>(
+    async fn read<R: ClickHouseRead + crate::native::sync::ReadAheadBuffer + 'static>(
         reader: &mut R,
         revision: u64,
         metadata: ClientMetadata,
         state: &mut DeserializerState<Self::Deser>,
     ) -> Result<Option<RecordBatch>> {
         let arrow_options = metadata.arrow_options;
-        if let CompressionMethod::None = metadata.compression {
-            RecordBatch::read_async(reader, revision, arrow_options, state).await
+        let batch = if let CompressionMethod::None = metadata.compression {
+            RecordBatch::read_async(reader, revision, arrow_options, state).await.map(Some)
+        } else if let Some(chunk) =
+            read_compressed_block(reader, metadata.compression).await?
+        {
+            let mut buffered = ReadAheadReader::new(Cursor::new(chunk));
+            RecordBatch::read_async(&mut buffered, revision, arrow_options, state).await.map(Some)
         } else {
-            // Stream-decompress compressed Arrow blocks and read via async path
-            let mut decompressor = StreamingDecompressor::new(metadata.compression, reader).await?;
-            RecordBatch::read_async(&mut decompressor, revision, arrow_options, state).await
-        }
-        .inspect_err(|error| error!(?error, "deserializing arrow record batch"))
-        .map(RecordBatch::into_option)
+            Ok(None)
+        };
+        batch
+            .inspect_err(|error| error!(?error, "deserializing arrow record batch"))
     }
 }
