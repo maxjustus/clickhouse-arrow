@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use super::{Deserializer, DeserializerState, Type};
 use crate::io::ClickHouseRead;
+use crate::native::sync::{parse_sized_column, ParseStatus};
 use crate::native::values::Value;
 use crate::{Date, Date32, DateTime, DynDateTime64, Result, i256, u256};
 
@@ -103,6 +104,57 @@ impl Deserializer for SizedDeserializer {
     }
 }
 
+fn is_sync_sized_type(type_: &Type) -> bool {
+    matches!(
+        type_,
+        Type::Int8
+            | Type::Int16
+            | Type::Int32
+            | Type::Int64
+            | Type::Int128
+            | Type::Int256
+            | Type::UInt8
+            | Type::UInt16
+            | Type::UInt32
+            | Type::UInt64
+            | Type::UInt128
+            | Type::UInt256
+            | Type::Float32
+            | Type::Float64
+            | Type::Decimal32(_)
+            | Type::Decimal64(_)
+            | Type::Decimal128(_)
+            | Type::Decimal256(_)
+            | Type::Uuid
+            | Type::Date
+            | Type::Date32
+            | Type::DateTime(_)
+            | Type::DateTime64(_, _)
+            | Type::Ipv4
+            | Type::Ipv6
+            | Type::Enum8(_)
+            | Type::Enum16(_)
+    )
+}
+
+async fn read_dense_sync<R: ClickHouseRead>(
+    type_: &Type,
+    reader: &mut R,
+    rows: usize,
+) -> Result<Vec<Value>> {
+    let mut buffer = Vec::new();
+    loop {
+        match parse_sized_column(type_, rows, &buffer)? {
+            ParseStatus::Complete { value, .. } => return Ok(value),
+            ParseStatus::NeedMore { needed } => {
+                let start = buffer.len();
+                buffer.resize(start + needed, 0);
+                let _ = reader.read_exact(&mut buffer[start..]).await?;
+            }
+        }
+    }
+}
+
 pub(crate) async fn read_with_path<R: ClickHouseRead>(
     type_: &Type,
     reader: &mut R,
@@ -115,6 +167,10 @@ pub(crate) async fn read_with_path<R: ClickHouseRead>(
 
     if sparse_enabled {
         return super::sparse::read_sparse_with_path(type_, reader, rows, state, path).await;
+    }
+
+    if is_sync_sized_type(type_) {
+        return read_dense_sync(type_, reader, rows).await;
     }
 
     // Dense sized read using helper

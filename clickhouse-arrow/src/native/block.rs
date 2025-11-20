@@ -166,6 +166,85 @@ mod tests {
     use crate::native::protocol::{CompressionMethod, DBMS_TCP_PROTOCOL_VERSION};
     use crate::{ArrowOptions, NativeFormat};
 
+    async fn multiblock_roundtrip_int32(compression: CompressionMethod) {
+        let column_types = vec![("n".to_string(), Type::Int32)];
+        let block1 = Block {
+            info: BlockInfo::default(),
+            rows: 3,
+            column_types: column_types.clone(),
+            column_data: vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)],
+        };
+        let block2 = Block {
+            info: BlockInfo::default(),
+            rows: 2,
+            column_types: column_types.clone(),
+            column_data: vec![Value::Int32(10), Value::Int32(20)],
+        };
+        let metadata = ClientMetadata {
+            client_id: 9,
+            compression,
+            arrow_options: ArrowOptions::default(),
+            server_version: None,
+        };
+
+        let mut buffer = Vec::new();
+        NativeFormat::write(
+            &mut buffer,
+            block1.clone(),
+            Qid::default(),
+            Some(&column_types),
+            DBMS_TCP_PROTOCOL_VERSION,
+            metadata,
+        )
+        .await
+        .expect("write first block");
+        NativeFormat::write(
+            &mut buffer,
+            block2.clone(),
+            Qid::default(),
+            Some(&column_types),
+            DBMS_TCP_PROTOCOL_VERSION,
+            metadata,
+        )
+        .await
+        .expect("write second block");
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        let mut state = DeserializerState::default();
+        let read_block1 =
+            NativeFormat::read(&mut cursor, DBMS_TCP_PROTOCOL_VERSION, metadata, &mut state)
+                .await
+                .expect("read block1")
+                .expect("some block1");
+        let read_block2 =
+            NativeFormat::read(&mut cursor, DBMS_TCP_PROTOCOL_VERSION, metadata, &mut state)
+                .await
+                .expect("read block2")
+                .expect("some block2");
+
+        assert_eq!(read_block1.column_types, column_types);
+        assert_eq!(read_block2.column_types, column_types);
+        assert_eq!(read_block1.rows, block1.rows);
+        assert_eq!(read_block2.rows, block2.rows);
+        assert_eq!(read_block1.column_data, block1.column_data);
+        assert_eq!(read_block2.column_data, block2.column_data);
+        assert_eq!(
+            cursor.position() as usize,
+            cursor.get_ref().len(),
+            "all bytes should be consumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn multiblock_roundtrip_int32_uncompressed() {
+        multiblock_roundtrip_int32(CompressionMethod::None).await;
+    }
+
+    #[tokio::test]
+    async fn multiblock_roundtrip_int32_lz4() {
+        multiblock_roundtrip_int32(CompressionMethod::LZ4).await;
+    }
+
     #[tokio::test]
     async fn compressed_roundtrip_dynamic_json_map() {
         let rows = 2u64;

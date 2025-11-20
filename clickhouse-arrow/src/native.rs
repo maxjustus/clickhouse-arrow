@@ -6,6 +6,7 @@ pub(crate) mod coerce;
 pub mod convert;
 pub mod error_codes;
 pub mod progress;
+pub mod sync;
 pub(crate) mod protocol;
 #[cfg(test)]
 pub(crate) mod test_helpers;
