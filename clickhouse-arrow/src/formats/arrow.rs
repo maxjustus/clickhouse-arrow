@@ -1,19 +1,16 @@
-use std::io::Cursor;
-
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use tokio::io::AsyncWriteExt as _;
 
 // use bytes::BytesMut;
 use super::DeserializerState;
-use super::protocol_data::ProtocolData;
+use super::protocol_data::{EmptyBlock, ProtocolData};
 use crate::Type;
 use crate::arrow::ArrowDeserializerState;
-use crate::compression::{StreamingCompressor, read_compressed_block};
+use crate::compression::StreamingCompressor;
 use crate::connection::ClientMetadata;
 use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::protocol::CompressionMethod;
-use crate::native::sync::ReadAheadReader;
 use crate::prelude::*;
 
 /// Marker trait for Arrow format.
@@ -80,17 +77,9 @@ impl super::sealed::ClientFormatImpl<RecordBatch> for ArrowFormat {
         state: &mut DeserializerState<Self::Deser>,
     ) -> Result<Option<RecordBatch>> {
         let arrow_options = metadata.arrow_options;
-        let batch = if let CompressionMethod::None = metadata.compression {
-            RecordBatch::read_async(reader, revision, arrow_options, state).await.map(Some)
-        } else if let Some(chunk) =
-            read_compressed_block(reader, metadata.compression).await?
-        {
-            let mut buffered = ReadAheadReader::new(Cursor::new(chunk));
-            RecordBatch::read_async(&mut buffered, revision, arrow_options, state).await.map(Some)
-        } else {
-            Ok(None)
-        };
-        batch
+        RecordBatch::read_async(reader, revision, arrow_options, state)
+            .await
             .inspect_err(|error| error!(?error, "deserializing arrow record batch"))
+            .map(|data| data.into_option())
     }
 }

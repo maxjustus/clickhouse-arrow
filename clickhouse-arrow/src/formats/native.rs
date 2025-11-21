@@ -1,14 +1,11 @@
-use std::io::Cursor;
-
 use super::DeserializerState;
 use super::protocol_data::{EmptyBlock, ProtocolData};
 use crate::Type;
 use crate::client::connection::ClientMetadata;
-use crate::compression::{StreamingCompressor, read_compressed_block};
+use crate::compression::StreamingCompressor;
 use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::block::Block;
 use crate::native::protocol::CompressionMethod;
-use crate::native::sync::ReadAheadReader;
 use crate::prelude::*;
 
 /// Marker for Native format.
@@ -32,7 +29,7 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
     async fn read<R: ClickHouseRead + 'static>(
         reader: &mut R,
         revision: u64,
-        metadata: ClientMetadata,
+        _metadata: ClientMetadata,
         state: &mut DeserializerState,
     ) -> Result<Option<Block>>
     where
@@ -41,19 +38,7 @@ impl super::sealed::ClientFormatImpl<Block> for NativeFormat {
         // this reads / parses one block at a time serially, clickhouse client seems to operate in
         // parallel. Even given that it seems like we're 3x faster for single threaded reading?
         // It would still be cool to support parallel reading/deserialization in the future.
-        Ok(if let CompressionMethod::None = metadata.compression {
-            Block::read_async(reader, revision, None, state).await?.into_option()
-        } else if let Some(chunk) =
-            read_compressed_block(reader, metadata.compression).await?
-        {
-            trace!(len = chunk.len(), compression = metadata.compression.as_ref(), "read compressed block chunk");
-            let mut buffered = ReadAheadReader::new(Cursor::new(chunk));
-            let block = Block::read_async(&mut buffered, revision, None, state).await?;
-            block.into_option()
-        } else {
-            trace!("compressed stream reached EOF");
-            None
-        })
+        Ok(Block::read_async(reader, revision, None, state).await?.into_option())
     }
 
     async fn write<W: ClickHouseWrite>(

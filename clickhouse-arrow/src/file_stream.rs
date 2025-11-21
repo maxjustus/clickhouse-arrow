@@ -1,8 +1,12 @@
 use std::marker::PhantomData;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use tokio::io::{AsyncWriteExt, BufReader, BufWriter, stdin, stdout};
+use pin_project::pin_project;
+use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, BufWriter, ReadBuf, stdin, stdout};
 
 use crate::client::connection::ClientMetadata;
+use crate::compression::StreamingDecompressor;
 use crate::formats::DeserializerState;
 use crate::formats::sealed::ClientFormatImpl;
 use crate::io::{ClickHouseRead, ClickHouseWrite};
@@ -10,6 +14,25 @@ use crate::native::block::Block;
 use crate::native::sync::ReadAheadReader;
 use crate::tracing::{error, trace};
 use crate::{ArrowOptions, ClientFormat, CompressionMethod, NativeFormat, Qid, Result, Type};
+
+#[pin_project(project = MaybeCompressedReaderProj)]
+pub(crate) enum MaybeCompressedReader<R: ClickHouseRead + 'static> {
+    Plain(#[pin] R),
+    Compressed(#[pin] StreamingDecompressor<R>),
+}
+
+impl<R: ClickHouseRead + 'static> AsyncRead for MaybeCompressedReader<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.project() {
+            MaybeCompressedReaderProj::Plain(inner) => inner.poll_read(cx, buf),
+            MaybeCompressedReaderProj::Compressed(inner) => inner.poll_read(cx, buf),
+        }
+    }
+}
 
 /// A pragmatic, generic file-backed stream writer for `ClickHouse` native blocks.
 ///
@@ -98,9 +121,9 @@ where
 pub struct FileStreamReader<T, R>
 where
     T: ClientFormat,
-    R: ClickHouseRead,
+    R: ClickHouseRead + 'static,
 {
-    reader:   ReadAheadReader<R>,
+    reader:   ReadAheadReader<MaybeCompressedReader<R>>,
     metadata: ClientMetadata,
     revision: u64,
     state:    DeserializerState<<T as ClientFormatImpl<T::Data>>::Deser>,
@@ -125,8 +148,17 @@ where
             server_version: None,
         };
         // Use revision=0 to match files produced by ClickHouse `Native` format (no BlockInfo).
+        let inner = match compression {
+            CompressionMethod::None => MaybeCompressedReader::Plain(reader),
+            _ => {
+                let decompressed = StreamingDecompressor::new(compression, reader)
+                    .expect("failed to initialize streaming decompressor");
+                MaybeCompressedReader::Compressed(decompressed)
+            }
+        };
+        let reader = ReadAheadReader::new(inner);
         Self {
-            reader: ReadAheadReader::new(reader),
+            reader,
             metadata,
             revision: 0,
             state: DeserializerState::default().with_arrow_options(arrow_options),
@@ -163,10 +195,14 @@ where
     }
 
     /// Access the inner reader (by reference).
-    pub fn reader(&self) -> &ReadAheadReader<R> { &self.reader }
+    #[allow(dead_code)]
+    pub(crate) fn reader(&self) -> &ReadAheadReader<MaybeCompressedReader<R>> { &self.reader }
 
     /// Access the inner reader (by mutable reference).
-    pub fn reader_mut(&mut self) -> &mut ReadAheadReader<R> { &mut self.reader }
+    #[allow(dead_code)]
+    pub(crate) fn reader_mut(&mut self) -> &mut ReadAheadReader<MaybeCompressedReader<R>> {
+        &mut self.reader
+    }
 }
 
 /// Convenience wrapper to stream native blocks to `stdout`.

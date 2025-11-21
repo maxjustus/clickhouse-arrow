@@ -14,6 +14,7 @@ use tokio_rustls::rustls;
 
 use super::internal::{InternalConn, PendingQuery};
 use super::{ArrowOptions, CompressionMethod, Event};
+use crate::compression::StreamingDecompressor;
 use crate::client::chunk::{ChunkReader, ChunkWriter};
 use crate::flags::{conn_read_buffer_size, conn_write_buffer_size};
 use crate::io::{ClickHouseRead, ClickHouseWrite};
@@ -233,24 +234,67 @@ impl<T: ClientFormat> Connection<T> {
                 let reader = BufReader::with_capacity(conn_read_buffer_size(), reader);
                 let writer = BufWriter::with_capacity(conn_write_buffer_size(), writer);
 
+                let compression = metadata.compression;
                 let result = match (chunk_send, chunk_recv) {
                     (true, true) => {
-                        let reader = ReadAheadReader::new(ChunkReader::new(reader));
                         let writer = ChunkWriter::new(writer);
-                        internal.run_chunked(reader, writer, op_rx).await
+                        if let CompressionMethod::None = compression {
+                            let reader = ReadAheadReader::new(ChunkReader::new(reader));
+                            internal.run_chunked(reader, writer, op_rx).await
+                        } else {
+                            let chunk_reader = ChunkReader::new(reader);
+                            match StreamingDecompressor::new(compression, chunk_reader) {
+                                Ok(decompressed) => {
+                                    let reader = ReadAheadReader::new(decompressed);
+                                    internal.run_chunked(reader, writer, op_rx).await
+                                }
+                                Err(err) => Err(err),
+                            }
+                        }
                     }
                     (true, false) => {
-                        let reader = ReadAheadReader::new(reader);
                         let writer = ChunkWriter::new(writer);
-                        internal.run_chunked(reader, writer, op_rx).await
+                        if let CompressionMethod::None = compression {
+                            let reader = ReadAheadReader::new(reader);
+                            internal.run_chunked(reader, writer, op_rx).await
+                        } else {
+                            match StreamingDecompressor::new(compression, reader) {
+                                Ok(decompressed) => {
+                                    let reader = ReadAheadReader::new(decompressed);
+                                    internal.run_chunked(reader, writer, op_rx).await
+                                }
+                                Err(err) => Err(err),
+                            }
+                        }
                     }
                     (false, true) => {
-                        let reader = ReadAheadReader::new(ChunkReader::new(reader));
-                        internal.run(reader, writer, op_rx).await
+                        if let CompressionMethod::None = compression {
+                            let reader = ReadAheadReader::new(ChunkReader::new(reader));
+                            internal.run(reader, writer, op_rx).await
+                        } else {
+                            let chunk_reader = ChunkReader::new(reader);
+                            match StreamingDecompressor::new(compression, chunk_reader) {
+                                Ok(decompressed) => {
+                                    let reader = ReadAheadReader::new(decompressed);
+                                    internal.run(reader, writer, op_rx).await
+                                }
+                                Err(err) => Err(err),
+                            }
+                        }
                     }
                     (false, false) => {
-                        let reader = ReadAheadReader::new(reader);
-                        internal.run(reader, writer, op_rx).await
+                        if let CompressionMethod::None = compression {
+                            let reader = ReadAheadReader::new(reader);
+                            internal.run(reader, writer, op_rx).await
+                        } else {
+                            match StreamingDecompressor::new(compression, reader) {
+                                Ok(decompressed) => {
+                                    let reader = ReadAheadReader::new(decompressed);
+                                    internal.run(reader, writer, op_rx).await
+                                }
+                                Err(err) => Err(err),
+                            }
+                        }
                     }
                 };
 

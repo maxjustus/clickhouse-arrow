@@ -17,7 +17,6 @@ use std::io::ErrorKind;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
-use futures_util::FutureExt;
 use pin_project::pin_project;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 
@@ -51,8 +50,8 @@ const COMPRESSED_FRAME_HEADER_BYTES: usize = 1 + 4 + 4;
 /// - Checksum mismatches indicating data corruption
 /// - Decompression failures
 /// - Memory safety violations for oversized chunks
-type BlockReadingFuture<'a, R> =
-    Pin<Box<dyn Future<Output = Result<(Option<Vec<u8>>, &'a mut R)>> + Send + Sync + 'a>>;
+type BlockReadingFuture<R> =
+    Pin<Box<dyn Future<Output = Result<(Option<Vec<u8>>, R)>> + Send + Sync + 'static>>;
 
 /// An async reader that decompresses `ClickHouse` data blocks on-the-fly.
 ///
@@ -68,15 +67,17 @@ type BlockReadingFuture<'a, R> =
 /// let mut buffer = vec![0u8; 1024];
 /// let bytes_read = decompressor.read(&mut buffer).await.unwrap();
 /// ```
-pub(crate) struct StreamingDecompressor<'a, R: ClickHouseRead + 'static> {
+#[pin_project]
+pub(crate) struct StreamingDecompressor<R: ClickHouseRead + 'static> {
     mode:                 CompressionMethod,
-    inner:                Option<&'a mut R>,
+    #[pin]
+    inner:                Option<R>,
     decompressed:         Vec<u8>,
     position:             usize,
-    block_reading_future: Option<BlockReadingFuture<'a, R>>,
+    block_reading_future: Option<BlockReadingFuture<R>>,
 }
 
-impl<'a, R: ClickHouseRead> StreamingDecompressor<'a, R> {
+impl<R: ClickHouseRead> StreamingDecompressor<R> {
     /// Creates a new streaming decompressor and primes it with the first chunk.
     ///
     /// Reads and decompresses the first available compression chunk from the provided
@@ -179,92 +180,83 @@ impl<'a, R: ClickHouseRead> StreamingDecompressor<'a, R> {
     }
 
     #[cfg_attr(not(test), allow(unused))]
-    pub(crate) async fn new(mode: CompressionMethod, inner: &'a mut R) -> Result<Self> {
+    pub(crate) fn new(mode: CompressionMethod, inner: R) -> Result<Self> {
         if matches!(mode, CompressionMethod::None) {
             return Err(Error::DeserializeError(
                 "Attempted to decompress uncompressed data".into(),
             ));
         }
 
-        let chunk = Self::read_chunk(inner, mode).await.inspect_err(|error| {
-            tracing::error!(?error, "Error decompressing data");
-        })?;
-
-        let mut inner_opt = Some(inner);
-        let decompressed = if let Some(data) = chunk {
-            data
-        } else {
-            inner_opt = None;
-            Vec::new()
-        };
-
-        Ok(Self { mode, inner: inner_opt, decompressed, position: 0, block_reading_future: None })
+        Ok(Self {
+            mode,
+            inner: Some(inner),
+            decompressed: Vec::new(),
+            position: 0,
+            block_reading_future: None,
+        })
     }
 }
 
-impl<R: ClickHouseRead> AsyncRead for StreamingDecompressor<'_, R> {
+impl<R: ClickHouseRead> AsyncRead for StreamingDecompressor<R> {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
+        let mut this = self.project();
         loop {
             if buf.remaining() == 0 {
                 return Poll::Ready(Ok(()));
             }
 
-            if let Some(block_reading_future) = self.block_reading_future.as_mut() {
-                match block_reading_future.poll_unpin(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok((Some(value), inner))) => {
-                        drop(self.block_reading_future.take());
-                        self.decompressed = value;
-                        self.position = 0;
-                        self.inner = Some(inner);
-                        continue;
-                    }
-                    Poll::Ready(Ok((None, _inner))) => {
-                        drop(self.block_reading_future.take());
-                        self.decompressed.clear();
-                        self.position = 0;
-                        self.inner = None;
-                        return Poll::Ready(Ok(()));
-                    }
-                    Poll::Ready(Err(e)) => {
-                        drop(self.block_reading_future.take());
-                        return Poll::Ready(Err(std::io::Error::new(ErrorKind::InvalidData, e)));
-                    }
-                }
-            }
-
-            let available = self.decompressed.len() - self.position;
+            let available = this.decompressed.len().saturating_sub(*this.position);
             if available > 0 {
-                let to_serve = available.min(buf.remaining());
-                buf.put_slice(&self.decompressed[self.position..self.position + to_serve]);
-                self.position += to_serve;
+                let to_copy = available.min(buf.remaining());
+                let start = *this.position;
+                let end = start + to_copy;
+                buf.put_slice(&this.decompressed[start..end]);
+                *this.position += to_copy;
+                if *this.position >= this.decompressed.len() {
+                    this.decompressed.clear();
+                    *this.position = 0;
+                }
                 return Poll::Ready(Ok(()));
             }
 
-            if let Some(inner) = self.inner.take() {
-                let mode = self.mode;
-                self.block_reading_future = Some(Box::pin(async move {
-                    let chunk = Self::read_chunk(inner, mode).await?;
+            if let Some(fut) = this.block_reading_future.as_mut() {
+                match fut.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok((Some(chunk), inner))) => {
+                        *this.block_reading_future = None;
+                        drop(this.inner.as_mut().get_mut().replace(inner));
+                        *this.decompressed = chunk;
+                        *this.position = 0;
+                        continue;
+                    }
+                    Poll::Ready(Ok((None, _inner))) => {
+                        *this.block_reading_future = None;
+                        this.inner.as_mut().set(None);
+                        return Poll::Ready(Ok(()));
+                    }
+                    Poll::Ready(Err(e)) => {
+                        *this.block_reading_future = None;
+                        this.inner.as_mut().set(None);
+                        return Poll::Ready(Err(std::io::Error::new(ErrorKind::InvalidData, e)));
+                    }
+                }
+            } else if let Some(inner) = this.inner.as_mut().get_mut().take() {
+                let mode = *this.mode;
+                *this.block_reading_future = Some(Box::pin(async move {
+                    let mut inner = inner;
+                    let chunk = Self::read_chunk(&mut inner, mode).await?;
                     Ok((chunk, inner))
                 }));
                 continue;
+            } else {
+                return Poll::Ready(Ok(()));
             }
-
-            return Poll::Ready(Ok(()));
         }
     }
-}
-
-/// Convenience helper to read and decompress a single compression frame.
-pub(crate) async fn read_compressed_block<R: ClickHouseRead + 'static>(
-    reader: &mut R,
-    mode: CompressionMethod,
-) -> Result<Option<Vec<u8>>> {
-    StreamingDecompressor::read_chunk(reader, mode).await
 }
 
 /// Async writer that frames and compresses data into `ClickHouse` compression chunks.
@@ -503,9 +495,9 @@ mod tests {
         let compressed =
             compress_with_streaming(&data, CompressionMethod::LZ4, data.len() + 16).await;
 
-        let mut reader = Cursor::new(compressed);
+        let reader = Cursor::new(compressed);
         let mut decompressor =
-            StreamingDecompressor::new(CompressionMethod::LZ4, &mut reader).await.unwrap();
+            StreamingDecompressor::new(CompressionMethod::LZ4, reader).unwrap();
         let mut decompressed = Vec::new();
         let _ = decompressor.read_to_end(&mut decompressed).await.unwrap();
 
@@ -518,9 +510,9 @@ mod tests {
         let compressed =
             compress_with_streaming(&data, CompressionMethod::ZSTD, data.len() + 16).await;
 
-        let mut reader = Cursor::new(compressed);
+        let reader = Cursor::new(compressed);
         let mut decompressor =
-            StreamingDecompressor::new(CompressionMethod::ZSTD, &mut reader).await.unwrap();
+            StreamingDecompressor::new(CompressionMethod::ZSTD, reader).unwrap();
         let mut decompressed = Vec::new();
         let _ = decompressor.read_to_end(&mut decompressed).await.unwrap();
 
@@ -529,8 +521,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_decompress_data_none_errors() {
-        let mut reader = Cursor::new(Vec::<u8>::new());
-        let result = StreamingDecompressor::new(CompressionMethod::None, &mut reader).await;
+        let reader = Cursor::new(Vec::<u8>::new());
+        let result = StreamingDecompressor::new(CompressionMethod::None, reader);
         assert!(result.is_err());
     }
 
@@ -540,9 +532,9 @@ mod tests {
         let compressed =
             compress_with_streaming(&data, CompressionMethod::LZ4, data.len() + 16).await;
 
-        let mut reader = Cursor::new(compressed);
+        let reader = Cursor::new(compressed);
         let mut decompressor =
-            StreamingDecompressor::new(CompressionMethod::LZ4, &mut reader).await.unwrap();
+            StreamingDecompressor::new(CompressionMethod::LZ4, reader).unwrap();
 
         let mut result = vec![0u8; data.len()];
         let _ = decompressor.read_exact(&mut result).await.unwrap();
@@ -555,9 +547,9 @@ mod tests {
         let data = (0..200_000).map(|idx| (idx % 251) as u8).collect::<Vec<_>>();
         let compressed = compress_with_streaming(&data, CompressionMethod::LZ4, 8 * 1024).await;
 
-        let mut reader = Cursor::new(compressed);
+        let reader = Cursor::new(compressed);
         let mut decompressor =
-            StreamingDecompressor::new(CompressionMethod::LZ4, &mut reader).await.unwrap();
+            StreamingDecompressor::new(CompressionMethod::LZ4, reader).unwrap();
 
         let mut output = Vec::new();
         let _ = decompressor.read_to_end(&mut output).await.unwrap();
@@ -577,9 +569,9 @@ mod tests {
 
         assert!(!compressed.is_empty());
 
-        let mut reader = Cursor::new(compressed);
+        let reader = Cursor::new(compressed);
         let mut decompressor =
-            StreamingDecompressor::new(CompressionMethod::LZ4, &mut reader).await.unwrap();
+            StreamingDecompressor::new(CompressionMethod::LZ4, reader).unwrap();
         let mut decompressed = Vec::new();
         let _ = decompressor.read_to_end(&mut decompressed).await.unwrap();
         assert_eq!(decompressed, data);
@@ -593,8 +585,8 @@ mod tests {
         for method in [CompressionMethod::LZ4, CompressionMethod::ZSTD] {
             let compressed = compress_with_streaming(&payload, method, 16 * 1024).await;
 
-            let mut reader = Cursor::new(compressed);
-            let mut decompressor = StreamingDecompressor::new(method, &mut reader).await.unwrap();
+            let reader = Cursor::new(compressed);
+            let mut decompressor = StreamingDecompressor::new(method, reader).unwrap();
             let mut round_trip = Vec::new();
             let _ = decompressor.read_to_end(&mut round_trip).await.unwrap();
 
@@ -611,8 +603,8 @@ mod tests {
         // Corrupt the checksum (first byte of the high u64)
         compressed[0] ^= 0xFF;
 
-        let mut reader = Cursor::new(compressed);
-        let result = StreamingDecompressor::new(CompressionMethod::LZ4, &mut reader).await;
+        let reader = Cursor::new(compressed);
+        let result = StreamingDecompressor::new(CompressionMethod::LZ4, reader);
 
         let err = result.err().expect("expected checksum mismatch error");
         assert!(err.to_string().contains("Checksum mismatch"));

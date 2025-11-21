@@ -161,11 +161,31 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compression::StreamingDecompressor;
     use crate::native::sync::ReadAheadReader;
     use crate::client::connection::ClientMetadata;
     use crate::formats::sealed::ClientFormatImpl;
     use crate::native::protocol::{CompressionMethod, DBMS_TCP_PROTOCOL_VERSION};
     use crate::{ArrowOptions, NativeFormat};
+
+    async fn reader_from_buffer(
+        buffer: Vec<u8>,
+        compression: CompressionMethod,
+    ) -> ReadAheadReader<std::io::Cursor<Vec<u8>>> {
+        if matches!(compression, CompressionMethod::None) {
+            return ReadAheadReader::new(std::io::Cursor::new(buffer));
+        }
+
+        let cursor = std::io::Cursor::new(buffer);
+        let mut decompressor =
+            StreamingDecompressor::new(compression, cursor).expect("init decompressor");
+        let mut data = Vec::new();
+        let _ = decompressor
+            .read_to_end(&mut data)
+            .await
+            .expect("decompress buffer");
+        ReadAheadReader::new(std::io::Cursor::new(data))
+    }
 
     async fn multiblock_roundtrip_int32(compression: CompressionMethod) {
         let column_types = vec![("n".to_string(), Type::Int32)];
@@ -210,7 +230,7 @@ mod tests {
         .await
         .expect("write second block");
 
-        let mut cursor = ReadAheadReader::new(std::io::Cursor::new(buffer));
+        let mut cursor = reader_from_buffer(buffer, compression).await;
         let mut state = DeserializerState::default();
         let read_block1 =
             NativeFormat::read(&mut cursor, DBMS_TCP_PROTOCOL_VERSION, metadata, &mut state)
@@ -318,7 +338,7 @@ mod tests {
         .expect("write compressed block");
 
         // Read back
-        let mut cursor = ReadAheadReader::new(std::io::Cursor::new(buffer));
+        let mut cursor = reader_from_buffer(buffer, metadata.compression).await;
         let mut state = DeserializerState::default();
         let read_block =
             NativeFormat::read(&mut cursor, DBMS_TCP_PROTOCOL_VERSION, metadata, &mut state)
