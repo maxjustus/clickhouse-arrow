@@ -20,14 +20,14 @@ use crate::{Error, Result, Row, Type};
 /// A chunk of data in columnar form.
 pub struct Block {
     /// Metadata about the block
-    pub info: BlockInfo,
+    pub info:         BlockInfo,
     /// The number of rows contained in the block
-    pub rows: u64,
+    pub rows:         u64,
     /// The type of each column by name, in order.
     pub column_types: Vec<(String, Type)>,
     /// The data of each column by name, in order. All `Value` should correspond to the associated
     /// type in `column_types`.
-    pub column_data: Vec<Value>,
+    pub column_data:  Vec<Value>,
 }
 
 // Iterator type for `take_iter_rows`
@@ -172,22 +172,20 @@ mod tests {
         let column_types = vec![
             ("m".to_string(), Type::Map(Box::new(Type::String), Box::new(Type::Int32))),
             ("d".to_string(), Type::Dynamic { max_types: None }),
-            (
-                "j".to_string(),
-                Type::JSON {
-                    max_dynamic_paths: None,
-                    max_dynamic_types: None,
-                    typed_paths: vec![],
-                    skip_exact: vec![],
-                    skip_regex: vec![],
-                },
-            ),
+            ("j".to_string(), Type::JSON {
+                max_dynamic_paths: None,
+                max_dynamic_types: None,
+                typed_paths:       vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
+            }),
         ];
 
-        let map_row0 = Value::Map(
-            vec![Value::String(b"k1".to_vec()), Value::String(b"k2".to_vec())],
-            vec![Value::Int32(10), Value::Int32(20)],
-        );
+        let map_row0 =
+            Value::Map(vec![Value::String(b"k1".to_vec()), Value::String(b"k2".to_vec())], vec![
+                Value::Int32(10),
+                Value::Int32(20),
+            ]);
         let map_row1 = Value::Map(vec![Value::String(b"a".to_vec())], vec![Value::Int32(-1)]);
 
         #[cfg(feature = "serde")]
@@ -222,9 +220,9 @@ mod tests {
 
         // Write compressed
         let metadata = ClientMetadata {
-            client_id: 1,
-            compression: CompressionMethod::LZ4,
-            arrow_options: ArrowOptions::default(),
+            client_id:      1,
+            compression:    CompressionMethod::LZ4,
+            arrow_options:  ArrowOptions::default(),
             server_version: None,
         };
         let mut buffer = Vec::new();

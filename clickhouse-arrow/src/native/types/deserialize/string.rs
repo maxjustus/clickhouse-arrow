@@ -15,8 +15,7 @@ pub(crate) async fn read_single_string_value<R: ClickHouseRead>(
     Ok(match type_ {
         Type::String | Type::Binary => Value::String(reader.read_string().await?),
         Type::FixedSizedString(size) | Type::FixedSizedBinary(size) => {
-            let mut buf = Vec::with_capacity(*size);
-            unsafe { buf.set_len(*size) };
+            let mut buf = vec![0u8; *size];
             let _ = reader.read_exact(&mut buf[..]).await?;
             let first_null = buf.iter().position(|x| *x == 0).unwrap_or(buf.len());
             buf.truncate(first_null);

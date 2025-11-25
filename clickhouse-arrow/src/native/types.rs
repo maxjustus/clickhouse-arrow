@@ -93,11 +93,11 @@ pub enum Type {
         max_types: Option<u32>, // Default: 32 if None
     },
     JSON {
-        max_dynamic_paths: Option<u32>,        // Default: 1024 if None
-        max_dynamic_types: Option<u32>,        // Default: 32 if None
-        typed_paths: Vec<(String, Box<Type>)>, // (path, type) pairs like ("Name", String)
-        skip_exact: Vec<String>,               // Exact paths to skip
-        skip_regex: Vec<String>,               // Regex patterns to skip
+        max_dynamic_paths: Option<u32>,              // Default: 1024 if None
+        max_dynamic_types: Option<u32>,              // Default: 32 if None
+        typed_paths:       Vec<(String, Box<Type>)>, // (path, type) pairs like ("Name", String)
+        skip_exact:        Vec<String>,              // Exact paths to skip
+        skip_regex:        Vec<String>,              // Regex patterns to skip
     },
 
     Object,
@@ -244,14 +244,10 @@ impl Type {
     }
 
     /// Check if this is a Dynamic type
-    pub fn is_dynamic(&self) -> bool {
-        matches!(self, Type::Dynamic { .. })
-    }
+    pub fn is_dynamic(&self) -> bool { matches!(self, Type::Dynamic { .. }) }
 
     /// Check if this is a JSON type  
-    pub fn is_json(&self) -> bool {
-        matches!(self, Type::JSON { .. })
-    }
+    pub fn is_json(&self) -> bool { matches!(self, Type::JSON { .. }) }
 
     pub fn strip_null(&self) -> &Type {
         match self {
@@ -260,9 +256,7 @@ impl Type {
         }
     }
 
-    pub fn is_nullable(&self) -> bool {
-        matches!(self, Type::Nullable(_))
-    }
+    pub fn is_nullable(&self) -> bool { matches!(self, Type::Nullable(_)) }
 
     pub fn strip_low_cardinality(&self) -> &Type {
         match self {

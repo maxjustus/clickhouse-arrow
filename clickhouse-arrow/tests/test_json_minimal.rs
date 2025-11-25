@@ -42,19 +42,16 @@ async fn test_json_minimal() {
             let json_values = vec![Value::String(br#"{"id": 1, "name": "test"}"#.to_vec())];
 
             let block = Block {
-                info: BlockInfo::default(),
-                rows: 1,
-                column_types: vec![(
-                    "data".to_string(),
-                    Type::JSON {
-                        max_dynamic_paths: None,
-                        max_dynamic_types: None,
-                        typed_paths: vec![],
-                        skip_exact: vec![],
-                        skip_regex: vec![],
-                    },
-                )],
-                column_data: json_values,
+                info:         BlockInfo::default(),
+                rows:         1,
+                column_types: vec![("data".to_string(), Type::JSON {
+                    max_dynamic_paths: None,
+                    max_dynamic_types: None,
+                    typed_paths:       vec![],
+                    skip_exact:        vec![],
+                    skip_regex:        vec![],
+                })],
+                column_data:  json_values,
             };
 
             use futures_util::StreamExt;

@@ -19,13 +19,10 @@ pub fn generate_nested_dynamic_test_block() -> Block {
         // Tuple with mixed types (but each position has consistent type)
         Value::Tuple(vec![Value::String(b"name".to_vec()), Value::Int32(25), Value::Float64(3.14)]),
         // Map with homogeneous nested values
-        Value::Map(
-            vec![Value::String(b"key1".to_vec()), Value::String(b"key2".to_vec())],
-            vec![
-                Value::Array(vec![Value::Int32(1), Value::Int32(2)]),
-                Value::Array(vec![Value::Int32(3), Value::Int32(4)]),
-            ],
-        ),
+        Value::Map(vec![Value::String(b"key1".to_vec()), Value::String(b"key2".to_vec())], vec![
+            Value::Array(vec![Value::Int32(1), Value::Int32(2)]),
+            Value::Array(vec![Value::Int32(3), Value::Int32(4)]),
+        ]),
         // Complex nested but still homogeneous: Array of Tuples
         Value::Array(vec![
             Value::Tuple(vec![Value::String(b"item1".to_vec()), Value::Float64(19.99)]),
@@ -36,10 +33,10 @@ pub fn generate_nested_dynamic_test_block() -> Block {
     ];
 
     Block {
-        info: BlockInfo::default(),
-        rows: rows.len() as u64,
+        info:         BlockInfo::default(),
+        rows:         rows.len() as u64,
         column_types: vec![("nested_dynamic".to_string(), Type::Dynamic { max_types: None })],
-        column_data: rows,
+        column_data:  rows,
     }
 }
 
@@ -77,24 +74,20 @@ pub fn generate_heterogeneous_dynamic_test_block() -> Block {
             ]),
         ]),
         // Heterogeneous as map values
-        Value::Map(
-            vec![Value::String(b"chaos".to_vec())],
-            vec![Value::Array(vec![
-                Value::Int32(1),
-                Value::String(b"mixed_in_map".to_vec()),
-                Value::Tuple(vec![Value::Int8(1), Value::Float64(2.0)]),
-            ])],
-        ),
+        Value::Map(vec![Value::String(b"chaos".to_vec())], vec![Value::Array(vec![
+            Value::Int32(1),
+            Value::String(b"mixed_in_map".to_vec()),
+            Value::Tuple(vec![Value::Int8(1), Value::Float64(2.0)]),
+        ])]),
     ];
 
     Block {
-        info: BlockInfo::default(),
-        rows: rows.len() as u64,
-        column_types: vec![(
-            "heterogeneous_dynamic".to_string(),
-            Type::Dynamic { max_types: None },
-        )],
-        column_data: rows,
+        info:         BlockInfo::default(),
+        rows:         rows.len() as u64,
+        column_types: vec![("heterogeneous_dynamic".to_string(), Type::Dynamic {
+            max_types: None,
+        })],
+        column_data:  rows,
     }
 }
 
@@ -116,10 +109,10 @@ pub fn generate_max_types_test_block() -> Block {
     ];
 
     Block {
-        info: BlockInfo::default(),
-        rows: rows.len() as u64,
+        info:         BlockInfo::default(),
+        rows:         rows.len() as u64,
         column_types: vec![("limited_dynamic".to_string(), Type::Dynamic { max_types: Some(5) })],
-        column_data: rows,
+        column_data:  rows,
     }
 }
 
@@ -171,17 +164,17 @@ mod tests {
         let nested = Value::Array(vec![
             Value::Tuple(vec![
                 Value::Int32(1),
-                Value::Map(
-                    vec![Value::String(b"key".to_vec())],
-                    vec![Value::Array(vec![Value::Float64(3.14), Value::Float64(2.71)])],
-                ),
+                Value::Map(vec![Value::String(b"key".to_vec())], vec![Value::Array(vec![
+                    Value::Float64(3.14),
+                    Value::Float64(2.71),
+                ])]),
             ]),
             Value::Tuple(vec![
                 Value::Int32(2),
-                Value::Map(
-                    vec![Value::String(b"key2".to_vec())],
-                    vec![Value::Array(vec![Value::Float64(1.41), Value::Float64(1.73)])],
-                ),
+                Value::Map(vec![Value::String(b"key2".to_vec())], vec![Value::Array(vec![
+                    Value::Float64(1.41),
+                    Value::Float64(1.73),
+                ])]),
             ]),
         ]);
 

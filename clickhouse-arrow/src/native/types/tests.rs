@@ -479,10 +479,10 @@ async fn roundtrip_map() {
     let values = &[
         Value::Map(vec![], vec![]),
         Value::Map(vec![Value::UInt32(1)], vec![Value::UInt16(2)]),
-        Value::Map(
-            vec![Value::UInt32(5), Value::UInt32(3)],
-            vec![Value::UInt16(6), Value::UInt16(4)],
-        ),
+        Value::Map(vec![Value::UInt32(5), Value::UInt32(3)], vec![
+            Value::UInt16(6),
+            Value::UInt16(4),
+        ]),
     ];
     assert_eq!(
         &values[..],

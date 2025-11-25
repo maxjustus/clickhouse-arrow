@@ -90,32 +90,33 @@ fn serialize_typed_impl<S: Serializer>(
                 }
                 let mut map = serializer.serialize_map(Some(keys.len()))?;
                 for (k, v) in keys.iter().zip(values.iter()) {
-                    map.serialize_entry(
-                        &Key { k, t: key_ty, p: map_key_policy },
-                        &TypedWith { v, t: value_ty, map_key_policy },
-                    )?;
+                    map.serialize_entry(&Key { k, t: key_ty, p: map_key_policy }, &TypedWith {
+                        v,
+                        t: value_ty,
+                        map_key_policy,
+                    })?;
                 }
                 map.end()
             }
             MapKeyPolicy::Pairs => {
                 struct PairSer<'a> {
-                    k: &'a Value,
+                    k:  &'a Value,
                     kt: &'a Type,
-                    v: &'a Value,
+                    v:  &'a Value,
                     vt: &'a Type,
-                    p: MapKeyPolicy,
+                    p:  MapKeyPolicy,
                 }
                 impl Serialize for PairSer<'_> {
                     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
                         let mut pair = serializer.serialize_seq(Some(2))?;
                         pair.serialize_element(&TypedWith {
-                            v: self.k,
-                            t: self.kt,
+                            v:              self.k,
+                            t:              self.kt,
                             map_key_policy: self.p,
                         })?;
                         pair.serialize_element(&TypedWith {
-                            v: self.v,
-                            t: self.vt,
+                            v:              self.v,
+                            t:              self.vt,
                             map_key_policy: self.p,
                         })?;
                         pair.end()
@@ -354,15 +355,13 @@ pub enum MapKeyPolicy {
 }
 
 impl Default for MapKeyPolicy {
-    fn default() -> Self {
-        MapKeyPolicy::Stringify
-    }
+    fn default() -> Self { MapKeyPolicy::Stringify }
 }
 
 /// Serialize a `Value` with an explicit map-key policy.
 pub struct TypedWith<'a> {
-    pub v: &'a Value,
-    pub t: &'a Type,
+    pub v:              &'a Value,
+    pub t:              &'a Type,
     pub map_key_policy: MapKeyPolicy,
 }
 
@@ -391,7 +390,7 @@ pub(super) fn stringify_key_for_json(k: &Value) -> String {
 /// Serialize a row object from `(name, Type)` columns and corresponding `Value`s.
 pub struct RowSerializer<'a> {
     pub cols: &'a [(String, Type)],
-    pub row: &'a [Value],
+    pub row:  &'a [Value],
 }
 
 impl Serialize for RowSerializer<'_> {
@@ -411,8 +410,8 @@ impl Serialize for RowSerializer<'_> {
 /// into named tuples server-side.
 /// Serialize a row object with an explicit map-key policy.
 pub struct RowSerWith<'a> {
-    pub cols: &'a [(String, Type)],
-    pub row: &'a [Value],
+    pub cols:           &'a [(String, Type)],
+    pub row:            &'a [Value],
     pub map_key_policy: MapKeyPolicy,
 }
 
@@ -422,10 +421,11 @@ impl Serialize for RowSerWith<'_> {
         let mut map = serializer.serialize_map(Some(cap))?;
         for i in 0..cap {
             let (ref name, ref ty) = self.cols[i];
-            map.serialize_entry(
-                name,
-                &TypedWith { v: &self.row[i], t: ty, map_key_policy: self.map_key_policy },
-            )?;
+            map.serialize_entry(name, &TypedWith {
+                v:              &self.row[i],
+                t:              ty,
+                map_key_policy: self.map_key_policy,
+            })?;
         }
         map.end()
     }
@@ -476,13 +476,13 @@ mod tests {
     #[test]
     fn map_stringify_policy_serializes_string_keys() {
         let ty = Type::Map(Box::new(Type::Int64), Box::new(Type::String));
-        let v = Value::Map(
-            vec![Value::Int64(7), Value::Int64(42)],
-            vec![Value::string("x"), Value::string("y")],
-        );
+        let v = Value::Map(vec![Value::Int64(7), Value::Int64(42)], vec![
+            Value::string("x"),
+            Value::string("y"),
+        ]);
         let got = serde_json::to_value(TypedWith {
-            v: &v,
-            t: &ty,
+            v:              &v,
+            t:              &ty,
             map_key_policy: MapKeyPolicy::Stringify,
         })
         .unwrap();
@@ -494,9 +494,12 @@ mod tests {
         let ty = Type::Map(Box::new(Type::Int64), Box::new(Type::String));
         let v = Value::Map(vec![Value::Int64(7)], vec![Value::string("x")]);
         // serde_json coerces non-string keys to strings when serializing maps
-        let got =
-            serde_json::to_value(TypedWith { v: &v, t: &ty, map_key_policy: MapKeyPolicy::Native })
-                .unwrap();
+        let got = serde_json::to_value(TypedWith {
+            v:              &v,
+            t:              &ty,
+            map_key_policy: MapKeyPolicy::Native,
+        })
+        .unwrap();
         assert_eq!(got, json!({"7": "x"}));
     }
 
@@ -507,9 +510,12 @@ mod tests {
         let ty = Type::Map(Box::new(key_ty.clone()), Box::new(Type::String));
         let key = Value::Tuple(vec![Value::Int32(1), Value::Int32(2)]);
         let v = Value::Map(vec![key], vec![Value::string("x")]);
-        let err =
-            serde_json::to_value(TypedWith { v: &v, t: &ty, map_key_policy: MapKeyPolicy::Native })
-                .unwrap_err();
+        let err = serde_json::to_value(TypedWith {
+            v:              &v,
+            t:              &ty,
+            map_key_policy: MapKeyPolicy::Native,
+        })
+        .unwrap_err();
         let msg = err.to_string().to_lowercase();
         assert!(msg.contains("key") || msg.contains("string"));
     }

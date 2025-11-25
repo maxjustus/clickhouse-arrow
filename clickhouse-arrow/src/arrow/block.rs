@@ -235,13 +235,10 @@ mod tests {
             Field::new("id", DataType::Int32, false),
             Field::new("name", DataType::Utf8, true),
         ]));
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(Int32Array::from(vec![1, 2, 3])),
-                Arc::new(StringArray::from(vec![Some("alice"), None, Some("bob")])),
-            ],
-        )
+        RecordBatch::try_new(schema, vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3])),
+            Arc::new(StringArray::from(vec![Some("alice"), None, Some("bob")])),
+        ])
         .unwrap()
     }
 
@@ -384,11 +381,11 @@ mod tests {
     #[tokio::test]
     async fn test_round_trip_single_column_int32() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(Int32Array::from(vec![
+                1, 2, 3,
+            ]))])
+            .unwrap();
 
         let arrow_options = ArrowOptions::default();
         let mut buffer = Cursor::new(Vec::new());
@@ -473,10 +470,9 @@ mod tests {
             deserialized_values.values().as_ref(),
             Arc::new(Int32Array::from(vec![10, 20, 30, 40, 50])).as_ref()
         );
-        assert_eq!(
-            deserialized_values.offsets().iter().copied().collect::<Vec<i32>>(),
-            vec![0, 2, 3, 5]
-        );
+        assert_eq!(deserialized_values.offsets().iter().copied().collect::<Vec<i32>>(), vec![
+            0, 2, 3, 5
+        ]);
     }
 
     /// Tests round-trip serialization and deserialization of a `RecordBatch` with a Map column.
@@ -536,20 +532,18 @@ mod tests {
             struct_array.column(1).as_any().downcast_ref::<Int32Array>().unwrap(),
             &Int32Array::from(vec![1, 2, 3, 4, 5])
         );
-        assert_eq!(
-            deserialized_map.offsets().iter().copied().collect::<Vec<i32>>(),
-            vec![0, 2, 3, 5]
-        );
+        assert_eq!(deserialized_map.offsets().iter().copied().collect::<Vec<i32>>(), vec![
+            0, 2, 3, 5
+        ]);
     }
 
     /// Tests round-trip serialization and deserialization of a `RecordBatch` with zero rows.
     #[tokio::test]
     async fn test_round_trip_zero_rows() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(Int32Array::from(Vec::<i32>::new()))],
-        )
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(Int32Array::from(
+            Vec::<i32>::new(),
+        ))])
         .unwrap();
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(true);
@@ -616,11 +610,11 @@ mod tests {
     #[tokio::test]
     async fn test_round_trip_with_header() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(Int32Array::from(vec![
+                1, 2, 3,
+            ]))])
+            .unwrap();
 
         let header = vec![("id".to_string(), Type::Int32)];
         let arrow_options = ArrowOptions::default().with_strings_as_strings(true);
@@ -655,11 +649,13 @@ mod tests {
     #[tokio::test]
     async fn test_round_trip_strings_as_binary() {
         let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Binary, true)]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(BinaryArray::from(vec![Some(b"a" as &[u8]), None, Some(b"c" as &[u8])]))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(BinaryArray::from(vec![
+                Some(b"a" as &[u8]),
+                None,
+                Some(b"c" as &[u8]),
+            ]))])
+            .unwrap();
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(false);
         let mut buffer = Cursor::new(Vec::new());
@@ -693,11 +689,11 @@ mod tests {
     #[tokio::test]
     async fn test_round_trip_float64() {
         let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Float64, false)]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(Float64Array::from(vec![1.5, -2.0, 3.1]))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(Float64Array::from(vec![
+                1.5, -2.0, 3.1,
+            ]))])
+            .unwrap();
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(true);
         let mut buffer = Cursor::new(Vec::new());
@@ -735,13 +731,10 @@ mod tests {
             DataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
             true,
         )]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(
-                TimestampSecondArray::from(vec![Some(1000), None, Some(3000)])
-                    .with_timezone_opt(Some("UTC")),
-            )],
-        )
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(
+            TimestampSecondArray::from(vec![Some(1000), None, Some(3000)])
+                .with_timezone_opt(Some("UTC")),
+        )])
         .unwrap();
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(true);
@@ -781,14 +774,11 @@ mod tests {
     async fn test_round_trip_decimal128() {
         let schema =
             Arc::new(Schema::new(vec![Field::new("price", DataType::Decimal128(18, 4), false)]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(
-                Decimal128Array::from(vec![10000, 20000, 30000])
-                    .with_precision_and_scale(18, 4)
-                    .unwrap(),
-            )],
-        )
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(
+            Decimal128Array::from(vec![10000, 20000, 30000])
+                .with_precision_and_scale(18, 4)
+                .unwrap(),
+        )])
         .unwrap();
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(true);
@@ -832,11 +822,11 @@ mod tests {
             DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
             false,
         )]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(DictionaryArray::<Int32Type>::from_iter(vec!["cat", "dog", "cat"]))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(
+                DictionaryArray::<Int32Type>::from_iter(vec!["cat", "dog", "cat"]),
+            )])
+            .unwrap();
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(true);
         let mut buffer = Cursor::new(Vec::new());
@@ -876,12 +866,9 @@ mod tests {
             DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
             false,
         )]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(DictionaryArray::<Int8Type>::from_iter(vec![
-                "active", "inactive", "active",
-            ]))],
-        )
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(
+            DictionaryArray::<Int8Type>::from_iter(vec!["active", "inactive", "active"]),
+        )])
         .unwrap();
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(true);
@@ -1001,12 +988,9 @@ mod tests {
             DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
             false,
         )]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(DictionaryArray::<Int8Type>::from_iter(vec![
-                "active", "inactive", "active",
-            ]))],
-        )
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(
+            DictionaryArray::<Int8Type>::from_iter(vec!["active", "inactive", "active"]),
+        )])
         .unwrap();
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(true);
@@ -1054,12 +1038,9 @@ mod tests {
             DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Utf8)),
             false,
         )]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(DictionaryArray::<Int16Type>::from_iter(vec![
-                "active", "inactive", "active",
-            ]))],
-        )
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(
+            DictionaryArray::<Int16Type>::from_iter(vec!["active", "inactive", "active"]),
+        )])
         .unwrap();
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(true);
@@ -1106,13 +1087,11 @@ mod tests {
             DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
             false,
         )]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(DictionaryArray::<Int32Type>::from_iter(vec![
-                "active", "inactive", "active",
-            ]))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(
+                DictionaryArray::<Int32Type>::from_iter(vec!["active", "inactive", "active"]),
+            )])
+            .unwrap();
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(true);
         let mut buffer = Cursor::new(Vec::new());
@@ -1241,14 +1220,12 @@ mod tests {
     #[tokio::test]
     async fn test_round_trip_non_utf8_binary() {
         let schema = Arc::new(Schema::new(vec![Field::new("data", DataType::Binary, false)]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(BinaryArray::from_vec(vec![
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(BinaryArray::from_vec(vec![
                 b"\xFF\xFE" as &[u8], // Non-UTF-8
                 b"\x00\x01" as &[u8],
-            ]))],
-        )
-        .unwrap();
+            ]))])
+            .unwrap();
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(false);
         let mut buffer = Cursor::new(Vec::new());
@@ -1283,11 +1260,13 @@ mod tests {
     #[tokio::test]
     async fn test_round_trip_max_min_int32() {
         let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Int32, false)]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(Int32Array::from(vec![i32::MIN, 0, i32::MAX]))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(Int32Array::from(vec![
+                i32::MIN,
+                0,
+                i32::MAX,
+            ]))])
+            .unwrap();
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(true);
         let mut buffer = Cursor::new(Vec::new());
@@ -1320,11 +1299,11 @@ mod tests {
     #[tokio::test]
     async fn test_header_type_mismatch() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(Int32Array::from(vec![
+                1, 2, 3,
+            ]))])
+            .unwrap();
         let header = vec![("id".to_string(), Type::String)]; // Mismatch: Int32 vs String
 
         let arrow_options = ArrowOptions::default().with_strings_as_strings(true);
@@ -1349,17 +1328,14 @@ mod tests {
             DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
             true,
         )]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(
-                DictionaryArray::<Int32Type>::try_new(
-                    Int32Array::from(vec![Some(0), Some(3), Some(1), None, Some(2)]),
-                    Arc::new(StringArray::from(vec!["active", "inactive", "pending", "absent"]))
-                        as ArrayRef,
-                )
-                .unwrap(),
-            )],
-        )
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(
+            DictionaryArray::<Int32Type>::try_new(
+                Int32Array::from(vec![Some(0), Some(3), Some(1), None, Some(2)]),
+                Arc::new(StringArray::from(vec!["active", "inactive", "pending", "absent"]))
+                    as ArrayRef,
+            )
+            .unwrap(),
+        )])
         .expect("Failed to create RecordBatch");
 
         let mut writer = Cursor::new(Vec::new());

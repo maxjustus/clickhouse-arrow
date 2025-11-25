@@ -60,7 +60,7 @@ async fn test_json_typed_nullability_defaults_e2e() {
             let type_ = Type::JSON {
                 max_dynamic_paths: None,
                 max_dynamic_types: None,
-                typed_paths: vec![
+                typed_paths:       vec![
                     ("id".to_string(), Box::new(Type::UInt32)),
                     ("status".to_string(), Box::new(Type::LowCardinality(Box::new(Type::String)))),
                     (
@@ -68,15 +68,15 @@ async fn test_json_typed_nullability_defaults_e2e() {
                         Box::new(Type::variant(vec![Type::String, Type::UInt64])),
                     ),
                 ],
-                skip_exact: vec![],
-                skip_regex: vec![],
+                skip_exact:        vec![],
+                skip_regex:        vec![],
             };
 
             let block = Block {
-                info: BlockInfo::default(),
-                rows: rows.len() as u64,
+                info:         BlockInfo::default(),
+                rows:         rows.len() as u64,
                 column_types: vec![("data".to_string(), type_)],
-                column_data: rows,
+                column_data:  rows,
             };
 
             // Insert using native

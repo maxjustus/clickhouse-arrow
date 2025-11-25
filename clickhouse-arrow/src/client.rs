@@ -102,8 +102,8 @@ pub struct ConnectionContext {
 /// Emitted clickhouse events from the underlying connection
 #[derive(Debug, Clone)]
 pub struct Event {
-    pub event: ClickHouseEvent,
-    pub qid: Qid,
+    pub event:     ClickHouseEvent,
+    pub qid:       Qid,
     pub client_id: u16,
 }
 
@@ -158,9 +158,9 @@ pub enum ClickHouseEvent {
 #[derive(Clone, Debug)]
 pub struct Client<T: ClientFormat> {
     pub client_id: u16,
-    connection: Arc<connection::Connection<T>>,
-    events: Arc<broadcast::Sender<Event>>,
-    settings: Option<Arc<Settings>>,
+    connection:    Arc<connection::Connection<T>>,
+    events:        Arc<broadcast::Sender<Event>>,
+    settings:      Option<Arc<Settings>>,
 }
 
 impl<T: ClientFormat> Client<T> {
@@ -187,9 +187,7 @@ impl<T: ClientFormat> Client<T> {
     ///     .with_username("default")
     ///     .with_password("");
     /// ```
-    pub fn builder() -> ClientBuilder {
-        ClientBuilder::new()
-    }
+    pub fn builder() -> ClientBuilder { ClientBuilder::new() }
 
     /// Establishes a connection to a `ClickHouse` server over TCP, with optional TLS support.
     ///
@@ -303,9 +301,7 @@ impl<T: ClientFormat> Client<T> {
     /// let status = client.status();
     /// println!("Connection status: {status:?}");
     /// ```
-    pub fn status(&self) -> ConnectionStatus {
-        self.connection.status()
-    }
+    pub fn status(&self) -> ConnectionStatus { self.connection.status() }
 
     /// Subscribes to progress and profile events from `ClickHouse` queries.
     ///
@@ -338,9 +334,7 @@ impl<T: ClientFormat> Client<T> {
     /// // Execute a query to generate events
     /// client.query("SELECT * FROM large_table").await.unwrap();
     /// ```
-    pub fn subscribe_events(&self) -> broadcast::Receiver<Event> {
-        self.events.subscribe()
-    }
+    pub fn subscribe_events(&self) -> broadcast::Receiver<Event> { self.events.subscribe() }
 
     /// Checks the health of the underlying `ClickHouse` connection.
     ///
@@ -1720,44 +1714,42 @@ fn split_db_table<'a>(default_db: &'a str, table: &'a str) -> (&'a str, &'a str)
 #[cfg(feature = "serde")]
 #[derive(Debug, Clone)]
 pub struct InsertOptions {
-    pub batch_size: usize,
-    pub strict: bool,
-    pub on_missing_default: bool,
+    pub batch_size:          usize,
+    pub strict:              bool,
+    pub on_missing_default:  bool,
     // TODO: get rid of this. It's a weird  thing to include.
     pub set_object_settings: bool,
     /// Optional explicit column list to include in the INSERT statement,
     /// e.g. INSERT INTO db.table (col1, col2) VALUES ...
     /// When set, the server applies defaults for unspecified columns.
-    pub columns: Option<Vec<String>>,
+    pub columns:             Option<Vec<String>>,
 }
 
 #[cfg(feature = "serde")]
 impl InsertOptions {
-    pub fn default_batch() -> usize {
-        10_000
-    }
+    pub fn default_batch() -> usize { 10_000 }
 }
 
 #[cfg(feature = "serde")]
 impl Default for InsertOptions {
     fn default() -> Self {
         Self {
-            batch_size: Self::default_batch(),
-            strict: false,
-            on_missing_default: true,
+            batch_size:          Self::default_batch(),
+            strict:              false,
+            on_missing_default:  true,
             set_object_settings: true,
-            columns: None,
+            columns:             None,
         }
     }
 }
 
 #[cfg(feature = "serde")]
 pub struct InsertInto<'a> {
-    client: &'a Client<NativeFormat>,
-    database: String,
-    table: String,
-    options: InsertOptions,
-    pending: Vec<serde_json::Value>,
+    client:     &'a Client<NativeFormat>,
+    database:   String,
+    table:      String,
+    options:    InsertOptions,
+    pending:    Vec<serde_json::Value>,
     total_rows: usize,
 }
 
@@ -1846,9 +1838,7 @@ impl InsertInto<'_> {
     }
 
     /// Finish the insert operation by flushing any remaining rows.
-    pub async fn finish(mut self) -> Result<()> {
-        self.flush().await
-    }
+    pub async fn finish(mut self) -> Result<()> { self.flush().await }
 }
 impl Client<ArrowFormat> {
     /// Executes a `ClickHouse` query and streams Arrow [`RecordBatch`] results.
