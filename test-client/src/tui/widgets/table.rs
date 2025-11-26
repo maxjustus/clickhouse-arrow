@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use ratatui::layout::Constraint;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Widget, Wrap};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
@@ -374,6 +374,11 @@ pub struct SortableTable {
     pub value_scroll:   usize,
     pub visible_height: usize,
 
+    // Header focus for column sorting
+    pub header_focused: bool,
+    pub focused_col:    usize,
+    visible_cols:       usize, // Updated during render
+
     // Path stats computation
     stats_cache:           HashMap<(usize, ValuePath), PathStats>,
     stats_pending:         Option<(usize, ValuePath, oneshot::Receiver<PathStats>)>,
@@ -397,16 +402,25 @@ impl SortableTable {
             selected_field: 0,
             value_scroll: 0,
             visible_height: 20,
+            header_focused: false,
+            focused_col: 0,
+            visible_cols: 10,
             stats_cache: HashMap::new(),
             stats_pending: None,
             stats_cache_row_count: 0,
         }
     }
 
-    /// Update visible height based on render area. Call before navigation operations.
+    /// Update visible dimensions based on render area. Call before navigation operations.
     pub fn set_visible_height(&mut self, height: u16) {
         // Account for borders (2) and header row (1)
         self.visible_height = height.saturating_sub(3) as usize;
+    }
+
+    /// Update visible columns based on render width
+    pub fn set_visible_width(&mut self, width: u16) {
+        let (visible_cols, _) = self.columns_for_width(width);
+        self.visible_cols = visible_cols;
     }
 
     pub fn add_row(&mut self, row: Vec<Value>) {
@@ -448,16 +462,43 @@ impl SortableTable {
             self.sort_order = SortOrder::Ascending;
         }
 
-        // Sort using display string representation for consistency
-        self.rows.sort_by(|a, b| {
-            let a_str = a.get(col).map(|v| format_cell_value(v, 100));
-            let b_str = b.get(col).map(|v| format_cell_value(v, 100));
-            let ord = a_str.cmp(&b_str);
+        self.apply_sort();
+    }
+
+    /// Cycle sort on a column: None → Asc → Desc → None
+    pub fn cycle_sort(&mut self, col: usize) {
+        if Some(col) == self.sort_column {
             match self.sort_order {
-                SortOrder::Ascending => ord,
-                SortOrder::Descending => ord.reverse(),
+                SortOrder::Ascending => {
+                    self.sort_order = SortOrder::Descending;
+                    self.apply_sort();
+                }
+                SortOrder::Descending => {
+                    // Clear sort
+                    self.sort_column = None;
+                }
             }
-        });
+        } else {
+            self.sort_column = Some(col);
+            self.sort_order = SortOrder::Ascending;
+            self.apply_sort();
+        }
+    }
+
+    fn apply_sort(&mut self) {
+        if let Some(col) = self.sort_column {
+            // Sort using display string representation for consistency
+            let order = self.sort_order;
+            self.rows.sort_by(|a, b| {
+                let a_str = a.get(col).map(|v| format_cell_value(v, 100));
+                let b_str = b.get(col).map(|v| format_cell_value(v, 100));
+                let ord = a_str.cmp(&b_str);
+                match order {
+                    SortOrder::Ascending => ord,
+                    SortOrder::Descending => ord.reverse(),
+                }
+            });
+        }
     }
 
     pub fn next_row(&mut self) {
@@ -491,6 +532,41 @@ impl SortableTable {
         let new_row = self.selected_row.saturating_sub(jump);
         self.selected_row = new_row;
         self.scroll_offset = self.selected_row.saturating_sub(jump / 2);
+    }
+
+    // === Header navigation methods ===
+
+    /// Focus the header row, positioning on the current visible column
+    pub fn focus_header(&mut self) {
+        self.header_focused = true;
+        self.focused_col = self.col_offset;
+    }
+
+    /// Exit header focus and return to data rows
+    pub fn unfocus_header(&mut self) { self.header_focused = false; }
+
+    /// Move focus left in header
+    pub fn header_left(&mut self) {
+        if self.focused_col > 0 {
+            self.focused_col -= 1;
+            // Scroll columns if needed
+            if self.focused_col < self.col_offset {
+                self.col_offset = self.focused_col;
+            }
+        }
+    }
+
+    /// Move focus right in header
+    pub fn header_right(&mut self) {
+        if self.focused_col < self.columns.len().saturating_sub(1) {
+            self.focused_col += 1;
+            // Scroll right if focused column would be off-screen
+            // Use visible_cols as estimate (updated elsewhere or use conservative default)
+            let visible = self.visible_cols.max(1);
+            if self.focused_col >= self.col_offset + visible {
+                self.col_offset = self.focused_col.saturating_sub(visible - 1);
+            }
+        }
     }
 
     // === Tree navigation methods ===
@@ -882,22 +958,36 @@ impl SortableTable {
         let (visible_cols, col_widths_allocated) = self.columns_for_width(available_width);
         let col_end = self.col_offset + visible_cols;
 
-        let header_cells =
-            self.columns.iter().skip(self.col_offset).take(visible_cols).enumerate().map(
-                |(i, h)| {
-                    let actual_idx = self.col_offset + i;
-                    if Some(actual_idx) == self.sort_column {
-                        let arrow = match self.sort_order {
-                            SortOrder::Ascending => " ↑",
-                            SortOrder::Descending => " ↓",
-                        };
-                        return format!("{}{}", h, arrow);
-                    }
+        let header_cells: Vec<Cell> = self
+            .columns
+            .iter()
+            .skip(self.col_offset)
+            .take(visible_cols)
+            .enumerate()
+            .map(|(i, h)| {
+                let actual_idx = self.col_offset + i;
+                let text = if Some(actual_idx) == self.sort_column {
+                    let arrow = match self.sort_order {
+                        SortOrder::Ascending => " ↑",
+                        SortOrder::Descending => " ↓",
+                    };
+                    format!("{}{}", h, arrow)
+                } else {
                     h.clone()
-                },
-            );
+                };
 
-        let header = Row::new(header_cells).style(Style::default().fg(Color::Yellow)).height(1);
+                let style = if self.header_focused && actual_idx == self.focused_col {
+                    // Highlighted: black text on yellow background
+                    Style::default().fg(Color::Black).bg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                };
+
+                Cell::from(text).style(style)
+            })
+            .collect();
+
+        let header = Row::new(header_cells).height(1);
 
         let col_offset = self.col_offset;
         let col_widths_for_rows = col_widths_allocated.clone();

@@ -311,9 +311,10 @@ fn render_results_pane(
     let expand_char = if expanded { "▼" } else { "▶" };
     let row_count = block.result_count();
 
-    // Update visible height for scroll calculations
+    // Update visible dimensions for scroll calculations
     if let Some(ref mut table) = block.results {
         table.set_visible_height(area.height);
+        table.set_visible_width(area.width);
     }
 
     if let Some(ref error) = block.error {
@@ -1184,21 +1185,31 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
 
     // Context-sensitive hints
     let hints = if matches!(app.session.focus, Focus::NewQuery) {
-        "Ctrl+Enter: run | Esc: cancel | Ctrl+P/N: history | ?: help"
+        "Ctrl+Enter: run | Esc: cancel | Ctrl+P/N: history | ?: help".to_string()
     } else {
-        let cancel_hint = app
+        let mut parts = vec!["j/k: navigate", "l: enter", "h: back", "n: new query"];
+
+        // Cancel hint when query is running
+        if app
             .session
             .selected_query
             .and_then(|id| app.session.blocks.get(id))
             .filter(|block| block.running && !block.cancel_requested)
-            .map(|_| "C: cancel | ")
-            .unwrap_or("");
-        // Can't easily interpolate, so just use a static string
-        if cancel_hint.is_empty() {
-            "j/k: navigate | l: enter | h: back | n: new query | ?: help"
-        } else {
-            "j/k: navigate | l: enter | h: back | n: new query | C: cancel | ?: help"
+            .is_some()
+        {
+            parts.push("C: cancel");
         }
+
+        // Copy hint when in Results pane + Edit mode
+        if matches!(
+            (&app.session.focus, &app.session.mode),
+            (Focus::SubPane(SubPane::Results), Mode::Edit)
+        ) {
+            parts.push("y: copy");
+        }
+
+        parts.push("?: help");
+        parts.join(" | ")
     };
 
     let status = format!(" [{}] {}{} | {}", mode_str, focus_str, query_info, hints);

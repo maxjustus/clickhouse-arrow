@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use crate::tui::history::History;
 use crate::tui::session::{Focus, Mode, Session, SubPane};
 use crate::tui::ui::render;
+use crate::tui::widgets::table::ResultsViewMode;
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
@@ -350,33 +351,59 @@ impl App {
             },
             SubPane::Results => {
                 if let Some(ref mut table) = block.results {
-                    match (key.code, key.modifiers.contains(KeyModifiers::ALT)) {
-                        // Tree navigation
-                        (KeyCode::Down | KeyCode::Char('j'), false) => table.nav_down(),
-                        (KeyCode::Up | KeyCode::Char('k'), false) => table.nav_up(),
-                        (KeyCode::Right | KeyCode::Char('l'), false) => {
-                            table.expand();
-                        }
-                        (KeyCode::Left | KeyCode::Char('h'), false) => {
-                            if !table.collapse() {
-                                // At top level, exit edit mode
-                                self.session.mode = Mode::Navigation;
+                    if table.header_focused {
+                        // Header navigation mode
+                        match key.code {
+                            KeyCode::Down | KeyCode::Char('j') => table.unfocus_header(),
+                            KeyCode::Left | KeyCode::Char('h') => table.header_left(),
+                            KeyCode::Right | KeyCode::Char('l') => table.header_right(),
+                            KeyCode::Enter => {
+                                table.cycle_sort(table.focused_col);
                             }
+                            KeyCode::Esc => table.unfocus_header(),
+                            _ => {}
                         }
-                        // Alt+arrows for column scrolling (Table mode only)
-                        (KeyCode::Right | KeyCode::Char('l'), true) => table.scroll_cols_right(),
-                        (KeyCode::Left | KeyCode::Char('h'), true) => {
-                            table.scroll_cols_left();
-                        }
-                        // Other navigation
-                        (KeyCode::PageDown, _) => table.page_down(),
-                        (KeyCode::PageUp, _) => table.page_up(),
-                        (KeyCode::Char('s') | KeyCode::Char('S'), false) => {
-                            if !table.columns.is_empty() {
-                                table.sort_by_column(0);
+                    } else {
+                        // Normal table navigation
+                        match (key.code, key.modifiers.contains(KeyModifiers::ALT)) {
+                            // Tree navigation
+                            (KeyCode::Down | KeyCode::Char('j'), false) => table.nav_down(),
+                            (KeyCode::Up | KeyCode::Char('k'), false) => {
+                                // Check if at row 0 in Table mode - focus header
+                                if matches!(table.view_mode, ResultsViewMode::Table)
+                                    && table.selected_row == 0
+                                {
+                                    table.focus_header();
+                                } else {
+                                    table.nav_up();
+                                }
                             }
+                            (KeyCode::Right | KeyCode::Char('l'), false) => {
+                                table.expand();
+                            }
+                            (KeyCode::Left | KeyCode::Char('h'), false) => {
+                                if !table.collapse() {
+                                    // At top level, exit edit mode
+                                    self.session.mode = Mode::Navigation;
+                                }
+                            }
+                            // Alt+arrows for column scrolling (Table mode only)
+                            (KeyCode::Right | KeyCode::Char('l'), true) => {
+                                table.scroll_cols_right()
+                            }
+                            (KeyCode::Left | KeyCode::Char('h'), true) => {
+                                table.scroll_cols_left();
+                            }
+                            // Other navigation
+                            (KeyCode::PageDown, _) => table.page_down(),
+                            (KeyCode::PageUp, _) => table.page_up(),
+                            (KeyCode::Char('s') | KeyCode::Char('S'), false) => {
+                                if !table.columns.is_empty() {
+                                    table.sort_by_column(0);
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 } else {
                     // No table, just exit
