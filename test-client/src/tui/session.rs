@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use tui_textarea::TextArea;
 
+use crate::tui::query_store::QueryStoreEntry;
 use crate::tui::widgets::table::SortableTable;
 
 const SPARKLINE_SIZE: usize = 32;
@@ -567,6 +568,7 @@ pub struct QueryBlock {
     pub error:            Option<String>,
     pub running:          bool,
     pub cancel_requested: bool,
+    pub cache_id:         Option<String>, // ID in QueryStore if cached
 }
 
 impl QueryBlock {
@@ -582,6 +584,7 @@ impl QueryBlock {
             error: None,
             running: true,
             cancel_requested: false,
+            cache_id: None,
         }
     }
 
@@ -661,15 +664,25 @@ pub enum Mode {
     Edit,
 }
 
+/// Which section of the sidebar is selected
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarSection {
+    Session,   // Current session queries
+    Persisted, // Cached queries from previous sessions
+}
+
 /// The entire session state
 pub struct Session {
-    pub blocks:         Vec<QueryBlock>,
-    pub new_query:      TextArea<'static>,
-    pub focus:          Focus,
-    pub mode:           Mode,
-    pub selected_query: Option<usize>, // ID of query shown in main area
-    next_id:            usize,
-    pub toast:          Option<(String, Instant)>,
+    pub blocks:             Vec<QueryBlock>,
+    pub new_query:          TextArea<'static>,
+    pub focus:              Focus,
+    pub mode:               Mode,
+    pub selected_query:     Option<usize>, // ID of query shown in main area (session block ID)
+    pub sidebar_section:    SidebarSection,
+    pub persisted_queries:  Vec<QueryStoreEntry>, // Cached queries from QueryStore
+    pub selected_persisted: Option<usize>,        // Index into persisted_queries
+    next_id:                usize,
+    pub toast:              Option<(String, Instant)>,
 }
 
 impl Session {
@@ -683,9 +696,39 @@ impl Session {
             focus: Focus::NewQuery,
             mode: Mode::Edit, // Start in edit mode in the new query pane
             selected_query: None,
+            sidebar_section: SidebarSection::Session,
+            persisted_queries: Vec::new(),
+            selected_persisted: None,
             next_id: 0,
             toast: None,
         }
+    }
+
+    /// Add a persisted query entry (from cache completion)
+    pub fn add_persisted_query(&mut self, entry: QueryStoreEntry) {
+        // Insert at beginning for most recent first
+        self.persisted_queries.insert(0, entry);
+    }
+
+    /// Load persisted queries from index
+    pub fn load_persisted_queries(&mut self, entries: Vec<QueryStoreEntry>) {
+        // Sort by timestamp descending (most recent first)
+        let mut entries = entries;
+        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        self.persisted_queries = entries;
+
+        // If no session queries, default to History section
+        if self.blocks.is_empty() && !self.persisted_queries.is_empty() {
+            self.sidebar_section = SidebarSection::Persisted;
+            self.selected_persisted = Some(0);
+        }
+    }
+
+    /// Get next query ID and increment counter
+    pub fn next_id(&mut self) -> usize {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
     }
 
     pub fn show_toast(&mut self, msg: impl Into<String>) {
@@ -742,30 +785,82 @@ impl Session {
 
     /// Move sidebar selection up
     pub fn sidebar_prev(&mut self) {
-        if let Some(current_id) = self.selected_query {
-            let idx = self.blocks.iter().position(|b| b.id == current_id);
-            if let Some(i) = idx
-                && i > 0
-            {
-                self.selected_query = Some(self.blocks[i - 1].id);
+        match self.sidebar_section {
+            SidebarSection::Session => {
+                if let Some(current_id) = self.selected_query {
+                    let idx = self.blocks.iter().position(|b| b.id == current_id);
+                    if let Some(i) = idx {
+                        if i > 0 {
+                            self.selected_query = Some(self.blocks[i - 1].id);
+                        }
+                        // At top of session, don't move (could switch section with Tab)
+                    }
+                } else if !self.blocks.is_empty() {
+                    self.selected_query = Some(self.blocks.last().unwrap().id);
+                }
             }
-        } else if !self.blocks.is_empty() {
-            self.selected_query = Some(self.blocks.last().unwrap().id);
+            SidebarSection::Persisted => {
+                if let Some(idx) = self.selected_persisted {
+                    if idx > 0 {
+                        self.selected_persisted = Some(idx - 1);
+                    }
+                    // At top of persisted, don't move
+                } else if !self.persisted_queries.is_empty() {
+                    self.selected_persisted = Some(self.persisted_queries.len() - 1);
+                }
+            }
         }
     }
 
     /// Move sidebar selection down
     pub fn sidebar_next(&mut self) {
-        if let Some(current_id) = self.selected_query {
-            let idx = self.blocks.iter().position(|b| b.id == current_id);
-            if let Some(i) = idx
-                && i + 1 < self.blocks.len()
-            {
-                self.selected_query = Some(self.blocks[i + 1].id);
+        match self.sidebar_section {
+            SidebarSection::Session => {
+                if let Some(current_id) = self.selected_query {
+                    let idx = self.blocks.iter().position(|b| b.id == current_id);
+                    if let Some(i) = idx
+                        && i + 1 < self.blocks.len()
+                    {
+                        self.selected_query = Some(self.blocks[i + 1].id);
+                    }
+                    // At bottom of session, don't move
+                } else if !self.blocks.is_empty() {
+                    self.selected_query = Some(self.blocks.first().unwrap().id);
+                }
             }
-        } else if !self.blocks.is_empty() {
-            self.selected_query = Some(self.blocks.first().unwrap().id);
+            SidebarSection::Persisted => {
+                if let Some(idx) = self.selected_persisted {
+                    if idx + 1 < self.persisted_queries.len() {
+                        self.selected_persisted = Some(idx + 1);
+                    }
+                    // At bottom of persisted, don't move
+                } else if !self.persisted_queries.is_empty() {
+                    self.selected_persisted = Some(0);
+                }
+            }
         }
+    }
+
+    /// Switch sidebar section (Tab key)
+    pub fn sidebar_toggle_section(&mut self) {
+        match self.sidebar_section {
+            SidebarSection::Session => {
+                if !self.persisted_queries.is_empty() {
+                    self.sidebar_section = SidebarSection::Persisted;
+                    if self.selected_persisted.is_none() {
+                        self.selected_persisted = Some(0);
+                    }
+                }
+            }
+            SidebarSection::Persisted => {
+                self.sidebar_section = SidebarSection::Session;
+            }
+        }
+    }
+
+    /// Get the selected persisted query entry
+    pub fn selected_persisted_entry(&self) -> Option<&QueryStoreEntry> {
+        self.selected_persisted.and_then(|idx| self.persisted_queries.get(idx))
     }
 
     /// Navigate to next sub-pane within selected query

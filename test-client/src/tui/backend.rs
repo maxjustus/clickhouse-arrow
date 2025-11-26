@@ -4,12 +4,14 @@ use std::sync::Arc;
 use chrono::NaiveDate;
 use clickhouse_arrow::{ClickHouseEvent, Client, Event, NativeFormat, Qid, Settings, Tz};
 use futures::StreamExt;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 use crate::tui::app::{AppEvent, QueryCommand};
+use crate::tui::query_store::{QueryCacheWriter, QueryStore};
 
 type QidMap = Arc<RwLock<HashMap<Qid, usize>>>;
 type TaskMap = Arc<RwLock<HashMap<usize, tokio::task::JoinHandle<()>>>>;
+type CacheWriterMap = Arc<RwLock<HashMap<usize, Arc<Mutex<Option<QueryCacheWriter>>>>>>;
 
 pub fn spawn_backend(
     client: Client<NativeFormat>,
@@ -20,6 +22,23 @@ pub fn spawn_backend(
     let qid_map: QidMap = Arc::new(RwLock::new(HashMap::new()));
     // Shared mapping from query_id -> task handle for cancellation
     let task_map: TaskMap = Arc::new(RwLock::new(HashMap::new()));
+    // Shared mapping from query_id -> cache writer
+    let cache_writers: CacheWriterMap = Arc::new(RwLock::new(HashMap::new()));
+    // Shared QueryStore for persistence
+    let query_store: Arc<Mutex<Option<QueryStore>>> = Arc::new(Mutex::new(None));
+
+    // Initialize query store asynchronously
+    let store_init = query_store.clone();
+    tokio::spawn(async move {
+        match QueryStore::load().await {
+            Ok(store) => {
+                *store_init.lock().await = Some(store);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load query store: {}", e);
+            }
+        }
+    });
 
     // Two-stage event pipeline to prevent event loss from broadcast lagging:
     // Stage 1: Fast drainer reads from broadcast into unbounded buffer
@@ -51,6 +70,7 @@ pub fn spawn_backend(
     // Stage 2: Process buffered events and forward to TUI
     let event_tx_clone = event_tx.clone();
     let qid_map_clone = qid_map.clone();
+    let cache_writers_clone = cache_writers.clone();
     tokio::spawn(async move {
         while let Some(event) = buffer_rx.recv().await {
             // Look up query_id from Qid
@@ -71,6 +91,16 @@ pub fn spawn_backend(
                             "thread_id": profile_event.thread_id,
                             "current_time": profile_event.current_time,
                         });
+
+                        // Write to cache
+                        if let Some(writer_arc) =
+                            cache_writers_clone.read().await.get(&query_id).cloned()
+                        {
+                            if let Some(writer) = writer_arc.lock().await.as_mut() {
+                                writer.write_profile_event(&json);
+                            }
+                        }
+
                         let _ = event_tx_clone
                             .send(AppEvent::ProfileEvent { query_id, event: json })
                             .await;
@@ -96,6 +126,16 @@ pub fn spawn_backend(
                             "source": log.source,
                             "text": log.text,
                         });
+
+                        // Write to cache
+                        if let Some(writer_arc) =
+                            cache_writers_clone.read().await.get(&query_id).cloned()
+                        {
+                            if let Some(writer) = writer_arc.lock().await.as_mut() {
+                                writer.write_log(&json);
+                            }
+                        }
+
                         let _ =
                             event_tx_clone.send(AppEvent::LogEvent { query_id, log: json }).await;
                     }
@@ -128,6 +168,8 @@ pub fn spawn_backend(
                     let event_tx = event_tx.clone();
                     let qid_map = qid_map.clone();
                     let task_map_clone = task_map.clone();
+                    let cache_writers = cache_writers.clone();
+                    let query_store = query_store.clone();
                     let handle = tokio::spawn(async move {
                         execute_query(
                             &client,
@@ -136,6 +178,8 @@ pub fn spawn_backend(
                             &event_tx,
                             &qid_map,
                             &task_map_clone,
+                            &cache_writers,
+                            &query_store,
                         )
                         .await;
                     });
@@ -143,6 +187,8 @@ pub fn spawn_backend(
                     task_map.write().await.insert(query_id, handle);
                 }
                 QueryCommand::Cancel { query_id } => {
+                    // Remove cache writer on cancel
+                    cache_writers.write().await.remove(&query_id);
                     if let Some(handle) = task_map.write().await.remove(&query_id) {
                         handle.abort();
                         // Send completion event so UI updates
@@ -161,14 +207,35 @@ async fn execute_query(
     event_tx: &mpsc::Sender<AppEvent>,
     qid_map: &QidMap,
     task_map: &TaskMap,
+    cache_writers: &CacheWriterMap,
+    query_store: &Arc<Mutex<Option<QueryStore>>>,
 ) {
     let qid = Qid::new();
+    let start_time = std::time::Instant::now();
 
     // Register the Qid -> query_id mapping
     {
         let mut map = qid_map.write().await;
         map.insert(qid, query_id);
     }
+
+    // Create cache writer if store is available
+    let cache_writer: Option<Arc<Mutex<Option<QueryCacheWriter>>>> =
+        if let Some(store) = query_store.lock().await.as_ref() {
+            match store.start_query(sql).await {
+                Ok(writer) => {
+                    let writer_arc = Arc::new(Mutex::new(Some(writer)));
+                    cache_writers.write().await.insert(query_id, writer_arc.clone());
+                    Some(writer_arc)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create cache writer: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
     // Send query started event
     let _ = event_tx.send(AppEvent::QueryStarted { query_id }).await;
@@ -190,7 +257,22 @@ async fn execute_query(
     {
         Ok(s) => s,
         Err(e) => {
-            let _ = event_tx.send(AppEvent::QueryError { query_id, error: e.to_string() }).await;
+            let error_msg = e.to_string();
+            let _ =
+                event_tx.send(AppEvent::QueryError { query_id, error: error_msg.clone() }).await;
+
+            // Finish cache with error
+            finish_cache(
+                cache_writer,
+                cache_writers,
+                query_store,
+                query_id,
+                start_time,
+                Some(error_msg),
+                event_tx,
+            )
+            .await;
+
             // Clean up mappings
             qid_map.write().await.remove(&qid);
             task_map.write().await.remove(&query_id);
@@ -203,14 +285,40 @@ async fn execute_query(
     while let Some(result) = stream.next().await {
         match result {
             Ok(mut block) => {
+                // Write block to cache before converting to rows
+                if let Some(ref writer_arc) = cache_writer {
+                    if let Some(writer) = writer_arc.lock().await.as_mut() {
+                        // Clone block for cache (block will be consumed by take_iter_rows)
+                        let cache_block = block.clone();
+                        if let Err(e) = writer.write_block(cache_block).await {
+                            tracing::warn!("Failed to write block to cache: {}", e);
+                        }
+                    }
+                }
+
                 for row in block.take_iter_rows() {
                     let json_row = row_to_json(row);
                     let _ = event_tx.send(AppEvent::RowReceived { query_id, row: json_row }).await;
                 }
             }
             Err(e) => {
-                let _ =
-                    event_tx.send(AppEvent::QueryError { query_id, error: e.to_string() }).await;
+                let error_msg = e.to_string();
+                let _ = event_tx
+                    .send(AppEvent::QueryError { query_id, error: error_msg.clone() })
+                    .await;
+
+                // Finish cache with error
+                finish_cache(
+                    cache_writer,
+                    cache_writers,
+                    query_store,
+                    query_id,
+                    start_time,
+                    Some(error_msg),
+                    event_tx,
+                )
+                .await;
+
                 // Clean up mappings
                 qid_map.write().await.remove(&qid);
                 task_map.write().await.remove(&query_id);
@@ -221,12 +329,52 @@ async fn execute_query(
 
     let _ = event_tx.send(AppEvent::QueryComplete { query_id }).await;
 
+    // Finish cache successfully
+    finish_cache(cache_writer, cache_writers, query_store, query_id, start_time, None, event_tx)
+        .await;
+
     // Clean up mappings after query completes
     qid_map.write().await.remove(&qid);
     task_map.write().await.remove(&query_id);
 }
 
-fn row_to_json(
+async fn finish_cache(
+    cache_writer: Option<Arc<Mutex<Option<QueryCacheWriter>>>>,
+    cache_writers: &CacheWriterMap,
+    query_store: &Arc<Mutex<Option<QueryStore>>>,
+    query_id: usize,
+    start_time: std::time::Instant,
+    error: Option<String>,
+    event_tx: &mpsc::Sender<AppEvent>,
+) {
+    // Remove from shared map
+    cache_writers.write().await.remove(&query_id);
+
+    // Take ownership of the writer and finish it
+    if let Some(writer_arc) = cache_writer {
+        if let Some(writer) = writer_arc.lock().await.take() {
+            let duration_ms = Some(start_time.elapsed().as_millis() as u64);
+            match writer.finish(duration_ms, error).await {
+                Ok(entry) => {
+                    // Save entry to store
+                    if let Some(store) = query_store.lock().await.as_mut() {
+                        if let Err(e) = store.finish_query(entry.clone()).await {
+                            tracing::warn!("Failed to save query to store: {}", e);
+                        } else {
+                            // Notify app of cached query
+                            let _ = event_tx.send(AppEvent::QueryCached { query_id, entry }).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to finish cache: {}", e);
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn row_to_json(
     row: Vec<(&str, &clickhouse_arrow::native::types::Type, clickhouse_arrow::Value)>,
 ) -> serde_json::Value {
     let mut map = serde_json::Map::new();

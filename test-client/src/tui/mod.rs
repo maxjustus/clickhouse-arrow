@@ -1,6 +1,7 @@
 mod app;
 mod backend;
 mod history;
+pub mod query_store;
 mod session;
 mod ui;
 mod widgets;
@@ -36,6 +37,12 @@ pub async fn run_tui(client: Client<NativeFormat>) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(cmd_tx, event_rx)?;
+
+    // Load persisted queries from index
+    if let Ok(store) = query_store::QueryStore::load().await {
+        app.session.load_persisted_queries(store.entries());
+    }
+
     let res = app.run(&mut terminal).await;
 
     disable_raw_mode()?;

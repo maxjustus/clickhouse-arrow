@@ -1,13 +1,18 @@
+use std::io::Cursor;
 use std::time::Duration;
 
 use anyhow::Result;
+use clickhouse_arrow::file_stream::FileStreamReader;
+use clickhouse_arrow::{CompressionMethod, NativeFormat};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use tokio::sync::mpsc;
 
+use crate::tui::backend::row_to_json;
 use crate::tui::history::History;
-use crate::tui::session::{Focus, Mode, Session, SubPane};
+use crate::tui::query_store::{QueryArchiveReader, QueryStore, QueryStoreEntry};
+use crate::tui::session::{Focus, Mode, QueryBlock, Session, SidebarSection, SubPane};
 use crate::tui::ui::render;
 use crate::tui::widgets::table::ResultsViewMode;
 
@@ -20,6 +25,7 @@ pub enum AppEvent {
     ProfileEvent { query_id: usize, event: serde_json::Value },
     LogEvent { query_id: usize, log: serde_json::Value },
     ProgressEvent { query_id: usize, progress: serde_json::Value },
+    QueryCached { query_id: usize, entry: QueryStoreEntry },
 }
 
 #[derive(Debug, Clone)]
@@ -137,10 +143,26 @@ impl App {
                     KeyCode::Up | KeyCode::Char('k') => {
                         self.session.sidebar_prev();
                     }
+                    KeyCode::Tab => {
+                        // Switch between Session and Persisted sections
+                        self.session.sidebar_toggle_section();
+                    }
                     KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
-                        // Enter selected query's sub-panes
-                        if self.session.selected_query.is_some() {
-                            self.session.focus = Focus::SubPane(SubPane::Results);
+                        // Enter selected query's sub-panes (session only for now)
+                        match self.session.sidebar_section {
+                            SidebarSection::Session => {
+                                if self.session.selected_query.is_some() {
+                                    self.session.focus = Focus::SubPane(SubPane::Results);
+                                }
+                            }
+                            SidebarSection::Persisted => {
+                                // Load persisted query from archive
+                                if let Some(entry) =
+                                    self.session.selected_persisted_entry().cloned()
+                                {
+                                    self.load_persisted_query(&entry).await;
+                                }
+                            }
                         }
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -489,6 +511,84 @@ impl App {
                     block.add_progress(progress);
                 }
             }
+            AppEvent::QueryCached { query_id, entry } => {
+                // Store the cache entry reference in the block
+                if let Some(block) = self.session.get_block_mut(query_id) {
+                    block.cache_id = Some(entry.id.clone());
+                }
+                // Add to persisted queries list
+                self.session.add_persisted_query(entry);
+            }
         }
+    }
+
+    async fn load_persisted_query(&mut self, entry: &QueryStoreEntry) {
+        // Get archive path
+        let base_path = QueryStore::find_chc_dir();
+        let archive_path = base_path.join(format!("{}.chc", entry.id));
+
+        // Open archive (sync - blocking)
+        let archive = match QueryArchiveReader::open(&archive_path) {
+            Ok(a) => a,
+            Err(e) => {
+                self.session.show_toast(format!("Failed to open: {}", e));
+                return;
+            }
+        };
+
+        // Create new QueryBlock
+        let block_id = self.session.next_id();
+        let mut query_block = QueryBlock::new(block_id, archive.sql.clone());
+        query_block.running = false;
+        query_block.cache_id = Some(entry.id.clone());
+
+        // Parse native results back to JSON rows
+        if !archive.results.is_empty() {
+            let cursor = Cursor::new(archive.results);
+            let mut file_reader = FileStreamReader::<NativeFormat, _>::new(
+                cursor,
+                CompressionMethod::LZ4,
+                Default::default(),
+            );
+
+            match file_reader.read_all().await {
+                Ok(blocks) => {
+                    for mut block in blocks {
+                        for row in block.take_iter_rows() {
+                            query_block.add_result_row(row_to_json(row));
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.session.show_toast(format!("Failed to parse results: {}", e));
+                }
+            }
+        }
+
+        // Parse profile events from JSONL
+        if !archive.profile.is_empty() {
+            let content = String::from_utf8_lossy(&archive.profile);
+            for line in content.lines() {
+                if let Ok(json) = serde_json::from_str(line) {
+                    query_block.add_profile_event(json);
+                }
+            }
+        }
+
+        // Parse logs from JSONL
+        if !archive.logs.is_empty() {
+            let content = String::from_utf8_lossy(&archive.logs);
+            for line in content.lines() {
+                if let Ok(json) = serde_json::from_str(line) {
+                    query_block.add_log(json);
+                }
+            }
+        }
+
+        // Add to session and select
+        self.session.blocks.push(query_block);
+        self.session.selected_query = Some(block_id);
+        self.session.sidebar_section = SidebarSection::Session;
+        self.session.focus = Focus::SubPane(SubPane::Results);
     }
 }

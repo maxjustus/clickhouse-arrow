@@ -10,7 +10,9 @@ use ratatui::widgets::{
 use ratatui::{Frame, symbols};
 
 use crate::tui::app::App;
-use crate::tui::session::{Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, SubPane};
+use crate::tui::session::{
+    Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, SidebarSection, SubPane,
+};
 use crate::tui::widgets::table::{PathStatsState, PathValueType, ResultsViewMode};
 
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -68,18 +70,30 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if app.session.blocks.is_empty() {
+    let has_session = !app.session.blocks.is_empty();
+    let has_persisted = !app.session.persisted_queries.is_empty();
+
+    if !has_session && !has_persisted {
         let empty = Paragraph::new("No queries yet").style(Style::default().fg(Color::DarkGray));
         f.render_widget(empty, inner);
         return;
     }
 
-    let items: Vec<ListItem> = app
-        .session
-        .blocks
-        .iter()
-        .map(|b| {
-            let is_selected = app.session.selected_query == Some(b.id);
+    let mut items: Vec<ListItem> = Vec::new();
+
+    // Session section header (if has queries)
+    if has_session {
+        let session_header_style = if app.session.sidebar_section == SidebarSection::Session {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        items.push(ListItem::new("-- Session --").style(session_header_style));
+
+        // Session queries
+        for b in &app.session.blocks {
+            let is_selected = app.session.sidebar_section == SidebarSection::Session
+                && app.session.selected_query == Some(b.id);
             let indicator = if b.cancel_requested {
                 "x"
             } else if b.running {
@@ -93,7 +107,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
             };
 
             // Truncate SQL to fit sidebar
-            let sql_preview: String = b.sql.chars().take(20).collect::<String>().replace('\n', " ");
+            let sql_preview: String = b.sql.chars().take(18).collect::<String>().replace('\n', " ");
 
             let text =
                 format!("{} Q{}: {} ({})", indicator, b.id + 1, sql_preview, b.result_count());
@@ -108,12 +122,83 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::White)
             };
 
-            ListItem::new(text).style(style)
-        })
-        .collect();
+            items.push(ListItem::new(text).style(style));
+        }
+    }
+
+    // Persisted section header (if has queries)
+    if has_persisted {
+        // Add blank line separator if session section exists
+        if has_session {
+            items.push(ListItem::new(""));
+        }
+
+        let persisted_header_style = if app.session.sidebar_section == SidebarSection::Persisted {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        items.push(ListItem::new("-- History --").style(persisted_header_style));
+
+        // Persisted queries (most recent first)
+        for (i, entry) in app.session.persisted_queries.iter().enumerate() {
+            let is_selected = app.session.sidebar_section == SidebarSection::Persisted
+                && app.session.selected_persisted == Some(i);
+
+            let indicator = if entry.error.is_some() {
+                "!"
+            } else if is_selected {
+                ">"
+            } else {
+                " "
+            };
+
+            // Truncate SQL preview
+            let sql_preview: String =
+                entry.sql_preview.chars().take(18).collect::<String>().replace('\n', " ");
+
+            // Format timestamp as relative time
+            let age = format_relative_time(entry.timestamp);
+
+            let text = format!("{} {} ({} rows) {}", indicator, sql_preview, entry.row_count, age);
+
+            let style = if is_selected {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else if entry.error.is_some() {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+
+            items.push(ListItem::new(text).style(style));
+        }
+    }
 
     let list = List::new(items);
     f.render_widget(list, inner);
+}
+
+/// Format unix timestamp as relative time (e.g., "2m ago", "1h ago", "3d ago")
+fn format_relative_time(timestamp: u64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+
+    if timestamp > now {
+        return "now".to_string();
+    }
+
+    let diff = now - timestamp;
+
+    if diff < 60 {
+        format!("{}s", diff)
+    } else if diff < 3600 {
+        format!("{}m", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h", diff / 3600)
+    } else {
+        format!("{}d", diff / 86400)
+    }
 }
 
 fn render_main_content(f: &mut Frame, area: Rect, app: &mut App) {
@@ -690,7 +775,7 @@ fn render_stats_metrics_table(f: &mut Frame, area: Rect, block: &mut QueryBlock,
         .take(visible_height)
         .filter_map(|(i, name)| {
             let metric = block.stats.metrics.get(name)?;
-            let sparkline = sparkline_str_i64(&metric.history);
+            let sparkline = sparkline_str_i64(&metric.history, 16);
             let current = format_metric_value(metric.current);
             let min_str = format_metric_value(metric.min);
             let max_str = format_metric_value(metric.max);
@@ -711,7 +796,7 @@ fn render_stats_metrics_table(f: &mut Frame, area: Rect, block: &mut QueryBlock,
 
     let widths = [
         Constraint::Min(20),
-        Constraint::Length(32),
+        Constraint::Length(16),
         Constraint::Min(10),
         Constraint::Min(10),
         Constraint::Min(10),
@@ -934,25 +1019,29 @@ fn sparkline_str(history: &std::collections::VecDeque<u64>, width: usize) -> Str
 }
 
 /// Generate sparkline string from i64 history (shifts values so min becomes 0)
-fn sparkline_str_i64(history: &VecDeque<i64>) -> String {
+fn sparkline_str_i64(history: &VecDeque<i64>, width: usize) -> String {
     const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
     if history.is_empty() {
-        return "--------".to_string();
+        return BARS[0].to_string().repeat(width);
     }
 
     let min = history.iter().copied().min().unwrap_or(0);
     let max = history.iter().copied().max().unwrap_or(0);
     let range = (max - min).max(1) as u64;
 
-    history
-        .iter()
-        .map(|&v| {
-            let shifted = (v - min) as u64;
-            let idx = ((shifted * 7) / range).min(7) as usize;
-            BARS[idx]
-        })
-        .collect()
+    // Take most recent `width` items, pad left if fewer
+    let start = history.len().saturating_sub(width);
+    let items: Vec<_> = history.iter().skip(start).copied().collect();
+    let pad_count = width.saturating_sub(items.len());
+
+    let mut result = BARS[0].to_string().repeat(pad_count);
+    for v in items {
+        let shifted = (v - min) as u64;
+        let idx = ((shifted * 7) / range).min(7) as usize;
+        result.push(BARS[idx]);
+    }
+    result
 }
 
 fn render_logs_pane(
