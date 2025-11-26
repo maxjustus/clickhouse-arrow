@@ -16,8 +16,9 @@ pub(super) const TCP_KEEP_ALIVE_SECS: u64 = 60;
 pub(super) const TCP_KEEP_ALIVE_INTERVAL: u64 = 10;
 pub(super) const TCP_KEEP_ALIVE_RETRIES: u32 = 6;
 
-// Maximum number of progress and profile statuses to keep in memory. New statuses evict old ones.
-pub(super) const EVENTS_CAPACITY: usize = 8;
+// Broadcast channel capacity for progress/profile/log events. Larger buffer prevents
+// event loss when receivers are slow to start or process events.
+pub(super) const EVENTS_CAPACITY: usize = 256;
 
 // Debugs & ENV Settings
 pub const DEBUG_ARROW_ENV_VAR: &str = "CLICKHOUSE_NATIVE_DEBUG_ARROW";

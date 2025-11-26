@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use clickhouse_arrow::{Client, NativeFormat, Qid, Settings};
+use clickhouse_arrow::{ClickHouseEvent, Client, Event, NativeFormat, Qid, Settings};
 use futures::StreamExt;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
 use crate::tui::app::{AppEvent, QueryCommand};
 
 type QidMap = Arc<RwLock<HashMap<Qid, usize>>>;
+type TaskMap = Arc<RwLock<HashMap<usize, tokio::task::JoinHandle<()>>>>;
 
 pub fn spawn_backend(
     client: Client<NativeFormat>,
@@ -16,17 +17,41 @@ pub fn spawn_backend(
 ) -> tokio::task::JoinHandle<()> {
     // Shared mapping from Qid -> query_id
     let qid_map: QidMap = Arc::new(RwLock::new(HashMap::new()));
+    // Shared mapping from query_id -> task handle for cancellation
+    let task_map: TaskMap = Arc::new(RwLock::new(HashMap::new()));
 
-    // Subscribe to client events (profile, logs, progress)
+    // Two-stage event pipeline to prevent event loss from broadcast lagging:
+    // Stage 1: Fast drainer reads from broadcast into unbounded buffer
+    // Stage 2: Process buffered events at TUI pace
+
     let mut events_rx = client.subscribe_events();
+    let (buffer_tx, mut buffer_rx) = mpsc::unbounded_channel::<Event>();
+
+    // Stage 1: Fast drainer - reads broadcast as quickly as possible
+    tokio::spawn(async move {
+        loop {
+            match events_rx.recv().await {
+                Ok(event) => {
+                    // Unbounded send never blocks
+                    let _ = buffer_tx.send(event);
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Broadcast lagged {} events (before buffer)", n);
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    tracing::info!("Event broadcast closed");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Stage 2: Process buffered events and forward to TUI
     let event_tx_clone = event_tx.clone();
     let qid_map_clone = qid_map.clone();
-
-    // Spawn task to forward client events to TUI
     tokio::spawn(async move {
-        while let Ok(event) = events_rx.recv().await {
-            use clickhouse_arrow::ClickHouseEvent;
-
+        while let Some(event) = buffer_rx.recv().await {
             // Look up query_id from Qid
             let query_id = {
                 let map = qid_map_clone.read().await;
@@ -101,12 +126,27 @@ pub fn spawn_backend(
                     let client = client.clone();
                     let event_tx = event_tx.clone();
                     let qid_map = qid_map.clone();
-                    tokio::spawn(async move {
-                        execute_query(&client, query_id, &sql, &event_tx, &qid_map).await;
+                    let task_map_clone = task_map.clone();
+                    let handle = tokio::spawn(async move {
+                        execute_query(
+                            &client,
+                            query_id,
+                            &sql,
+                            &event_tx,
+                            &qid_map,
+                            &task_map_clone,
+                        )
+                        .await;
                     });
+                    // Store handle for cancellation
+                    task_map.write().await.insert(query_id, handle);
                 }
-                QueryCommand::Cancel { query_id: _ } => {
-                    // TODO: implement cancellation
+                QueryCommand::Cancel { query_id } => {
+                    if let Some(handle) = task_map.write().await.remove(&query_id) {
+                        handle.abort();
+                        // Send completion event so UI updates
+                        let _ = event_tx.send(AppEvent::QueryComplete { query_id }).await;
+                    }
                 }
             }
         }
@@ -119,6 +159,7 @@ async fn execute_query(
     sql: &str,
     event_tx: &mpsc::Sender<AppEvent>,
     qid_map: &QidMap,
+    task_map: &TaskMap,
 ) {
     let qid = Qid::new();
 
@@ -131,10 +172,11 @@ async fn execute_query(
     // Send query started event
     let _ = event_tx.send(AppEvent::QueryStarted { query_id }).await;
 
-    // Execute query with settings for logs and profile events
+    // Execute query with settings for logs, profile events, and progress
     let settings = Settings::default()
         .with_setting("send_logs_level", "trace")
-        .with_setting("log_queries", 1);
+        .with_setting("log_queries", 1)
+        .with_setting("send_profile_events", 1);
 
     let stream = match client
         .query_raw_with_settings::<clickhouse_arrow::QueryParams, Settings>(
@@ -148,9 +190,9 @@ async fn execute_query(
         Ok(s) => s,
         Err(e) => {
             let _ = event_tx.send(AppEvent::QueryError { query_id, error: e.to_string() }).await;
-            // Clean up mapping
-            let mut map = qid_map.write().await;
-            map.remove(&qid);
+            // Clean up mappings
+            qid_map.write().await.remove(&qid);
+            task_map.write().await.remove(&query_id);
             return;
         }
     };
@@ -168,9 +210,9 @@ async fn execute_query(
             Err(e) => {
                 let _ =
                     event_tx.send(AppEvent::QueryError { query_id, error: e.to_string() }).await;
-                // Clean up mapping
-                let mut map = qid_map.write().await;
-                map.remove(&qid);
+                // Clean up mappings
+                qid_map.write().await.remove(&qid);
+                task_map.write().await.remove(&query_id);
                 return;
             }
         }
@@ -178,9 +220,9 @@ async fn execute_query(
 
     let _ = event_tx.send(AppEvent::QueryComplete { query_id }).await;
 
-    // Clean up mapping after query completes
-    let mut map = qid_map.write().await;
-    map.remove(&qid);
+    // Clean up mappings after query completes
+    qid_map.write().await.remove(&qid);
+    task_map.write().await.remove(&query_id);
 }
 
 fn row_to_json(

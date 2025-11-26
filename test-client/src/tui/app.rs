@@ -137,6 +137,9 @@ impl App {
                         self.session.focus = Focus::NewQuery;
                         self.session.mode = Mode::Edit;
                     }
+                    KeyCode::Char('c') | KeyCode::Char('C') => {
+                        self.cancel_selected_query().await;
+                    }
                     _ => {}
                 }
             }
@@ -159,6 +162,9 @@ impl App {
                     KeyCode::Char('n') | KeyCode::Char('N') => {
                         self.session.focus = Focus::NewQuery;
                         self.session.mode = Mode::Edit;
+                    }
+                    KeyCode::Char('c') | KeyCode::Char('C') => {
+                        self.cancel_selected_query().await;
                     }
                     _ => {}
                 }
@@ -190,6 +196,14 @@ impl App {
         // Escape exits edit mode
         if key.code == KeyCode::Esc {
             self.session.mode = Mode::Navigation;
+            // If escaping from new query, return to sidebar or selected query
+            if matches!(self.session.focus, Focus::NewQuery) {
+                if self.session.selected_query.is_some() {
+                    self.session.focus = Focus::SubPane(SubPane::Results);
+                } else {
+                    self.session.focus = Focus::Sidebar;
+                }
+            }
             return Ok(());
         }
 
@@ -256,6 +270,17 @@ impl App {
         self.session.new_query.insert_str(text);
     }
 
+    async fn cancel_selected_query(&mut self) {
+        if let Some(query_id) = self.session.selected_query {
+            if let Some(block) = self.session.blocks.get_mut(query_id) {
+                if block.running && !block.cancel_requested {
+                    block.cancel_requested = true;
+                    let _ = self.cmd_tx.send(QueryCommand::Cancel { query_id }).await;
+                }
+            }
+        }
+    }
+
     fn handle_subpane_key(&mut self, key: KeyEvent, pane: SubPane) -> Result<()> {
         let block = match self.session.selected_block_mut() {
             Some(b) => b,
@@ -263,10 +288,24 @@ impl App {
         };
 
         match pane {
-            SubPane::Sql => {
-                // SQL pane is read-only for historical queries
-                // Just allow scrolling/viewing
-            }
+            SubPane::Sql => match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    block.sql_scroll += 1;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    block.sql_scroll = block.sql_scroll.saturating_sub(1);
+                }
+                KeyCode::PageDown => {
+                    block.sql_scroll += 10;
+                }
+                KeyCode::PageUp => {
+                    block.sql_scroll = block.sql_scroll.saturating_sub(10);
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    self.session.mode = Mode::Navigation;
+                }
+                _ => {}
+            },
             SubPane::Results => {
                 if let Some(ref mut table) = block.results {
                     match (key.code, key.modifiers.contains(KeyModifiers::ALT)) {
@@ -303,31 +342,22 @@ impl App {
                 }
             }
             SubPane::Stats => {
-                if let Some(ref mut table) = block.stats.table {
-                    match (key.code, key.modifiers.contains(KeyModifiers::ALT)) {
-                        // Tree navigation
-                        (KeyCode::Down | KeyCode::Char('j'), false) => table.nav_down(),
-                        (KeyCode::Up | KeyCode::Char('k'), false) => table.nav_up(),
-                        (KeyCode::Right | KeyCode::Char('l'), false) => {
-                            table.expand();
-                        }
-                        (KeyCode::Left | KeyCode::Char('h'), false) => {
-                            if !table.collapse() {
-                                self.session.mode = Mode::Navigation;
-                            }
-                        }
-                        // Alt+arrows for column scrolling
-                        (KeyCode::Right | KeyCode::Char('l'), true) => table.scroll_cols_right(),
-                        (KeyCode::Left | KeyCode::Char('h'), true) => {
-                            table.scroll_cols_left();
-                        }
-                        // Other navigation
-                        (KeyCode::PageDown, _) => table.page_down(),
-                        (KeyCode::PageUp, _) => table.page_up(),
-                        _ => {}
+                // Use new metrics navigation
+                match key.code {
+                    KeyCode::Down | KeyCode::Char('j') => block.stats.nav_down(),
+                    KeyCode::Up | KeyCode::Char('k') => block.stats.nav_up(),
+                    KeyCode::PageDown => block.stats.page_down(),
+                    KeyCode::PageUp => block.stats.page_up(),
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        block.stats.expand();
                     }
-                } else {
-                    self.session.mode = Mode::Navigation;
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        if !block.stats.collapse() {
+                            // At table level, exit edit mode
+                            self.session.mode = Mode::Navigation;
+                        }
+                    }
+                    _ => {}
                 }
             }
             SubPane::Logs => {
@@ -373,12 +403,14 @@ impl App {
             AppEvent::QueryComplete { query_id } => {
                 if let Some(block) = self.session.get_block_mut(query_id) {
                     block.running = false;
+                    block.cancel_requested = false;
                 }
             }
             AppEvent::QueryError { query_id, error } => {
                 if let Some(block) = self.session.get_block_mut(query_id) {
                     block.error = Some(error);
                     block.running = false;
+                    block.cancel_requested = false;
                 }
             }
             AppEvent::RowReceived { query_id, row } => {

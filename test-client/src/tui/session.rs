@@ -1,10 +1,80 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use tui_textarea::TextArea;
 
 use crate::tui::widgets::table::SortableTable;
 
 const SPARKLINE_SIZE: usize = 16;
+const CHART_HISTORY_SIZE: usize = 200;
+
+/// View mode for the metrics display
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsViewMode {
+    Table,
+    Expanded { index: usize },
+}
+
+/// Aggregated metric data (grouped by name)
+#[derive(Debug, Clone)]
+pub struct AggregatedMetric {
+    pub name:          String,
+    pub history:       VecDeque<i64>, // For sparkline (last N values)
+    pub chart_points:  Vec<(f64, f64)>, // For expanded chart (time_ms, value)
+    pub current:       i64,
+    pub min:           i64,
+    pub max:           i64,
+    pub sum:           i128,
+    pub count:         u64,
+    base_timestamp_us: Option<i64>,
+}
+
+impl AggregatedMetric {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            history: VecDeque::with_capacity(SPARKLINE_SIZE),
+            chart_points: Vec::with_capacity(CHART_HISTORY_SIZE),
+            current: 0,
+            min: i64::MAX,
+            max: i64::MIN,
+            sum: 0,
+            count: 0,
+            base_timestamp_us: None,
+        }
+    }
+
+    pub fn add_value(&mut self, value: i64, timestamp_us: i64) {
+        // Set base timestamp on first value
+        if self.base_timestamp_us.is_none() {
+            self.base_timestamp_us = Some(timestamp_us);
+        }
+
+        self.current = value;
+        self.count += 1;
+        self.sum += value as i128;
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+
+        // Sparkline history (most recent N values)
+        self.history.push_back(value);
+        if self.history.len() > SPARKLINE_SIZE {
+            self.history.pop_front();
+        }
+
+        // Chart history (relative time in ms)
+        let relative_time_ms = (timestamp_us - self.base_timestamp_us.unwrap()) as f64 / 1000.0;
+        self.chart_points.push((relative_time_ms, value as f64));
+
+        // Limit chart history
+        if self.chart_points.len() > CHART_HISTORY_SIZE {
+            self.chart_points.remove(0);
+        }
+    }
+
+    pub fn avg(&self) -> f64 {
+        if self.count == 0 { 0.0 } else { (self.sum as f64) / (self.count as f64) }
+    }
+}
 
 /// A single log entry from ClickHouse
 #[derive(Debug, Clone)]
@@ -31,37 +101,53 @@ pub struct StatsData {
     pub elapsed_ns: u64,
 
     // CPU sparkline (percentage values)
-    pub cpu_history:   VecDeque<u64>,
-    pub cpu_current:   u64,
-    prev_cpu_us:       Option<u64>,
-    prev_timestamp_us: Option<i64>,
+    pub cpu_history:    VecDeque<u64>,
+    pub cpu_current:    u64,
+    prev_cpu_us:        Option<u64>,
+    prev_user_cpu_us:   Option<u64>,
+    prev_system_cpu_us: Option<u64>,
+    prev_timestamp_us:  Option<i64>,
 
     // RAM sparkline (bytes)
-    pub ram_history: VecDeque<u64>,
-    pub ram_current: u64,
+    pub ram_history:      VecDeque<u64>,
+    pub ram_current:      u64,
+    pub peak_ram_history: VecDeque<u64>,
+    pub peak_ram_current: u64,
 
-    // Profile events table
-    pub events: Vec<serde_json::Value>,
-    pub table:  Option<SortableTable>,
+    // Aggregated profile metrics (grouped by name)
+    pub metrics:        HashMap<String, AggregatedMetric>,
+    pub metric_names:   Vec<String>, // Kept sorted alphabetically
+    pub view_mode:      MetricsViewMode,
+    pub selected_row:   usize,
+    pub scroll_offset:  usize,
+    pub visible_height: usize,
 }
 
 impl Default for StatsData {
     fn default() -> Self {
         Self {
-            rows_read:         0,
-            bytes_read:        0,
-            total_rows:        None,
-            rows_written:      0,
-            bytes_written:     0,
-            elapsed_ns:        0,
-            cpu_history:       VecDeque::with_capacity(SPARKLINE_SIZE),
-            cpu_current:       0,
-            prev_cpu_us:       None,
-            prev_timestamp_us: None,
-            ram_history:       VecDeque::with_capacity(SPARKLINE_SIZE),
-            ram_current:       0,
-            events:            Vec::new(),
-            table:             None,
+            rows_read:          0,
+            bytes_read:         0,
+            total_rows:         None,
+            rows_written:       0,
+            bytes_written:      0,
+            elapsed_ns:         0,
+            cpu_history:        VecDeque::with_capacity(SPARKLINE_SIZE),
+            cpu_current:        0,
+            prev_cpu_us:        None,
+            prev_user_cpu_us:   None,
+            prev_system_cpu_us: None,
+            prev_timestamp_us:  None,
+            ram_history:        VecDeque::with_capacity(SPARKLINE_SIZE),
+            ram_current:        0,
+            peak_ram_history:   VecDeque::with_capacity(SPARKLINE_SIZE),
+            peak_ram_current:   0,
+            metrics:            HashMap::new(),
+            metric_names:       Vec::new(),
+            view_mode:          MetricsViewMode::Table,
+            selected_row:       0,
+            scroll_offset:      0,
+            visible_height:     10, // Default, will be updated by UI
         }
     }
 }
@@ -95,82 +181,175 @@ impl StatsData {
                 map.get("value").and_then(|v| v.as_i64()),
                 map.get("current_time").and_then(|t| t.as_str()),
             ) {
-                let thread_id = map.get("thread_id").and_then(|t| t.as_u64()).unwrap_or(0);
+                // Parse timestamp for aggregation
+                if let Ok(dt) = DateTime::parse_from_rfc3339(time_str) {
+                    let timestamp_us = dt.timestamp_micros();
 
-                // Initialize table if needed
-                if self.table.is_none() {
-                    self.table = Some(SortableTable::new(vec![
-                        "Time".to_string(),
-                        "Thread".to_string(),
-                        "Metric".to_string(),
-                        "Value".to_string(),
-                    ]));
-                }
+                    // Add to aggregated metrics
+                    if !self.metrics.contains_key(name) {
+                        self.metric_names.push(name.to_string());
+                        self.metric_names.sort();
+                        self.metrics
+                            .insert(name.to_string(), AggregatedMetric::new(name.to_string()));
+                    }
+                    if let Some(metric) = self.metrics.get_mut(name) {
+                        metric.add_value(value, timestamp_us);
+                    }
 
-                if let Some(ref mut table) = self.table {
-                    table.add_row(vec![
-                        time_str.to_string(),
-                        thread_id.to_string(),
-                        name.to_string(),
-                        value.to_string(),
-                    ]);
-                }
-
-                // Extract CPU and RAM metrics
-                match name {
-                    "OSCPUVirtualTimeMicroseconds" => {
-                        // Parse timestamp for CPU % calculation
-                        if let Ok(dt) = DateTime::parse_from_rfc3339(time_str) {
-                            let timestamp_us = dt.timestamp_micros();
+                    // Also extract CPU and RAM metrics for header display
+                    match name {
+                        "UserTimeMicroseconds" => {
                             let value_u64 = value as u64;
-
-                            if let (Some(prev_cpu), Some(prev_ts)) =
-                                (self.prev_cpu_us, self.prev_timestamp_us)
-                            {
-                                let delta_cpu = value_u64.saturating_sub(prev_cpu);
-                                let delta_wall = (timestamp_us - prev_ts).unsigned_abs();
-                                if delta_wall > 0 {
-                                    let cpu_pct = (delta_cpu * 100) / delta_wall;
-                                    self.cpu_current = cpu_pct.min(999);
-                                    self.cpu_history.push_back(self.cpu_current);
-                                    if self.cpu_history.len() > SPARKLINE_SIZE {
-                                        self.cpu_history.pop_front();
-                                    }
-                                }
-                            }
-                            self.prev_cpu_us = Some(value_u64);
+                            self.prev_user_cpu_us = Some(value_u64);
                             self.prev_timestamp_us = Some(timestamp_us);
+                            self.update_cpu_percentage(timestamp_us);
                         }
-                    }
-                    "MemoryUsage" => {
-                        self.ram_current = value as u64;
-                        self.ram_history.push_back(self.ram_current);
-                        if self.ram_history.len() > SPARKLINE_SIZE {
-                            self.ram_history.pop_front();
+                        "SystemTimeMicroseconds" => {
+                            let value_u64 = value as u64;
+                            self.prev_system_cpu_us = Some(value_u64);
+                            self.prev_timestamp_us = Some(timestamp_us);
+                            self.update_cpu_percentage(timestamp_us);
                         }
+                        "MemoryTrackerUsage" => {
+                            self.ram_current = value as u64;
+                            self.ram_history.push_back(self.ram_current);
+                            if self.ram_history.len() > SPARKLINE_SIZE {
+                                self.ram_history.pop_front();
+                            }
+                        }
+                        "MemoryTrackerPeakUsage" => {
+                            self.peak_ram_current = value as u64;
+                            self.peak_ram_history.push_back(self.peak_ram_current);
+                            if self.peak_ram_history.len() > SPARKLINE_SIZE {
+                                self.peak_ram_history.pop_front();
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn update_cpu_percentage(&mut self, timestamp_us: i64) {
+        // Only calculate when we have both user and system times
+        let (prev_user, prev_system, prev_ts) =
+            match (self.prev_user_cpu_us, self.prev_system_cpu_us, self.prev_timestamp_us) {
+                (Some(u), Some(s), Some(ts)) if ts > 0 => (u, s, ts),
+                _ => return, // Don't have both metrics yet
+            };
+
+        // Sum user + system to get total CPU time
+        let total_cpu_us = prev_user + prev_system;
+
+        // Calculate delta from previous reading
+        if let Some(prev_total) = self.prev_cpu_us {
+            let delta_cpu = total_cpu_us.saturating_sub(prev_total);
+            let delta_wall = (timestamp_us - prev_ts).unsigned_abs();
+
+            if delta_wall > 0 {
+                let cpu_pct = (delta_cpu * 100) / delta_wall;
+                self.cpu_current = cpu_pct.min(999);
+                self.cpu_history.push_back(self.cpu_current);
+                if self.cpu_history.len() > SPARKLINE_SIZE {
+                    self.cpu_history.pop_front();
                 }
             }
         }
 
-        self.events.push(event);
+        // Store for next delta calculation
+        self.prev_cpu_us = Some(total_cpu_us);
     }
 
-    pub fn event_count(&self) -> usize { self.events.len() }
+    pub fn metric_count(&self) -> usize { self.metric_names.len() }
+
+    /// Navigate up in the metrics table
+    pub fn nav_up(&mut self) {
+        if self.selected_row > 0 {
+            self.selected_row -= 1;
+            // Scroll up if selection goes above visible area
+            if self.selected_row < self.scroll_offset {
+                self.scroll_offset = self.selected_row;
+            }
+        }
+    }
+
+    /// Navigate down in the metrics table
+    pub fn nav_down(&mut self) {
+        if !self.metric_names.is_empty() && self.selected_row < self.metric_names.len() - 1 {
+            self.selected_row += 1;
+            // Scroll down if selection goes below visible area
+            let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
+            if self.selected_row > max_visible {
+                self.scroll_offset =
+                    self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
+            }
+        }
+    }
+
+    /// Page up in the metrics table
+    pub fn page_up(&mut self) {
+        let page_size = self.visible_height.max(1);
+        self.selected_row = self.selected_row.saturating_sub(page_size);
+        self.scroll_offset = self.scroll_offset.saturating_sub(page_size);
+    }
+
+    /// Page down in the metrics table
+    pub fn page_down(&mut self) {
+        if self.metric_names.is_empty() {
+            return;
+        }
+        let page_size = self.visible_height.max(1);
+        let max_row = self.metric_names.len().saturating_sub(1);
+        self.selected_row = (self.selected_row + page_size).min(max_row);
+        // Adjust scroll to keep selection visible
+        let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
+        if self.selected_row > max_visible {
+            self.scroll_offset =
+                self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
+        }
+    }
+
+    /// Expand the selected metric to show detail view
+    pub fn expand(&mut self) -> bool {
+        if self.metric_names.is_empty() {
+            return false;
+        }
+        self.view_mode = MetricsViewMode::Expanded { index: self.selected_row };
+        true
+    }
+
+    /// Collapse from detail view back to table view
+    pub fn collapse(&mut self) -> bool {
+        match self.view_mode {
+            MetricsViewMode::Table => false,
+            MetricsViewMode::Expanded { index } => {
+                self.view_mode = MetricsViewMode::Table;
+                self.selected_row = index;
+                true
+            }
+        }
+    }
+
+    /// Get the currently selected metric name
+    pub fn selected_metric(&self) -> Option<&AggregatedMetric> {
+        self.metric_names.get(self.selected_row).and_then(|name| self.metrics.get(name))
+    }
 }
 
 /// A single query and all its associated data
 #[derive(Debug)]
 pub struct QueryBlock {
-    pub id:        usize,
-    pub sql:       String,
-    pub results:   Option<SortableTable>,
-    pub stats:     StatsData,
-    pub logs:      Vec<LogEntry>,
-    pub log_table: Option<SortableTable>,
-    pub error:     Option<String>,
-    pub running:   bool,
+    pub id:               usize,
+    pub sql:              String,
+    pub sql_scroll:       u16,
+    pub results:          Option<SortableTable>,
+    pub stats:            StatsData,
+    pub logs:             Vec<LogEntry>,
+    pub log_table:        Option<SortableTable>,
+    pub error:            Option<String>,
+    pub running:          bool,
+    pub cancel_requested: bool,
 }
 
 impl QueryBlock {
@@ -178,12 +357,14 @@ impl QueryBlock {
         Self {
             id,
             sql,
+            sql_scroll: 0,
             results: None,
             stats: StatsData::default(),
             logs: Vec::new(),
             log_table: None,
             error: None,
             running: true,
+            cancel_requested: false,
         }
     }
 
@@ -195,8 +376,7 @@ impl QueryBlock {
             let rows_written = map.get("written_rows").and_then(|v| v.as_u64()).unwrap_or(0);
             let bytes_written = map.get("written_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
             let elapsed_ns = map.get("elapsed_ns").and_then(|v| v.as_u64()).unwrap_or(0);
-            self.stats
-                .add_progress(rows, bytes, total, rows_written, bytes_written, elapsed_ns);
+            self.stats.add_progress(rows, bytes, total, rows_written, bytes_written, elapsed_ns);
         }
     }
 
@@ -212,18 +392,11 @@ impl QueryBlock {
             }
 
             if let Some(ref mut table) = self.results {
-                let row_values: Vec<String> = table
+                // Store JSON values directly to enable nested navigation
+                let row_values: Vec<serde_json::Value> = table
                     .columns
                     .iter()
-                    .map(|col| {
-                        map.get(col)
-                            .map(|v| match v {
-                                serde_json::Value::String(s) => s.clone(),
-                                serde_json::Value::Null => "NULL".to_string(),
-                                other => other.to_string(),
-                            })
-                            .unwrap_or_default()
-                    })
+                    .map(|col| map.get(col).cloned().unwrap_or(serde_json::Value::Null))
                     .collect();
                 table.add_row(row_values);
             }
@@ -251,10 +424,10 @@ impl QueryBlock {
 
             if let Some(ref mut table) = self.log_table {
                 table.add_row(vec![
-                    entry.time.clone(),
-                    entry.thread_id.to_string(),
-                    entry.source.clone(),
-                    entry.text.clone(),
+                    serde_json::Value::String(entry.time.clone()),
+                    serde_json::Value::Number(entry.thread_id.into()),
+                    serde_json::Value::String(entry.source.clone()),
+                    serde_json::Value::String(entry.text.clone()),
                 ]);
             }
 

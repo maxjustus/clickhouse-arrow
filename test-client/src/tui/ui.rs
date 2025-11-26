@@ -1,11 +1,15 @@
-use ratatui::Frame;
+use std::collections::VecDeque;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{
+    Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Paragraph, Row, Table, Wrap,
+};
+use ratatui::{Frame, symbols};
 
 use crate::tui::app::App;
-use crate::tui::session::{Focus, Mode, QueryBlock, SubPane};
+use crate::tui::session::{Focus, MetricsViewMode, Mode, QueryBlock, SubPane};
 
 pub fn render(f: &mut Frame, app: &mut App) {
     if app.show_help {
@@ -58,7 +62,9 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|b| {
             let is_selected = app.session.selected_query == Some(b.id);
-            let indicator = if b.running {
+            let indicator = if b.cancel_requested {
+                "x"
+            } else if b.running {
                 "*"
             } else if b.error.is_some() {
                 "!"
@@ -93,29 +99,25 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_main_content(f: &mut Frame, area: Rect, app: &mut App) {
-    // Split: selected query details | new query input
-    let new_query_height = 5;
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Length(new_query_height)])
-        .split(area);
+    // Full-screen editor when Focus::NewQuery
+    if matches!(app.session.focus, Focus::NewQuery) {
+        render_new_query_fullscreen(f, area, app);
+        return;
+    }
 
-    // Render selected query or empty state
+    // Otherwise: just the selected query (full area, no new query box)
     if let Some(block_id) = app.session.selected_query {
         let focus = app.session.focus.clone();
         let mode = app.session.mode;
         if let Some(block) = app.session.blocks.iter_mut().find(|b| b.id == block_id) {
-            render_selected_query(f, chunks[0], block, &focus, mode);
+            render_selected_query(f, area, block, &focus, mode);
         }
     } else {
-        let empty = Paragraph::new("Select a query from the sidebar or run a new one")
+        let empty = Paragraph::new("No queries yet. Press 'n' to write a new query.")
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::ALL).title("Query Results"));
-        f.render_widget(empty, chunks[0]);
+        f.render_widget(empty, area);
     }
-
-    // Render new query input
-    render_new_query(f, chunks[1], app, matches!(app.session.focus, Focus::NewQuery));
 }
 
 /// Determine which pane is expanded based on focus and mode
@@ -154,13 +156,21 @@ fn render_selected_query(
             "Query {} > {} {}",
             block.id + 1,
             pane_name,
-            if block.running { "[running...]" } else { "" }
+            if block.cancel_requested {
+                "[cancelling...]"
+            } else if block.running {
+                "[running...]"
+            } else {
+                ""
+            }
         )
     } else {
         format!(
             "Query {} {}",
             block.id + 1,
-            if block.running {
+            if block.cancel_requested {
+                "[cancelling...]"
+            } else if block.running {
                 "[running...]"
             } else if block.error.is_some() {
                 "[error]"
@@ -181,7 +191,11 @@ fn render_selected_query(
     // Sub-pane layout - in edit mode only focused pane expands, otherwise all expand
     let sub_constraints = vec![
         if is_pane_expanded(SubPane::Sql, focused) {
-            Constraint::Min(3)
+            // Lines needed = SQL line count + 2 (borders)
+            let sql_lines = block.sql.lines().count() as u16 + 2;
+            // Max height = equal share (total height / 4 panes)
+            let max_height = inner.height / 4;
+            Constraint::Length(sql_lines.min(max_height).max(3))
         } else {
             Constraint::Length(1)
         },
@@ -238,7 +252,10 @@ fn render_sql_pane(
             .borders(Borders::ALL)
             .title(format!("{} SQL", expand_char))
             .border_style(style);
-        let para = Paragraph::new(block.sql.as_str()).block(sql_block).wrap(Wrap { trim: false });
+        let para = Paragraph::new(block.sql.as_str())
+            .block(sql_block)
+            .wrap(Wrap { trim: false })
+            .scroll((block.sql_scroll, 0));
         f.render_widget(para, area);
     } else {
         // Collapsed: show truncated SQL
@@ -314,15 +331,13 @@ fn render_stats_pane(
 ) {
     let style = pane_style(focused, mode);
     let expand_char = if expanded { "▼" } else { "▶" };
+    let elapsed_ns = block.stats.elapsed_ns;
 
-    // Update visible height for scroll calculations
-    if let Some(ref mut table) = block.stats.table {
-        table.set_visible_height(area.height.saturating_sub(3)); // Account for header lines
-    }
-
-    // Format progress info
-    let rows_str = format_number(block.stats.rows_read);
-    let bytes_str = format_bytes(block.stats.bytes_read);
+    // Calculate rates
+    let read_rows_rate = calc_rate(block.stats.rows_read, elapsed_ns);
+    let read_bytes_rate = calc_rate(block.stats.bytes_read, elapsed_ns);
+    let write_rows_rate = calc_rate(block.stats.rows_written, elapsed_ns);
+    let write_bytes_rate = calc_rate(block.stats.bytes_written, elapsed_ns);
 
     // Progress bar (if we know total)
     let progress_bar = if let Some(total) = block.stats.total_rows {
@@ -339,50 +354,289 @@ fn render_stats_pane(
         String::new()
     };
 
+    let has_writes = block.stats.rows_written > 0;
+
     if expanded {
-        // Split area: header lines + table
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(0)])
-            .split(area);
-
-        // Line 1: Progress
-        let progress_line =
-            format!("{} Stats: {} rows | {}{}", expand_char, rows_str, bytes_str, progress_bar);
-
-        // Line 2: CPU and RAM sparklines
-        let cpu_sparkline = sparkline_str(&block.stats.cpu_history);
-        let ram_sparkline = sparkline_str(&block.stats.ram_history);
-        let cpu_str = format!("CPU {} {}%", cpu_sparkline, block.stats.cpu_current);
-        let ram_str = format!("RAM {} {}", ram_sparkline, format_bytes(block.stats.ram_current));
-        let metrics_line = format!("  {} | {}", cpu_str, ram_str);
-
-        let header =
-            Paragraph::new(vec![Line::from(progress_line), Line::from(metrics_line)]).style(style);
-        f.render_widget(header, chunks[0]);
-
-        // Table with profile events
-        let event_count = block.stats.event_count();
-        if event_count > 0 {
-            if let Some(ref table) = block.stats.table {
-                let widget = table.render("Events", chunks[1].width, style);
-                f.render_widget(widget, chunks[1]);
+        // Check if we're in expanded metric view
+        match block.stats.view_mode {
+            MetricsViewMode::Expanded { index } => {
+                render_stats_metric_expanded(f, area, block, index, style);
             }
-        } else {
-            let empty =
-                Paragraph::new("No profile events").style(Style::default().fg(Color::DarkGray));
-            f.render_widget(empty, chunks[1]);
+            MetricsViewMode::Table => {
+                // Split area: header lines + metrics table
+                let header_lines = if has_writes { 3 } else { 2 };
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(header_lines), Constraint::Min(0)])
+                    .split(area);
+
+                // Line 1: Read stats with rates
+                let read_line = format!(
+                    "{} Stats: Read {} rows ({}) @ {}/s, {}/s{}",
+                    expand_char,
+                    format_number(block.stats.rows_read),
+                    format_bytes(block.stats.bytes_read),
+                    format_rate(read_rows_rate),
+                    format_bytes(read_bytes_rate as u64),
+                    progress_bar
+                );
+
+                let mut lines = vec![Line::from(read_line)];
+
+                // Line 2: Write stats (if any)
+                if has_writes {
+                    let write_line = format!(
+                        "         Write {} rows ({}) @ {}/s, {}/s",
+                        format_number(block.stats.rows_written),
+                        format_bytes(block.stats.bytes_written),
+                        format_rate(write_rows_rate),
+                        format_bytes(write_bytes_rate as u64),
+                    );
+                    lines.push(Line::from(write_line));
+                }
+
+                // CPU and RAM sparklines
+                let cpu_sparkline = sparkline_str(&block.stats.cpu_history);
+                let ram_sparkline = sparkline_str(&block.stats.ram_history);
+                let peak_ram_sparkline = sparkline_str(&block.stats.peak_ram_history);
+                let cpu_str = format!("CPU {} {}%", cpu_sparkline, block.stats.cpu_current);
+                let ram_str = format!(
+                    "RAM {} {} (peak {} {})",
+                    ram_sparkline,
+                    format_bytes(block.stats.ram_current),
+                    peak_ram_sparkline,
+                    format_bytes(block.stats.peak_ram_current)
+                );
+                let metrics_line = format!("  {} | {}", cpu_str, ram_str);
+                lines.push(Line::from(metrics_line));
+
+                let header = Paragraph::new(lines).style(style);
+                f.render_widget(header, chunks[0]);
+
+                // Render grouped metrics table
+                render_stats_metrics_table(f, chunks[1], block, style);
+            }
         }
     } else {
-        // Collapsed: single line summary
+        // Collapsed: single line summary with rates
         let cpu_pct = block.stats.cpu_current;
         let ram_str = format_bytes(block.stats.ram_current);
-        let text = format!(
-            "{} Stats: {} rows | {} | CPU {}% | RAM {}",
-            expand_char, rows_str, bytes_str, cpu_pct, ram_str
-        );
+        let peak_ram_str = format_bytes(block.stats.peak_ram_current);
+
+        let text = if has_writes {
+            format!(
+                "{} Stats: R {} @ {}/s | W {} @ {}/s | CPU {}% | RAM {} (peak {})",
+                expand_char,
+                format_number(block.stats.rows_read),
+                format_rate(read_rows_rate),
+                format_number(block.stats.rows_written),
+                format_rate(write_rows_rate),
+                cpu_pct,
+                ram_str,
+                peak_ram_str
+            )
+        } else {
+            format!(
+                "{} Stats: R {} @ {}/s | CPU {}% | RAM {} (peak {})",
+                expand_char,
+                format_number(block.stats.rows_read),
+                format_rate(read_rows_rate),
+                cpu_pct,
+                ram_str,
+                peak_ram_str
+            )
+        };
         let para = Paragraph::new(text).style(style);
         f.render_widget(para, area);
+    }
+}
+
+/// Render the grouped metrics table view
+fn render_stats_metrics_table(f: &mut Frame, area: Rect, block: &mut QueryBlock, style: Style) {
+    let metric_count = block.stats.metric_count();
+
+    if metric_count == 0 {
+        let empty = Paragraph::new("No profile events").style(Style::default().fg(Color::DarkGray));
+        f.render_widget(empty, area);
+        return;
+    }
+
+    // Calculate visible height (area height - 3 for borders and header row)
+    let visible_height = area.height.saturating_sub(3) as usize;
+    block.stats.visible_height = visible_height.max(1);
+
+    let scroll_offset = block.stats.scroll_offset;
+    let selected_row = block.stats.selected_row;
+
+    // Build only visible rows (skip to scroll_offset, take visible_height)
+    let rows: Vec<Row> = block
+        .stats
+        .metric_names
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
+        .filter_map(|(i, name)| {
+            let metric = block.stats.metrics.get(name)?;
+            let sparkline = sparkline_str_i64(&metric.history);
+            let current = format_metric_value(metric.current);
+
+            let row_style = if i == selected_row {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default()
+            };
+
+            Some(Row::new(vec![name.clone(), sparkline, current]).style(row_style))
+        })
+        .collect();
+
+    let widths = [Constraint::Min(20), Constraint::Length(16), Constraint::Min(12)];
+
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(vec!["Metric", "Sparkline", "Current"])
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        )
+        .block(Block::default().borders(Borders::ALL).title("Metrics").border_style(style));
+
+    f.render_widget(table, area);
+}
+
+/// Render expanded view for a single metric (60% chart, 40% stats)
+fn render_stats_metric_expanded(
+    f: &mut Frame,
+    area: Rect,
+    block: &QueryBlock,
+    index: usize,
+    style: Style,
+) {
+    let metric_name = match block.stats.metric_names.get(index) {
+        Some(name) => name,
+        None => {
+            let empty = Paragraph::new("Metric not found").style(Style::default().fg(Color::Red));
+            f.render_widget(empty, area);
+            return;
+        }
+    };
+
+    let metric = match block.stats.metrics.get(metric_name) {
+        Some(m) => m,
+        None => {
+            let empty =
+                Paragraph::new("Metric data not found").style(Style::default().fg(Color::Red));
+            f.render_widget(empty, area);
+            return;
+        }
+    };
+
+    // 60/40 split: chart on top, stats below
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+
+    // Render braille chart
+    if metric.chart_points.is_empty() {
+        let empty_chart =
+            Block::default().borders(Borders::ALL).title(metric_name.as_str()).border_style(style);
+        f.render_widget(empty_chart, chunks[0]);
+    } else {
+        let dataset = Dataset::default()
+            .name(metric_name.as_str())
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Cyan))
+            .data(&metric.chart_points);
+
+        // Calculate bounds
+        let (min_x, max_x, min_y, max_y) = {
+            let mut min_x = f64::MAX;
+            let mut max_x = f64::MIN;
+            let mut min_y = f64::MAX;
+            let mut max_y = f64::MIN;
+            for (x, y) in &metric.chart_points {
+                min_x = min_x.min(*x);
+                max_x = max_x.max(*x);
+                min_y = min_y.min(*y);
+                max_y = max_y.max(*y);
+            }
+            // Add some padding
+            let y_range = max_y - min_y;
+            let y_padding = if y_range > 0.0 { y_range * 0.1 } else { 1.0 };
+            (min_x, max_x, min_y - y_padding, max_y + y_padding)
+        };
+
+        let x_axis =
+            Axis::default().style(Style::default().fg(Color::Gray)).bounds([min_x, max_x]).labels(
+                vec![Span::raw(format!("{:.0}ms", min_x)), Span::raw(format!("{:.0}ms", max_x))],
+            );
+
+        let y_axis = Axis::default()
+            .style(Style::default().fg(Color::Gray))
+            .bounds([min_y, max_y])
+            .labels(vec![
+                Span::raw(format_metric_value(min_y as i64)),
+                Span::raw(format_metric_value(max_y as i64)),
+            ]);
+
+        let chart = Chart::new(vec![dataset])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(metric_name.as_str())
+                    .border_style(style),
+            )
+            .x_axis(x_axis)
+            .y_axis(y_axis);
+
+        f.render_widget(chart, chunks[0]);
+    }
+
+    // Render stats below
+    let stats_lines = vec![
+        Line::from(vec![
+            Span::styled("Min: ", Style::default().fg(Color::Gray)),
+            Span::styled(format_metric_value(metric.min), Style::default().fg(Color::White)),
+            Span::raw("  "),
+            Span::styled("Max: ", Style::default().fg(Color::Gray)),
+            Span::styled(format_metric_value(metric.max), Style::default().fg(Color::White)),
+            Span::raw("  "),
+            Span::styled("Avg: ", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{:.2}", metric.avg()), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("Current: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format_metric_value(metric.current),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled("Count: ", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{}", metric.count), Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Press h/Left to go back", Style::default().fg(Color::DarkGray))),
+    ];
+
+    let stats_para = Paragraph::new(stats_lines)
+        .block(Block::default().borders(Borders::ALL).title("Statistics").border_style(style));
+    f.render_widget(stats_para, chunks[1]);
+}
+
+/// Format metric values with appropriate suffixes
+fn format_metric_value(value: i64) -> String {
+    let abs_value = value.unsigned_abs();
+    let sign = if value < 0 { "-" } else { "" };
+
+    if abs_value >= 1_000_000_000 {
+        format!("{}{:.2}G", sign, abs_value as f64 / 1_000_000_000.0)
+    } else if abs_value >= 1_000_000 {
+        format!("{}{:.2}M", sign, abs_value as f64 / 1_000_000.0)
+    } else if abs_value >= 1_000 {
+        format!("{}{:.2}K", sign, abs_value as f64 / 1_000.0)
+    } else {
+        format!("{}{}", sign, abs_value)
     }
 }
 
@@ -412,6 +666,25 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Format rate per second with K/M suffix
+fn format_rate(per_sec: f64) -> String {
+    if per_sec >= 1_000_000.0 {
+        format!("{:.1}M", per_sec / 1_000_000.0)
+    } else if per_sec >= 1_000.0 {
+        format!("{:.1}K", per_sec / 1_000.0)
+    } else {
+        format!("{:.0}", per_sec)
+    }
+}
+
+/// Calculate rate (count per second) from elapsed nanoseconds
+fn calc_rate(count: u64, elapsed_ns: u64) -> f64 {
+    if elapsed_ns == 0 {
+        return 0.0;
+    }
+    (count as f64) * 1_000_000_000.0 / (elapsed_ns as f64)
+}
+
 /// Generate sparkline string from history
 fn sparkline_str(history: &std::collections::VecDeque<u64>) -> String {
     const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -426,6 +699,28 @@ fn sparkline_str(history: &std::collections::VecDeque<u64>) -> String {
         .iter()
         .map(|&v| {
             let idx = ((v * 7) / max).min(7) as usize;
+            BARS[idx]
+        })
+        .collect()
+}
+
+/// Generate sparkline string from i64 history (shifts values so min becomes 0)
+fn sparkline_str_i64(history: &VecDeque<i64>) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+    if history.is_empty() {
+        return "--------".to_string();
+    }
+
+    let min = history.iter().copied().min().unwrap_or(0);
+    let max = history.iter().copied().max().unwrap_or(0);
+    let range = (max - min).max(1) as u64;
+
+    history
+        .iter()
+        .map(|&v| {
+            let shifted = (v - min) as u64;
+            let idx = ((shifted * 7) / range).min(7) as usize;
             BARS[idx]
         })
         .collect()
@@ -465,16 +760,13 @@ fn render_logs_pane(
     }
 }
 
-fn render_new_query(f: &mut Frame, area: Rect, app: &App, focused: bool) {
-    let style =
-        if focused { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::White) };
+fn render_new_query_fullscreen(f: &mut Frame, area: Rect, app: &App) {
+    let style = Style::default().fg(Color::Cyan);
 
-    let title = if focused && app.session.mode == Mode::Edit {
-        "New Query [EDIT] (Ctrl+Enter: run, Ctrl+P/N: history)".to_string()
-    } else if focused {
-        "New Query (press Enter to edit)".to_string()
+    let title = if app.session.mode == Mode::Edit {
+        "New Query [EDIT] (Ctrl+Enter: run, Escape: cancel, Ctrl+P/N: history)"
     } else {
-        "New Query (press n to focus)".to_string()
+        "New Query (press Enter to edit, Escape to cancel)"
     };
 
     let block = Block::default().borders(Borders::ALL).title(title).border_style(style);
@@ -525,10 +817,26 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
     let query_info =
         if query_count > 0 { format!(" ({} queries)", query_count) } else { String::new() };
 
-    let status = format!(
-        " [{}] {}{} | j/k: navigate | l: enter | h: back | n: new query | ?: help",
-        mode_str, focus_str, query_info
-    );
+    // Context-sensitive hints
+    let hints = if matches!(app.session.focus, Focus::NewQuery) {
+        "Ctrl+Enter: run | Esc: cancel | Ctrl+P/N: history | ?: help"
+    } else {
+        let cancel_hint = app
+            .session
+            .selected_query
+            .and_then(|id| app.session.blocks.get(id))
+            .filter(|block| block.running && !block.cancel_requested)
+            .map(|_| "C: cancel | ")
+            .unwrap_or("");
+        // Can't easily interpolate, so just use a static string
+        if cancel_hint.is_empty() {
+            "j/k: navigate | l: enter | h: back | n: new query | ?: help"
+        } else {
+            "j/k: navigate | l: enter | h: back | n: new query | C: cancel | ?: help"
+        }
+    };
+
+    let status = format!(" [{}] {}{} | {}", mode_str, focus_str, query_info, hints);
 
     let status_line = Paragraph::new(status).style(Style::default().fg(Color::Gray));
     f.render_widget(status_line, area);
