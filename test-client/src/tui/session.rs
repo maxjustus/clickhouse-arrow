@@ -1,10 +1,11 @@
 use std::collections::{HashMap, VecDeque};
+use std::time::Instant;
 
 use tui_textarea::TextArea;
 
 use crate::tui::widgets::table::SortableTable;
 
-const SPARKLINE_SIZE: usize = 16;
+const SPARKLINE_SIZE: usize = 32;
 const CHART_HISTORY_SIZE: usize = 200;
 
 /// View mode for the metrics display
@@ -17,7 +18,6 @@ pub enum MetricsViewMode {
 /// Aggregated metric data (grouped by name)
 #[derive(Debug, Clone)]
 pub struct AggregatedMetric {
-    pub name:          String,
     pub history:       VecDeque<i64>, // For sparkline (last N values)
     pub chart_points:  Vec<(f64, f64)>, // For expanded chart (time_ms, value)
     pub current:       i64,
@@ -29,9 +29,8 @@ pub struct AggregatedMetric {
 }
 
 impl AggregatedMetric {
-    pub fn new(name: String) -> Self {
+    pub fn new() -> Self {
         Self {
-            name,
             history: VecDeque::with_capacity(SPARKLINE_SIZE),
             chart_points: Vec::with_capacity(CHART_HISTORY_SIZE),
             current: 0,
@@ -87,14 +86,13 @@ pub struct LogEntry {
 
 /// View mode for the logs display
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum LogsViewMode {
+    #[default]
     Grouped,
     Expanded { thread_id: u64 },
 }
 
-impl Default for LogsViewMode {
-    fn default() -> Self { Self::Grouped }
-}
 
 /// Grouped log data for a single thread
 #[derive(Debug, Clone)]
@@ -187,10 +185,6 @@ impl LogsData {
 
     pub fn total_log_count(&self) -> usize { self.groups.values().map(|g| g.entries.len()).sum() }
 
-    pub fn selected_group(&self) -> Option<&ThreadLogGroup> {
-        self.sorted_threads.get(self.selected_row).and_then(|id| self.groups.get(id))
-    }
-
     pub fn nav_up(&mut self) {
         match self.view_mode {
             LogsViewMode::Grouped => {
@@ -227,8 +221,8 @@ impl LogsData {
                 }
             }
             LogsViewMode::Expanded { thread_id } => {
-                if let Some(group) = self.groups.get(&thread_id) {
-                    if self.expanded_selected < group.entries.len().saturating_sub(1) {
+                if let Some(group) = self.groups.get(&thread_id)
+                    && self.expanded_selected < group.entries.len().saturating_sub(1) {
                         self.expanded_selected += 1;
                         let max_visible =
                             self.expanded_scroll + self.visible_height.saturating_sub(1);
@@ -238,7 +232,6 @@ impl LogsData {
                                 .saturating_sub(self.visible_height.saturating_sub(1));
                         }
                     }
-                }
             }
         }
     }
@@ -405,8 +398,8 @@ impl StatsData {
     pub fn add_profile_event(&mut self, event: serde_json::Value) {
         use chrono::DateTime;
 
-        if let serde_json::Value::Object(ref map) = event {
-            if let (Some(name), Some(value), Some(time_str)) = (
+        if let serde_json::Value::Object(ref map) = event
+            && let (Some(name), Some(value), Some(time_str)) = (
                 map.get("name").and_then(|n| n.as_str()),
                 map.get("value").and_then(|v| v.as_i64()),
                 map.get("current_time").and_then(|t| t.as_str()),
@@ -419,8 +412,7 @@ impl StatsData {
                     if !self.metrics.contains_key(name) {
                         self.metric_names.push(name.to_string());
                         self.metric_names.sort();
-                        self.metrics
-                            .insert(name.to_string(), AggregatedMetric::new(name.to_string()));
+                        self.metrics.insert(name.to_string(), AggregatedMetric::new());
                     }
                     if let Some(metric) = self.metrics.get_mut(name) {
                         metric.add_value(value, timestamp_us);
@@ -458,7 +450,6 @@ impl StatsData {
                     }
                 }
             }
-        }
     }
 
     fn update_cpu_percentage(&mut self, timestamp_us: i64) {
@@ -559,11 +550,6 @@ impl StatsData {
                 true
             }
         }
-    }
-
-    /// Get the currently selected metric name
-    pub fn selected_metric(&self) -> Option<&AggregatedMetric> {
-        self.metric_names.get(self.selected_row).and_then(|name| self.metrics.get(name))
     }
 }
 
@@ -681,8 +667,8 @@ pub struct Session {
     pub focus:          Focus,
     pub mode:           Mode,
     pub selected_query: Option<usize>, // ID of query shown in main area
-    pub sidebar_scroll: usize,         // Scroll offset for sidebar list
     next_id:            usize,
+    pub toast:          Option<(String, Instant)>,
 }
 
 impl Session {
@@ -696,9 +682,20 @@ impl Session {
             focus: Focus::NewQuery,
             mode: Mode::Edit, // Start in edit mode in the new query pane
             selected_query: None,
-            sidebar_scroll: 0,
             next_id: 0,
+            toast: None,
         }
+    }
+
+    pub fn show_toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), Instant::now()));
+    }
+
+    pub fn clear_expired_toast(&mut self) {
+        if let Some((_, created)) = &self.toast
+            && created.elapsed() > std::time::Duration::from_secs(2) {
+                self.toast = None;
+            }
     }
 
     /// Create a new query block from the current new_query text
@@ -726,11 +723,6 @@ impl Session {
         Some((id, sql))
     }
 
-    /// Get a query block by ID
-    pub fn get_block(&self, id: usize) -> Option<&QueryBlock> {
-        self.blocks.iter().find(|b| b.id == id)
-    }
-
     /// Get a mutable query block by ID
     pub fn get_block_mut(&mut self, id: usize) -> Option<&mut QueryBlock> {
         self.blocks.iter_mut().find(|b| b.id == id)
@@ -738,7 +730,7 @@ impl Session {
 
     /// Get the currently selected query block
     pub fn selected_block(&self) -> Option<&QueryBlock> {
-        self.selected_query.and_then(|id| self.get_block(id))
+        self.selected_query.and_then(|id| self.blocks.iter().find(|b| b.id == id))
     }
 
     /// Get the currently selected query block mutably
@@ -750,11 +742,10 @@ impl Session {
     pub fn sidebar_prev(&mut self) {
         if let Some(current_id) = self.selected_query {
             let idx = self.blocks.iter().position(|b| b.id == current_id);
-            if let Some(i) = idx {
-                if i > 0 {
+            if let Some(i) = idx
+                && i > 0 {
                     self.selected_query = Some(self.blocks[i - 1].id);
                 }
-            }
         } else if !self.blocks.is_empty() {
             self.selected_query = Some(self.blocks.last().unwrap().id);
         }
@@ -764,11 +755,10 @@ impl Session {
     pub fn sidebar_next(&mut self) {
         if let Some(current_id) = self.selected_query {
             let idx = self.blocks.iter().position(|b| b.id == current_id);
-            if let Some(i) = idx {
-                if i + 1 < self.blocks.len() {
+            if let Some(i) = idx
+                && i + 1 < self.blocks.len() {
                     self.selected_query = Some(self.blocks[i + 1].id);
                 }
-            }
         } else if !self.blocks.is_empty() {
             self.selected_query = Some(self.blocks.first().unwrap().id);
         }

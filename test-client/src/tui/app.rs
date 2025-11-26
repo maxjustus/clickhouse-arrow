@@ -54,6 +54,7 @@ impl App {
 
     pub async fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
         loop {
+            self.session.clear_expired_toast();
             terminal.draw(|f| render(f, self))?;
 
             if self.should_quit {
@@ -271,17 +272,29 @@ impl App {
     }
 
     async fn cancel_selected_query(&mut self) {
-        if let Some(query_id) = self.session.selected_query {
-            if let Some(block) = self.session.blocks.get_mut(query_id) {
-                if block.running && !block.cancel_requested {
+        if let Some(query_id) = self.session.selected_query
+            && let Some(block) = self.session.blocks.get_mut(query_id)
+                && block.running && !block.cancel_requested {
                     block.cancel_requested = true;
                     let _ = self.cmd_tx.send(QueryCommand::Cancel { query_id }).await;
                 }
-            }
-        }
     }
 
     fn handle_subpane_key(&mut self, key: KeyEvent, pane: SubPane) -> Result<()> {
+        // Handle copy to clipboard (needs special handling due to borrow checker)
+        if pane == SubPane::Results && key.code == KeyCode::Char('c') {
+            if let Some(block) = self.session.selected_block()
+                && let Some(table) = &block.results {
+                    let content = table.get_clipboard_content();
+                    if !content.is_empty()
+                        && let Ok(mut clipboard) = arboard::Clipboard::new()
+                            && clipboard.set_text(content).is_ok() {
+                                self.session.show_toast("Copied to clipboard");
+                            }
+                }
+            return Ok(());
+        }
+
         let block = match self.session.selected_block_mut() {
             Some(b) => b,
             None => return Ok(()),

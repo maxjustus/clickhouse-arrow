@@ -248,11 +248,8 @@ fn spawn_stdout_writer(is_pretty: bool) -> mpsc::Sender<WriterCmd> {
         let stdout = std::io::stdout();
         let mut pending = Vec::with_capacity(128);
 
-        loop {
-            match rx.blocking_recv() {
-                Some(cmd) => pending.push(cmd),
-                None => break,
-            }
+        while let Some(cmd) = rx.blocking_recv() {
+            pending.push(cmd);
 
             while let Ok(cmd) = rx.try_recv() {
                 pending.push(cmd);
@@ -373,11 +370,10 @@ impl SessionState {
     async fn insert_target(&self, request_id: &str) -> Option<(String, Option<Vec<String>>)> {
         let guard = self.active.lock().await;
         guard.as_ref().and_then(|active| {
-            if active.request_id == request_id {
-                if let ActiveKind::Insert { table, columns, .. } = &active.kind {
+            if active.request_id == request_id
+                && let ActiveKind::Insert { table, columns, .. } = &active.kind {
                     return Some((table.clone(), columns.clone()));
                 }
-            }
             None
         })
     }
@@ -385,12 +381,11 @@ impl SessionState {
     async fn add_insert_rows(&self, request_id: &str, delta: usize) -> Option<usize> {
         let mut guard = self.active.lock().await;
         guard.as_mut().and_then(|active| {
-            if active.request_id == request_id {
-                if let ActiveKind::Insert { total_rows, .. } = &mut active.kind {
+            if active.request_id == request_id
+                && let ActiveKind::Insert { total_rows, .. } = &mut active.kind {
                     *total_rows += delta;
                     return Some(*total_rows);
                 }
-            }
             None
         })
     }
@@ -398,11 +393,10 @@ impl SessionState {
     async fn insert_total_rows(&self, request_id: &str) -> Option<usize> {
         let guard = self.active.lock().await;
         guard.as_ref().and_then(|active| {
-            if active.request_id == request_id {
-                if let ActiveKind::Insert { total_rows, .. } = &active.kind {
+            if active.request_id == request_id
+                && let ActiveKind::Insert { total_rows, .. } = &active.kind {
                     return Some(*total_rows);
                 }
-            }
             None
         })
     }

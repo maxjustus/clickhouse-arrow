@@ -21,7 +21,9 @@ pub enum PathSegment {
 pub type ValuePath = Vec<PathSegment>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ResultsViewMode {
+    #[default]
     Table,
     FieldList {
         row:           usize,
@@ -36,9 +38,6 @@ pub enum ResultsViewMode {
     },
 }
 
-impl Default for ResultsViewMode {
-    fn default() -> Self { Self::Table }
-}
 
 // === Helper functions for JSON value handling ===
 
@@ -86,9 +85,10 @@ fn format_cell_value(value: &Value, max_len: usize) -> String {
 fn format_array_preview(arr: &[Value], max_len: usize) -> String {
     let mut result = String::from("[");
     let mut first = true;
+    let item_max = (max_len / 4).max(10);
 
     for item in arr {
-        let item_str = format_cell_value(item, 15);
+        let item_str = format_cell_value(item, item_max);
         let separator = if first { "" } else { ", " };
 
         // Check if adding this item would exceed limit (+4 for "...]")
@@ -110,12 +110,14 @@ fn format_array_preview(arr: &[Value], max_len: usize) -> String {
 fn format_map_preview(arr: &[Value], max_len: usize) -> String {
     let mut result = String::from("{");
     let mut first = true;
+    let key_max = (max_len / 6).max(8);
+    let val_max = (max_len / 4).max(10);
 
     for item in arr {
-        if let Value::Array(pair) = item {
-            if pair.len() == 2 {
-                let key_str = format_cell_value(&pair[0], 10);
-                let val_str = format_cell_value(&pair[1], 10);
+        if let Value::Array(pair) = item
+            && pair.len() == 2 {
+                let key_str = format_cell_value(&pair[0], key_max);
+                let val_str = format_cell_value(&pair[1], val_max);
                 let entry = format!("{}: {}", key_str, val_str);
                 let separator = if first { "" } else { ", " };
 
@@ -128,7 +130,6 @@ fn format_map_preview(arr: &[Value], max_len: usize) -> String {
                 result.push_str(&entry);
                 first = false;
             }
-        }
     }
 
     result.push('}');
@@ -139,9 +140,10 @@ fn format_map_preview(arr: &[Value], max_len: usize) -> String {
 fn format_object_preview(obj: &serde_json::Map<String, Value>, max_len: usize) -> String {
     let mut result = String::from("{");
     let mut first = true;
+    let val_max = (max_len / 4).max(10);
 
     for (key, val) in obj {
-        let val_str = format_cell_value(val, 10);
+        let val_str = format_cell_value(val, val_max);
         let entry = format!("{}: {}", key, val_str);
         let separator = if first { "" } else { ", " };
 
@@ -214,7 +216,6 @@ pub struct SortableTable {
     pub sort_order:     SortOrder,
     pub selected_row:   usize,
     pub scroll_offset:  usize,
-    pub page_size:      usize,
     col_widths:         Vec<usize>,
     pub col_offset:     usize,
     pub view_mode:      ResultsViewMode,
@@ -234,7 +235,6 @@ impl SortableTable {
             sort_order: SortOrder::Ascending,
             selected_row: 0,
             scroll_offset: 0,
-            page_size: 100,
             col_widths,
             col_offset: 0,
             view_mode: ResultsViewMode::Table,
@@ -259,18 +259,6 @@ impl SortableTable {
             }
         }
         self.rows.push(row);
-    }
-
-    pub fn clear(&mut self) {
-        self.rows.clear();
-        self.selected_row = 0;
-        self.scroll_offset = 0;
-        self.col_offset = 0;
-        self.view_mode = ResultsViewMode::Table;
-        self.selected_field = 0;
-        self.value_scroll = 0;
-        // Reset widths to header lengths
-        self.col_widths = self.columns.iter().map(|h| h.len() + 2).collect();
     }
 
     pub fn scroll_cols_right(&mut self) {
@@ -368,8 +356,8 @@ impl SortableTable {
             }
             ResultsViewMode::FieldValue { row, field, path, selected_index, scroll_offset } => {
                 // Navigate within collection, or scroll scalar value
-                if let Some(cell) = self.rows.get(*row).and_then(|r| r.get(*field)) {
-                    if let Some(current) = resolve_path(cell, path) {
+                if let Some(cell) = self.rows.get(*row).and_then(|r| r.get(*field))
+                    && let Some(current) = resolve_path(cell, path) {
                         let len = collection_len(current);
                         if len > 0 {
                             // Navigating within a collection
@@ -385,7 +373,6 @@ impl SortableTable {
                             self.value_scroll += 1;
                         }
                     }
-                }
             }
         }
     }
@@ -403,8 +390,8 @@ impl SortableTable {
                 }
             }
             ResultsViewMode::FieldValue { row, field, path, selected_index, scroll_offset } => {
-                if let Some(cell) = self.rows.get(*row).and_then(|r| r.get(*field)) {
-                    if let Some(current) = resolve_path(cell, path) {
+                if let Some(cell) = self.rows.get(*row).and_then(|r| r.get(*field))
+                    && let Some(current) = resolve_path(cell, path) {
                         let len = collection_len(current);
                         if len > 0 {
                             // Navigating within a collection
@@ -419,7 +406,6 @@ impl SortableTable {
                             self.value_scroll = self.value_scroll.saturating_sub(1);
                         }
                     }
-                }
             }
         }
     }
@@ -441,6 +427,14 @@ impl SortableTable {
             }
             ResultsViewMode::FieldList { row, .. } => {
                 let row = *row;
+                // Don't expand empty collections
+                if let Some(cell) = self.get_cell_value(row, self.selected_field) {
+                    match cell {
+                        Value::Array(arr) if arr.is_empty() => return false,
+                        Value::Object(obj) if obj.is_empty() => return false,
+                        _ => {} // Allow: scalars, non-empty collections
+                    }
+                }
                 self.view_mode = ResultsViewMode::FieldValue {
                     row,
                     field: self.selected_field,
@@ -458,14 +452,14 @@ impl SortableTable {
                 let mut new_path = path.clone();
                 let selected = *selected_index;
 
-                if let Some(cell) = self.get_cell_value(row, field) {
-                    if let Some(current) = resolve_path(cell, &new_path) {
+                if let Some(cell) = self.get_cell_value(row, field)
+                    && let Some(current) = resolve_path(cell, &new_path) {
                         match current {
                             Value::Array(arr) if is_map_like(arr) => {
                                 // Map-like: drill into value (index 1 of the pair)
-                                if let Some(pair) = arr.get(selected) {
-                                    if let Value::Array(kv) = pair {
-                                        if kv.len() == 2 {
+                                if let Some(pair) = arr.get(selected)
+                                    && let Value::Array(kv) = pair
+                                        && kv.len() == 2 {
                                             new_path.push(PathSegment::Index(selected));
                                             new_path.push(PathSegment::Index(1));
                                             self.view_mode = ResultsViewMode::FieldValue {
@@ -478,8 +472,6 @@ impl SortableTable {
                                             self.value_scroll = 0;
                                             return true;
                                         }
-                                    }
-                                }
                             }
                             Value::Array(arr) => {
                                 // Regular array: drill into selected element (even scalars)
@@ -514,7 +506,6 @@ impl SortableTable {
                             _ => {} // Already at scalar, can't expand further
                         }
                     }
-                }
                 false
             }
         }
@@ -557,11 +548,77 @@ impl SortableTable {
         }
     }
 
-    /// Calculate max columns that fit in given width
-    pub fn max_cols_for_width(&self, width: u16) -> usize {
-        // Each column: min 8 chars + 1 spacing, borders take ~2
-        let usable = width.saturating_sub(4) as usize;
-        (usable / 9).max(1).min(30) // At least 1, at most 30
+    /// Get content for clipboard based on current view mode
+    pub fn get_clipboard_content(&self) -> String {
+        match &self.view_mode {
+            ResultsViewMode::Table => {
+                // All rows as JSON array of objects
+                let objects: Vec<Value> = self
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        let obj: serde_json::Map<String, Value> = self
+                            .columns
+                            .iter()
+                            .zip(row.iter())
+                            .map(|(col, val)| (col.clone(), val.clone()))
+                            .collect();
+                        Value::Object(obj)
+                    })
+                    .collect();
+                serde_json::to_string_pretty(&objects).unwrap_or_default()
+            }
+            ResultsViewMode::FieldList { row, .. } => {
+                // Single row as JSON object
+                if let Some(row_data) = self.rows.get(*row) {
+                    let obj: serde_json::Map<String, Value> = self
+                        .columns
+                        .iter()
+                        .zip(row_data.iter())
+                        .map(|(col, val)| (col.clone(), val.clone()))
+                        .collect();
+                    serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            }
+            ResultsViewMode::FieldValue { row, field, path, .. } => {
+                // Nested value - raw string for strings, pretty JSON otherwise
+                if let Some(row_data) = self.rows.get(*row)
+                    && let Some(field_val) = row_data.get(*field)
+                        && let Some(resolved) = resolve_path(field_val, path) {
+                            return match resolved {
+                                Value::String(s) => s.clone(),
+                                other => serde_json::to_string_pretty(other).unwrap_or_default(),
+                            };
+                        }
+                String::new()
+            }
+        }
+    }
+
+    /// Calculate how many columns fit and their widths, starting from col_offset.
+    /// Returns (num_visible_cols, Vec<allocated_widths>)
+    fn columns_for_width(&self, available_width: u16) -> (usize, Vec<u16>) {
+        let mut remaining = available_width.saturating_sub(4) as usize; // borders
+        let mut widths = Vec::new();
+
+        for i in self.col_offset..self.columns.len() {
+            let header_width = self.columns[i].len();
+            let content_width = self.col_widths.get(i).copied().unwrap_or(header_width);
+            // Min = header width, Max = 50 chars
+            let col_width = content_width.max(header_width).min(50);
+
+            let needed = col_width + 1; // +1 for spacing
+            if needed > remaining && !widths.is_empty() {
+                break; // No room for this column
+            }
+
+            widths.push(col_width.min(remaining) as u16);
+            remaining = remaining.saturating_sub(needed);
+        }
+
+        (widths.len(), widths)
     }
 
     pub fn render_widget<'a>(
@@ -570,9 +627,8 @@ impl SortableTable {
         available_width: u16,
         border_style: Style,
     ) -> Table<'a> {
-        // Dynamic column count based on width
-        let max_cols = self.max_cols_for_width(available_width);
-        let visible_cols = (self.columns.len() - self.col_offset).min(max_cols);
+        // Content-aware column fitting
+        let (visible_cols, col_widths_allocated) = self.columns_for_width(available_width);
         let col_end = self.col_offset + visible_cols;
 
         let header_cells =
@@ -593,6 +649,7 @@ impl SortableTable {
         let header = Row::new(header_cells).style(Style::default().fg(Color::Yellow)).height(1);
 
         let col_offset = self.col_offset;
+        let col_widths_for_rows = col_widths_allocated.clone();
         let visible_rows =
             self.rows.iter().skip(self.scroll_offset).take(self.visible_height).enumerate().map(
                 move |(i, row)| {
@@ -601,31 +658,22 @@ impl SortableTable {
                     } else {
                         Style::default().fg(Color::White)
                     };
-                    // Format cells and limit columns
+                    // Format cells with allocated widths
                     let cells: Vec<String> = row
                         .iter()
                         .skip(col_offset)
-                        .take(visible_cols)
-                        .map(|cell| format_cell_value(cell, 40))
+                        .zip(&col_widths_for_rows)
+                        .map(|(cell, &width)| format_cell_value(cell, width as usize))
                         .collect();
                     Row::new(cells).style(style).height(1)
                 },
             );
 
-        // Use cached column widths (min = header length, max = 40)
-        let widths: Vec<Constraint> = self
-            .col_widths
-            .iter()
-            .zip(self.columns.iter())
-            .skip(self.col_offset)
-            .take(visible_cols)
-            .map(|(&w, col)| {
-                let min_width = col.len().max(4); // At least 4 chars
-                Constraint::Min(w.clamp(min_width, 40) as u16)
-            })
-            .collect();
+        // Use allocated column widths
+        let widths: Vec<Constraint> =
+            col_widths_allocated.iter().map(|&w| Constraint::Length(w)).collect();
 
-        let col_info = if self.columns.len() > max_cols {
+        let col_info = if visible_cols < self.columns.len() {
             format!("cols {}-{}/{}", self.col_offset + 1, col_end, self.columns.len())
         } else {
             format!("{} cols", self.columns.len())
@@ -648,8 +696,13 @@ impl SortableTable {
         row: usize,
         scroll_offset: usize,
         border_style: Style,
+        available_width: u16,
     ) -> List<'_> {
         let row_data = self.rows.get(row);
+
+        // Calculate max_len dynamically: width - borders(4) - indicator(2) - name column(~25) - ":
+        // "(2)
+        let value_max_len = (available_width.saturating_sub(35) as usize).max(20);
 
         let items: Vec<ListItem> = self
             .columns
@@ -659,7 +712,8 @@ impl SortableTable {
             .take(self.visible_height)
             .map(|(i, col_name)| {
                 let value = row_data.and_then(|r| r.get(i));
-                let display = value.map(|v| format_cell_value(v, 60)).unwrap_or_default();
+                let display =
+                    value.map(|v| format_cell_value(v, value_max_len)).unwrap_or_default();
 
                 let style = if i == self.selected_field {
                     Style::default().bg(Color::DarkGray).fg(Color::White)
@@ -708,6 +762,7 @@ impl SortableTable {
         selected_index: usize,
         scroll_offset: usize,
         border_style: Style,
+        available_width: u16,
     ) -> ResultsWidget<'_> {
         let field_name = self.columns.get(field).map(|s| s.as_str()).unwrap_or("?");
         let breadcrumb = format_breadcrumb(field_name, path);
@@ -715,6 +770,15 @@ impl SortableTable {
 
         let cell = self.get_cell_value(row, field);
         let current = cell.and_then(|c| resolve_path(c, path));
+
+        // Calculate dynamic max lengths based on available width
+        // Reserve: borders(4) + indicator(2) + some padding
+        let content_width = available_width.saturating_sub(10) as usize;
+        // For key: value format, split ~40% key, ~60% value
+        let key_max_len = (content_width * 2 / 5).max(15);
+        let val_max_len = (content_width * 3 / 5).max(20);
+        // For single value display (array items, object values)
+        let item_max_len = content_width.max(30);
 
         match current {
             Some(Value::Array(arr)) if is_map_like(arr) => {
@@ -726,13 +790,18 @@ impl SortableTable {
                     .take(self.visible_height)
                     .map(|(i, pair)| {
                         let (key_str, val_str, val_expandable) = if let Value::Array(kv) = pair {
-                            let k =
-                                kv.first().map(|v| format_cell_value(v, 30)).unwrap_or_default();
-                            let v = kv.get(1).map(|v| format_cell_value(v, 40)).unwrap_or_default();
+                            let k = kv
+                                .first()
+                                .map(|v| format_cell_value(v, key_max_len))
+                                .unwrap_or_default();
+                            let v = kv
+                                .get(1)
+                                .map(|v| format_cell_value(v, val_max_len))
+                                .unwrap_or_default();
                             let expandable = kv.get(1).is_some_and(is_expandable);
                             (k, v, expandable)
                         } else {
-                            (String::new(), format_cell_value(pair, 60), false)
+                            (String::new(), format_cell_value(pair, item_max_len), false)
                         };
 
                         let style = if i == selected_index {
@@ -771,7 +840,7 @@ impl SortableTable {
                     .skip(scroll_offset)
                     .take(self.visible_height)
                     .map(|(i, v)| {
-                        let display = format_cell_value(v, 60);
+                        let display = format_cell_value(v, item_max_len);
                         let expandable = is_expandable(v);
 
                         let style = if i == selected_index {
@@ -807,7 +876,7 @@ impl SortableTable {
                     .skip(scroll_offset)
                     .take(self.visible_height)
                     .map(|(i, (k, v))| {
-                        let display = format_cell_value(v, 50);
+                        let display = format_cell_value(v, item_max_len);
                         let expandable = is_expandable(v);
 
                         let style = if i == selected_index {
@@ -903,7 +972,7 @@ impl SortableTable {
                 ResultsWidget::Table(self.render_widget(title, available_width, border_style))
             }
             ResultsViewMode::FieldList { row, scroll_offset } => ResultsWidget::List(
-                self.render_field_list(title, *row, *scroll_offset, border_style),
+                self.render_field_list(title, *row, *scroll_offset, border_style, available_width),
             ),
             ResultsViewMode::FieldValue { row, field, path, selected_index, scroll_offset } => self
                 .render_nested_value(
@@ -914,6 +983,7 @@ impl SortableTable {
                     *selected_index,
                     *scroll_offset,
                     border_style,
+                    available_width,
                 ),
         }
     }

@@ -77,8 +77,7 @@ impl ClickHouseClient {
         }
 
         // Use header-driven InsertInto with serde rows directly
-        let mut opts = InsertOptions::default();
-        opts.columns = columns;
+        let opts = InsertOptions { columns, ..Default::default() };
         let mut op = self
             .client
             .insert_into(table, opts)

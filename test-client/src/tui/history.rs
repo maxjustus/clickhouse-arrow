@@ -73,8 +73,6 @@ impl History {
         Ok(())
     }
 
-    pub fn entries(&self) -> &[HistoryEntry] { &self.entries }
-
     /// Navigate to previous (older) history entry. Returns the query to display.
     /// On first call, saves current_input as draft.
     pub fn nav_prev(&mut self, current_input: &str) -> Option<&str> {

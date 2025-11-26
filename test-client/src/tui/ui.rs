@@ -1,10 +1,11 @@
 use std::collections::VecDeque;
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Paragraph, Row, Table, Wrap,
+    Axis, Block, Borders, Chart, Clear, Dataset, GraphType, List, ListItem, Paragraph, Row, Table,
+    Wrap,
 };
 use ratatui::{Frame, symbols};
 
@@ -24,6 +25,22 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     render_session(f, chunks[0], app);
     render_status_bar(f, chunks[1], app);
+
+    // Render toast if present (on top of everything)
+    if let Some((msg, _)) = &app.session.toast {
+        let toast_width = (msg.len() as u16 + 4).min(f.area().width.saturating_sub(4));
+        let toast_area = Rect {
+            x:      f.area().width.saturating_sub(toast_width + 2),
+            y:      1,
+            width:  toast_width,
+            height: 3,
+        };
+        let toast = Paragraph::new(msg.as_str())
+            .block(Block::default().borders(Borders::ALL))
+            .alignment(Alignment::Center);
+        f.render_widget(Clear, toast_area);
+        f.render_widget(toast, toast_area);
+    }
 }
 
 fn render_session(f: &mut Frame, area: Rect, app: &mut App) {
@@ -199,18 +216,21 @@ fn render_selected_query(
         } else {
             Constraint::Length(1)
         },
+        // Results - 50% of remaining space
         if is_pane_expanded(SubPane::Results, focused) {
-            Constraint::Min(4)
+            Constraint::Ratio(2, 4)
         } else {
             Constraint::Length(1)
         },
+        // Stats - 25% of remaining space
         if is_pane_expanded(SubPane::Stats, focused) {
-            Constraint::Min(6)
+            Constraint::Ratio(1, 4)
         } else {
             Constraint::Length(1)
         },
+        // Logs - 25% of remaining space
         if is_pane_expanded(SubPane::Logs, focused) {
-            Constraint::Min(3)
+            Constraint::Ratio(1, 4)
         } else {
             Constraint::Length(1)
         },
@@ -491,7 +511,7 @@ fn render_stats_metrics_table(f: &mut Frame, area: Rect, block: &mut QueryBlock,
         })
         .collect();
 
-    let widths = [Constraint::Min(20), Constraint::Length(16), Constraint::Min(12)];
+    let widths = [Constraint::Min(20), Constraint::Length(32), Constraint::Min(12)];
 
     let table = Table::new(rows, widths)
         .header(
@@ -1009,6 +1029,7 @@ fn render_help(f: &mut Frame) {
         Line::from("  Alt+h/l           Scroll columns"),
         Line::from("  PgUp/PgDown       Page navigation"),
         Line::from("  s                 Sort by column"),
+        Line::from("  c                 Copy to clipboard (Results only)"),
         Line::from(""),
         Line::from("Press ? or Esc to close help"),
     ];
