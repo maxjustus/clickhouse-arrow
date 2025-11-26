@@ -1158,7 +1158,13 @@ impl SortableTable {
             Some(scalar) => {
                 // Scalar value - render full content
                 let content = match scalar {
-                    Value::String(s) => s.clone(),
+                    Value::String(s) => {
+                        if let Some(relative) = format_relative_time(s) {
+                            format!("{s}\n\n({relative})")
+                        } else {
+                            s.clone()
+                        }
+                    }
                     Value::Null => "NULL".to_string(),
                     other => {
                         serde_json::to_string_pretty(other).unwrap_or_else(|_| format!("{other:?}"))
@@ -1272,4 +1278,30 @@ fn compute_path_stats(values: Vec<Option<Value>>) -> PathStats {
 
     stats.finalize(unique_counts);
     stats
+}
+
+/// Try to parse a string as a timestamp and return relative time (e.g., "3.3 hours ago")
+fn format_relative_time(s: &str) -> Option<String> {
+    use chrono::{NaiveDateTime, Utc};
+
+    // Parse "2025-10-27 11:59:20 UTC" format
+    let dt = NaiveDateTime::parse_from_str(s.trim_end_matches(" UTC"), "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|ndt| ndt.and_utc())?;
+    let now = Utc::now();
+    let duration = now.signed_duration_since(dt);
+    let secs = duration.num_seconds().abs();
+    let suffix = if duration.num_seconds() >= 0 { "ago" } else { "from now" };
+
+    let relative = if secs < 60 {
+        format!("{secs} seconds {suffix}")
+    } else if secs < 3600 {
+        format!("{:.1} minutes {suffix}", secs as f64 / 60.0)
+    } else if secs < 86400 {
+        format!("{:.1} hours {suffix}", secs as f64 / 3600.0)
+    } else {
+        format!("{:.1} days {suffix}", secs as f64 / 86400.0)
+    };
+
+    Some(relative)
 }
