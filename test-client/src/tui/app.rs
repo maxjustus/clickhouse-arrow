@@ -360,34 +360,21 @@ impl App {
                     _ => {}
                 }
             }
-            SubPane::Logs => {
-                if let Some(ref mut table) = block.log_table {
-                    match (key.code, key.modifiers.contains(KeyModifiers::ALT)) {
-                        // Tree navigation
-                        (KeyCode::Down | KeyCode::Char('j'), false) => table.nav_down(),
-                        (KeyCode::Up | KeyCode::Char('k'), false) => table.nav_up(),
-                        (KeyCode::Right | KeyCode::Char('l'), false) => {
-                            table.expand();
-                        }
-                        (KeyCode::Left | KeyCode::Char('h'), false) => {
-                            if !table.collapse() {
-                                self.session.mode = Mode::Navigation;
-                            }
-                        }
-                        // Alt+arrows for column scrolling
-                        (KeyCode::Right | KeyCode::Char('l'), true) => table.scroll_cols_right(),
-                        (KeyCode::Left | KeyCode::Char('h'), true) => {
-                            table.scroll_cols_left();
-                        }
-                        // Other navigation
-                        (KeyCode::PageDown, _) => table.page_down(),
-                        (KeyCode::PageUp, _) => table.page_up(),
-                        _ => {}
-                    }
-                } else {
-                    self.session.mode = Mode::Navigation;
+            SubPane::Logs => match key.code {
+                KeyCode::Down | KeyCode::Char('j') => block.logs_data.nav_down(),
+                KeyCode::Up | KeyCode::Char('k') => block.logs_data.nav_up(),
+                KeyCode::PageDown => block.logs_data.page_down(),
+                KeyCode::PageUp => block.logs_data.page_up(),
+                KeyCode::Right | KeyCode::Char('l') => {
+                    block.logs_data.expand();
                 }
-            }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    if !block.logs_data.collapse() {
+                        self.session.mode = Mode::Navigation;
+                    }
+                }
+                _ => {}
+            },
         }
         Ok(())
     }

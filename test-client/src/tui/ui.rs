@@ -9,7 +9,7 @@ use ratatui::widgets::{
 use ratatui::{Frame, symbols};
 
 use crate::tui::app::App;
-use crate::tui::session::{Focus, MetricsViewMode, Mode, QueryBlock, SubPane};
+use crate::tui::session::{Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, SubPane};
 
 pub fn render(f: &mut Frame, app: &mut App) {
     if app.show_help {
@@ -740,24 +740,161 @@ fn render_logs_pane(
     };
 
     let expand_char = if expanded { "▼" } else { "▶" };
-    let count = block.logs.len();
+    let thread_count = block.logs_data.thread_count();
+    let total_logs = block.logs_data.total_log_count();
 
     // Update visible height for scroll calculations
-    if let Some(ref mut table) = block.log_table {
-        table.set_visible_height(area.height);
-    }
+    block.logs_data.visible_height = area.height.saturating_sub(3) as usize;
 
-    if expanded && count > 0 {
-        if let Some(ref table) = block.log_table {
-            let title = format!("{} Logs", expand_char);
-            let widget = table.render(&title, area.width, style);
-            f.render_widget(widget, area);
-        }
-    } else {
-        let text = format!("{} Logs ({} entries)", expand_char, count);
+    if !expanded || thread_count == 0 {
+        let text =
+            format!("{} Logs ({} threads, {} entries)", expand_char, thread_count, total_logs);
         let para = Paragraph::new(text).style(style);
         f.render_widget(para, area);
+        return;
     }
+
+    match block.logs_data.view_mode {
+        LogsViewMode::Grouped => {
+            render_logs_grouped(f, area, block, expand_char, style);
+        }
+        LogsViewMode::Expanded { thread_id } => {
+            render_logs_thread_expanded(f, area, block, thread_id, style);
+        }
+    }
+}
+
+fn render_logs_grouped(
+    f: &mut Frame,
+    area: Rect,
+    block: &QueryBlock,
+    expand_char: &str,
+    style: Style,
+) {
+    let logs_data = &block.logs_data;
+    let visible_height = logs_data.visible_height;
+    let scroll_offset = logs_data.scroll_offset;
+    let selected_row = logs_data.selected_row;
+
+    let rows: Vec<Row> = logs_data
+        .sorted_threads
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
+        .filter_map(|(i, thread_id)| {
+            let group = logs_data.groups.get(thread_id)?;
+
+            let row_style = if i == selected_row {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default()
+            };
+
+            let text_truncated: String =
+                group.latest_text.chars().take(60).collect::<String>().replace('\n', " ");
+            let text_display = if group.latest_text.len() > 60 {
+                format!("{}...", text_truncated)
+            } else {
+                text_truncated
+            };
+
+            Some(
+                Row::new(vec![
+                    format!("{}", group.thread_id),
+                    format!("({})", group.entries.len()),
+                    group.latest_source.clone(),
+                    text_display,
+                ])
+                .style(row_style),
+            )
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(12),
+        Constraint::Length(6),
+        Constraint::Length(20),
+        Constraint::Min(30),
+    ];
+
+    let title = format!(
+        "{} Logs ({} threads, {} total)",
+        expand_char,
+        logs_data.thread_count(),
+        logs_data.total_log_count()
+    );
+
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(vec!["Thread", "Count", "Source", "Latest Text"])
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        )
+        .block(Block::default().borders(Borders::ALL).title(title).border_style(style));
+
+    f.render_widget(table, area);
+}
+
+fn render_logs_thread_expanded(
+    f: &mut Frame,
+    area: Rect,
+    block: &QueryBlock,
+    thread_id: u64,
+    style: Style,
+) {
+    let logs_data = &block.logs_data;
+
+    let group = match logs_data.groups.get(&thread_id) {
+        Some(g) => g,
+        None => {
+            let para = Paragraph::new("Thread not found").style(Style::default().fg(Color::Red));
+            f.render_widget(para, area);
+            return;
+        }
+    };
+
+    let visible_height = logs_data.visible_height;
+    let scroll_offset = logs_data.expanded_scroll;
+    let selected_row = logs_data.expanded_selected;
+
+    let rows: Vec<Row> = group
+        .entries
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
+        .map(|(i, entry)| {
+            let row_style = if i == selected_row {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default()
+            };
+
+            let text_truncated: String =
+                entry.text.chars().take(80).collect::<String>().replace('\n', " ");
+            let text_display = if entry.text.len() > 80 {
+                format!("{}...", text_truncated)
+            } else {
+                text_truncated
+            };
+
+            Row::new(vec![entry.time.clone(), entry.source.clone(), text_display]).style(row_style)
+        })
+        .collect();
+
+    let widths = [Constraint::Length(26), Constraint::Length(20), Constraint::Min(40)];
+
+    let title =
+        format!("Thread {} ({} entries) - h/Left to go back", thread_id, group.entries.len());
+
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(vec!["Time", "Source", "Text"])
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        )
+        .block(Block::default().borders(Borders::ALL).title(title).border_style(style));
+
+    f.render_widget(table, area);
 }
 
 fn render_new_query_fullscreen(f: &mut Frame, area: Rect, app: &App) {

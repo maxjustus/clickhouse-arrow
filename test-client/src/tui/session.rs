@@ -85,6 +85,236 @@ pub struct LogEntry {
     pub text:      String,
 }
 
+/// View mode for the logs display
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogsViewMode {
+    Grouped,
+    Expanded { thread_id: u64 },
+}
+
+impl Default for LogsViewMode {
+    fn default() -> Self { Self::Grouped }
+}
+
+/// Grouped log data for a single thread
+#[derive(Debug, Clone)]
+pub struct ThreadLogGroup {
+    pub thread_id:     u64,
+    pub entries:       Vec<LogEntry>, // All logs for this thread (newest first)
+    pub latest_time:   String,        // For sorting
+    pub latest_source: String,        // For display
+    pub latest_text:   String,        // For display
+}
+
+impl ThreadLogGroup {
+    pub fn new(thread_id: u64) -> Self {
+        Self {
+            thread_id,
+            entries: Vec::new(),
+            latest_time: String::new(),
+            latest_source: String::new(),
+            latest_text: String::new(),
+        }
+    }
+
+    pub fn add_entry(&mut self, entry: LogEntry) {
+        self.latest_time = entry.time.clone();
+        self.latest_source = entry.source.clone();
+        self.latest_text = entry.text.clone();
+        // Insert at front for newest-first order
+        self.entries.insert(0, entry);
+    }
+}
+
+/// Manages grouped logs with navigation state
+#[derive(Debug)]
+pub struct LogsData {
+    pub groups:         HashMap<u64, ThreadLogGroup>,
+    pub sorted_threads: Vec<u64>, // Sorted by most recent time desc
+
+    // Navigation (grouped view)
+    pub view_mode:      LogsViewMode,
+    pub selected_row:   usize,
+    pub scroll_offset:  usize,
+    pub visible_height: usize,
+
+    // Navigation (expanded view)
+    pub expanded_scroll:   usize,
+    pub expanded_selected: usize,
+}
+
+impl Default for LogsData {
+    fn default() -> Self {
+        Self {
+            groups:            HashMap::new(),
+            sorted_threads:    Vec::new(),
+            view_mode:         LogsViewMode::Grouped,
+            selected_row:      0,
+            scroll_offset:     0,
+            visible_height:    10,
+            expanded_scroll:   0,
+            expanded_selected: 0,
+        }
+    }
+}
+
+impl LogsData {
+    pub fn add_entry(&mut self, entry: LogEntry) {
+        let thread_id = entry.thread_id;
+        let is_new = !self.groups.contains_key(&thread_id);
+
+        self.groups
+            .entry(thread_id)
+            .or_insert_with(|| ThreadLogGroup::new(thread_id))
+            .add_entry(entry);
+
+        if is_new {
+            self.sorted_threads.push(thread_id);
+        }
+        self.resort_threads();
+    }
+
+    fn resort_threads(&mut self) {
+        let empty = String::new();
+        self.sorted_threads.sort_by(|a, b| {
+            let time_a = self.groups.get(a).map(|g| g.latest_time.as_str()).unwrap_or(&empty);
+            let time_b = self.groups.get(b).map(|g| g.latest_time.as_str()).unwrap_or(&empty);
+            time_b.cmp(time_a) // Descending - most recent first
+        });
+    }
+
+    pub fn thread_count(&self) -> usize { self.sorted_threads.len() }
+
+    pub fn total_log_count(&self) -> usize { self.groups.values().map(|g| g.entries.len()).sum() }
+
+    pub fn selected_group(&self) -> Option<&ThreadLogGroup> {
+        self.sorted_threads.get(self.selected_row).and_then(|id| self.groups.get(id))
+    }
+
+    pub fn nav_up(&mut self) {
+        match self.view_mode {
+            LogsViewMode::Grouped => {
+                if self.selected_row > 0 {
+                    self.selected_row -= 1;
+                    if self.selected_row < self.scroll_offset {
+                        self.scroll_offset = self.selected_row;
+                    }
+                }
+            }
+            LogsViewMode::Expanded { .. } => {
+                if self.expanded_selected > 0 {
+                    self.expanded_selected -= 1;
+                    if self.expanded_selected < self.expanded_scroll {
+                        self.expanded_scroll = self.expanded_selected;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn nav_down(&mut self) {
+        match self.view_mode {
+            LogsViewMode::Grouped => {
+                if !self.sorted_threads.is_empty()
+                    && self.selected_row < self.sorted_threads.len() - 1
+                {
+                    self.selected_row += 1;
+                    let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
+                    if self.selected_row > max_visible {
+                        self.scroll_offset =
+                            self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
+                    }
+                }
+            }
+            LogsViewMode::Expanded { thread_id } => {
+                if let Some(group) = self.groups.get(&thread_id) {
+                    if self.expanded_selected < group.entries.len().saturating_sub(1) {
+                        self.expanded_selected += 1;
+                        let max_visible =
+                            self.expanded_scroll + self.visible_height.saturating_sub(1);
+                        if self.expanded_selected > max_visible {
+                            self.expanded_scroll = self
+                                .expanded_selected
+                                .saturating_sub(self.visible_height.saturating_sub(1));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn page_up(&mut self) {
+        let page_size = self.visible_height.max(1);
+        match self.view_mode {
+            LogsViewMode::Grouped => {
+                self.selected_row = self.selected_row.saturating_sub(page_size);
+                self.scroll_offset = self.scroll_offset.saturating_sub(page_size);
+            }
+            LogsViewMode::Expanded { .. } => {
+                self.expanded_selected = self.expanded_selected.saturating_sub(page_size);
+                self.expanded_scroll = self.expanded_scroll.saturating_sub(page_size);
+            }
+        }
+    }
+
+    pub fn page_down(&mut self) {
+        let page_size = self.visible_height.max(1);
+        match self.view_mode {
+            LogsViewMode::Grouped => {
+                let max_row = self.sorted_threads.len().saturating_sub(1);
+                self.selected_row = (self.selected_row + page_size).min(max_row);
+                let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
+                if self.selected_row > max_visible {
+                    self.scroll_offset =
+                        self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
+                }
+            }
+            LogsViewMode::Expanded { thread_id } => {
+                if let Some(group) = self.groups.get(&thread_id) {
+                    let max_row = group.entries.len().saturating_sub(1);
+                    self.expanded_selected = (self.expanded_selected + page_size).min(max_row);
+                    let max_visible = self.expanded_scroll + self.visible_height.saturating_sub(1);
+                    if self.expanded_selected > max_visible {
+                        self.expanded_scroll = self
+                            .expanded_selected
+                            .saturating_sub(self.visible_height.saturating_sub(1));
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn expand(&mut self) -> bool {
+        match self.view_mode {
+            LogsViewMode::Grouped => {
+                if let Some(&thread_id) = self.sorted_threads.get(self.selected_row) {
+                    self.view_mode = LogsViewMode::Expanded { thread_id };
+                    self.expanded_scroll = 0;
+                    self.expanded_selected = 0;
+                    true
+                } else {
+                    false
+                }
+            }
+            LogsViewMode::Expanded { .. } => false, // Already at deepest level
+        }
+    }
+
+    pub fn collapse(&mut self) -> bool {
+        match self.view_mode {
+            LogsViewMode::Grouped => false, // Signal to exit edit mode
+            LogsViewMode::Expanded { thread_id } => {
+                self.view_mode = LogsViewMode::Grouped;
+                // Restore selection to the thread we were viewing
+                if let Some(idx) = self.sorted_threads.iter().position(|&id| id == thread_id) {
+                    self.selected_row = idx;
+                }
+                true
+            }
+        }
+    }
+}
+
 /// Combined stats data (progress + profile metrics)
 #[derive(Debug)]
 pub struct StatsData {
@@ -346,7 +576,7 @@ pub struct QueryBlock {
     pub results:          Option<SortableTable>,
     pub stats:            StatsData,
     pub logs:             Vec<LogEntry>,
-    pub log_table:        Option<SortableTable>,
+    pub logs_data:        LogsData,
     pub error:            Option<String>,
     pub running:          bool,
     pub cancel_requested: bool,
@@ -361,7 +591,7 @@ impl QueryBlock {
             results: None,
             stats: StatsData::default(),
             logs: Vec::new(),
-            log_table: None,
+            logs_data: LogsData::default(),
             error: None,
             running: true,
             cancel_requested: false,
@@ -412,25 +642,7 @@ impl QueryBlock {
                 text:      map.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             };
 
-            // Initialize table if needed
-            if self.log_table.is_none() {
-                self.log_table = Some(SortableTable::new(vec![
-                    "Time".to_string(),
-                    "Thread".to_string(),
-                    "Source".to_string(),
-                    "Text".to_string(),
-                ]));
-            }
-
-            if let Some(ref mut table) = self.log_table {
-                table.add_row(vec![
-                    serde_json::Value::String(entry.time.clone()),
-                    serde_json::Value::Number(entry.thread_id.into()),
-                    serde_json::Value::String(entry.source.clone()),
-                    serde_json::Value::String(entry.text.clone()),
-                ]);
-            }
-
+            self.logs_data.add_entry(entry.clone());
             self.logs.push(entry);
         }
     }
