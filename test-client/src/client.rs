@@ -20,14 +20,14 @@ impl ClickHouseClient {
         secure: bool,
         compression: &str,
     ) -> Result<Self> {
-        let endpoint =
-            if secure { format!("https://{host}:{port}") } else { format!("{host}:{port}") };
+        let endpoint = format!("{host}:{port}");
 
         let mut builder = ClientBuilder::new()
             .with_endpoint(&endpoint)
             .with_username(user)
             .with_password(password)
-            .with_database(database);
+            .with_database(database)
+            .with_tls(secure);
 
         // Configure compression
         match compression {

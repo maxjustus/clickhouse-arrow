@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+
 use ratatui::layout::Constraint;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table, Widget, Wrap};
 use serde_json::Value;
+use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortOrder {
@@ -11,7 +14,7 @@ pub enum SortOrder {
 }
 
 /// A segment in a navigation path into nested JSON values
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathSegment {
     Index(usize), // Array index: [0], [1], ...
     Key(String),  // Object key or map key
@@ -20,8 +23,7 @@ pub enum PathSegment {
 /// Full navigation path into a nested value
 pub type ValuePath = Vec<PathSegment>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ResultsViewMode {
     #[default]
     Table,
@@ -38,6 +40,154 @@ pub enum ResultsViewMode {
     },
 }
 
+// === Path Statistics ===
+
+/// Type of values found at a path
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PathValueType {
+    #[default]
+    Unknown,
+    Numeric,
+    String,
+    Array,
+    Object,
+    Boolean,
+    Mixed,
+    AllNull,
+}
+
+/// Numeric statistics for a path
+#[derive(Debug, Clone, Default)]
+pub struct NumericStats {
+    pub min:    f64,
+    pub max:    f64,
+    pub sum:    f64,
+    pub count:  usize,
+    pub values: Vec<f64>, // For sparkline + percentiles (bounded)
+}
+
+impl NumericStats {
+    const MAX_VALUES: usize = 200;
+
+    pub fn add(&mut self, v: f64) {
+        if self.count == 0 {
+            self.min = v;
+            self.max = v;
+        } else {
+            self.min = self.min.min(v);
+            self.max = self.max.max(v);
+        }
+        self.sum += v;
+        self.count += 1;
+        if self.values.len() < Self::MAX_VALUES {
+            self.values.push(v);
+        }
+    }
+
+    pub fn avg(&self) -> f64 { if self.count == 0 { 0.0 } else { self.sum / self.count as f64 } }
+
+    pub fn percentile(&self, p: f64) -> Option<f64> {
+        if self.values.is_empty() {
+            return None;
+        }
+        let mut sorted = self.values.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = ((p / 100.0) * (sorted.len() - 1) as f64).round() as usize;
+        Some(sorted[idx.min(sorted.len() - 1)])
+    }
+}
+
+/// Sample of unique values with counts
+#[derive(Debug, Clone, Default)]
+pub struct UniqueSample {
+    pub values:       Vec<(String, usize)>, // (value, count) sorted by count desc
+    pub total_unique: usize,
+    pub truncated:    bool,
+}
+
+/// Computed statistics for a path
+#[derive(Debug, Clone, Default)]
+pub struct PathStats {
+    pub total_rows:    usize,
+    pub null_count:    usize,
+    pub value_type:    PathValueType,
+    pub numeric:       Option<NumericStats>,
+    pub unique_sample: Option<UniqueSample>,
+}
+
+impl PathStats {
+    const MAX_UNIQUE: usize = 1000;
+
+    fn add_value(&mut self, value: &Value, unique_counts: &mut HashMap<String, usize>) {
+        match value {
+            Value::Null => self.null_count += 1,
+            Value::Number(n) => {
+                if let Some(f) = n.as_f64() {
+                    self.update_type(PathValueType::Numeric);
+                    self.numeric.get_or_insert_with(NumericStats::default).add(f);
+                }
+                self.track_unique(value, unique_counts);
+            }
+            Value::String(_) => {
+                self.update_type(PathValueType::String);
+                self.track_unique(value, unique_counts);
+            }
+            Value::Bool(_) => {
+                self.update_type(PathValueType::Boolean);
+                self.track_unique(value, unique_counts);
+            }
+            Value::Array(_) => {
+                self.update_type(PathValueType::Array);
+            }
+            Value::Object(_) => {
+                self.update_type(PathValueType::Object);
+            }
+        }
+    }
+
+    fn update_type(&mut self, new_type: PathValueType) {
+        if self.value_type == PathValueType::Unknown {
+            self.value_type = new_type;
+        } else if self.value_type != new_type {
+            self.value_type = PathValueType::Mixed;
+        }
+    }
+
+    fn track_unique(&mut self, value: &Value, unique_counts: &mut HashMap<String, usize>) {
+        if unique_counts.len() >= Self::MAX_UNIQUE {
+            return; // Cap reached
+        }
+        let key = match value {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            _ => return,
+        };
+        *unique_counts.entry(key).or_insert(0) += 1;
+    }
+
+    fn finalize(&mut self, unique_counts: HashMap<String, usize>) {
+        if self.null_count == self.total_rows {
+            self.value_type = PathValueType::AllNull;
+        }
+
+        if !unique_counts.is_empty() {
+            let mut values: Vec<_> = unique_counts.into_iter().collect();
+            values.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by count desc
+            let truncated = values.len() >= Self::MAX_UNIQUE;
+            let total_unique = values.len();
+            values.truncate(20); // Keep top 20 for display
+            self.unique_sample = Some(UniqueSample { values, total_unique, truncated });
+        }
+    }
+}
+
+/// State of stats for a path
+pub enum PathStatsState<'a> {
+    Ready(&'a PathStats),
+    Computing,
+    NotStarted,
+}
 
 // === Helper functions for JSON value handling ===
 
@@ -115,21 +265,22 @@ fn format_map_preview(arr: &[Value], max_len: usize) -> String {
 
     for item in arr {
         if let Value::Array(pair) = item
-            && pair.len() == 2 {
-                let key_str = format_cell_value(&pair[0], key_max);
-                let val_str = format_cell_value(&pair[1], val_max);
-                let entry = format!("{}: {}", key_str, val_str);
-                let separator = if first { "" } else { ", " };
+            && pair.len() == 2
+        {
+            let key_str = format_cell_value(&pair[0], key_max);
+            let val_str = format_cell_value(&pair[1], val_max);
+            let entry = format!("{}: {}", key_str, val_str);
+            let separator = if first { "" } else { ", " };
 
-                if result.len() + separator.len() + entry.len() + 4 > max_len {
-                    result.push_str("...");
-                    break;
-                }
-
-                result.push_str(separator);
-                result.push_str(&entry);
-                first = false;
+            if result.len() + separator.len() + entry.len() + 4 > max_len {
+                result.push_str("...");
+                break;
             }
+
+            result.push_str(separator);
+            result.push_str(&entry);
+            first = false;
+        }
     }
 
     result.push('}');
@@ -221,7 +372,12 @@ pub struct SortableTable {
     pub view_mode:      ResultsViewMode,
     pub selected_field: usize,
     pub value_scroll:   usize,
-    pub visible_height: usize, // Updated during render
+    pub visible_height: usize,
+
+    // Path stats computation
+    stats_cache:           HashMap<(usize, ValuePath), PathStats>,
+    stats_pending:         Option<(usize, ValuePath, oneshot::Receiver<PathStats>)>,
+    stats_cache_row_count: usize,
 }
 
 impl SortableTable {
@@ -240,7 +396,10 @@ impl SortableTable {
             view_mode: ResultsViewMode::Table,
             selected_field: 0,
             value_scroll: 0,
-            visible_height: 20, // Default, updated during render
+            visible_height: 20,
+            stats_cache: HashMap::new(),
+            stats_pending: None,
+            stats_cache_row_count: 0,
         }
     }
 
@@ -357,22 +516,23 @@ impl SortableTable {
             ResultsViewMode::FieldValue { row, field, path, selected_index, scroll_offset } => {
                 // Navigate within collection, or scroll scalar value
                 if let Some(cell) = self.rows.get(*row).and_then(|r| r.get(*field))
-                    && let Some(current) = resolve_path(cell, path) {
-                        let len = collection_len(current);
-                        if len > 0 {
-                            // Navigating within a collection
-                            if *selected_index + 1 < len {
-                                *selected_index += 1;
-                                // Update scroll if needed
-                                if *selected_index >= *scroll_offset + self.visible_height {
-                                    *scroll_offset += 1;
-                                }
+                    && let Some(current) = resolve_path(cell, path)
+                {
+                    let len = collection_len(current);
+                    if len > 0 {
+                        // Navigating within a collection
+                        if *selected_index + 1 < len {
+                            *selected_index += 1;
+                            // Update scroll if needed
+                            if *selected_index >= *scroll_offset + self.visible_height {
+                                *scroll_offset += 1;
                             }
-                        } else {
-                            // Scalar value - scroll text
-                            self.value_scroll += 1;
                         }
+                    } else {
+                        // Scalar value - scroll text
+                        self.value_scroll += 1;
                     }
+                }
             }
         }
     }
@@ -391,21 +551,22 @@ impl SortableTable {
             }
             ResultsViewMode::FieldValue { row, field, path, selected_index, scroll_offset } => {
                 if let Some(cell) = self.rows.get(*row).and_then(|r| r.get(*field))
-                    && let Some(current) = resolve_path(cell, path) {
-                        let len = collection_len(current);
-                        if len > 0 {
-                            // Navigating within a collection
-                            if *selected_index > 0 {
-                                *selected_index -= 1;
-                                if *selected_index < *scroll_offset {
-                                    *scroll_offset = *selected_index;
-                                }
+                    && let Some(current) = resolve_path(cell, path)
+                {
+                    let len = collection_len(current);
+                    if len > 0 {
+                        // Navigating within a collection
+                        if *selected_index > 0 {
+                            *selected_index -= 1;
+                            if *selected_index < *scroll_offset {
+                                *scroll_offset = *selected_index;
                             }
-                        } else {
-                            // Scalar value - scroll text
-                            self.value_scroll = self.value_scroll.saturating_sub(1);
                         }
+                    } else {
+                        // Scalar value - scroll text
+                        self.value_scroll = self.value_scroll.saturating_sub(1);
                     }
+                }
             }
         }
     }
@@ -435,14 +596,16 @@ impl SortableTable {
                         _ => {} // Allow: scalars, non-empty collections
                     }
                 }
+                let field = self.selected_field;
                 self.view_mode = ResultsViewMode::FieldValue {
                     row,
-                    field: self.selected_field,
+                    field,
                     path: Vec::new(),
                     selected_index: 0,
                     scroll_offset: 0,
                 };
                 self.value_scroll = 0;
+                self.maybe_start_stats_computation(field, Vec::new());
                 true
             }
             ResultsViewMode::FieldValue { row, field, path, selected_index, .. } => {
@@ -453,59 +616,67 @@ impl SortableTable {
                 let selected = *selected_index;
 
                 if let Some(cell) = self.get_cell_value(row, field)
-                    && let Some(current) = resolve_path(cell, &new_path) {
-                        match current {
-                            Value::Array(arr) if is_map_like(arr) => {
-                                // Map-like: drill into value (index 1 of the pair)
-                                if let Some(pair) = arr.get(selected)
-                                    && let Value::Array(kv) = pair
-                                        && kv.len() == 2 {
-                                            new_path.push(PathSegment::Index(selected));
-                                            new_path.push(PathSegment::Index(1));
-                                            self.view_mode = ResultsViewMode::FieldValue {
-                                                row,
-                                                field,
-                                                path: new_path,
-                                                selected_index: 0,
-                                                scroll_offset: 0,
-                                            };
-                                            self.value_scroll = 0;
-                                            return true;
-                                        }
+                    && let Some(current) = resolve_path(cell, &new_path)
+                {
+                    match current {
+                        Value::Array(arr) if is_map_like(arr) => {
+                            // Map-like: drill into value (index 1 of the pair)
+                            if let Some(pair) = arr.get(selected)
+                                && let Value::Array(kv) = pair
+                                && kv.len() == 2
+                            {
+                                new_path.push(PathSegment::Index(selected));
+                                new_path.push(PathSegment::Index(1));
+                                let stats_path = new_path.clone();
+                                self.view_mode = ResultsViewMode::FieldValue {
+                                    row,
+                                    field,
+                                    path: new_path,
+                                    selected_index: 0,
+                                    scroll_offset: 0,
+                                };
+                                self.value_scroll = 0;
+                                self.maybe_start_stats_computation(field, stats_path);
+                                return true;
                             }
-                            Value::Array(arr) => {
-                                // Regular array: drill into selected element (even scalars)
-                                if selected < arr.len() {
-                                    new_path.push(PathSegment::Index(selected));
-                                    self.view_mode = ResultsViewMode::FieldValue {
-                                        row,
-                                        field,
-                                        path: new_path,
-                                        selected_index: 0,
-                                        scroll_offset: 0,
-                                    };
-                                    self.value_scroll = 0;
-                                    return true;
-                                }
-                            }
-                            Value::Object(obj) => {
-                                // Object: drill into selected key's value (even scalars)
-                                if let Some((key, _)) = obj.iter().nth(selected) {
-                                    new_path.push(PathSegment::Key(key.clone()));
-                                    self.view_mode = ResultsViewMode::FieldValue {
-                                        row,
-                                        field,
-                                        path: new_path,
-                                        selected_index: 0,
-                                        scroll_offset: 0,
-                                    };
-                                    self.value_scroll = 0;
-                                    return true;
-                                }
-                            }
-                            _ => {} // Already at scalar, can't expand further
                         }
+                        Value::Array(arr) => {
+                            // Regular array: drill into selected element (even scalars)
+                            if selected < arr.len() {
+                                new_path.push(PathSegment::Index(selected));
+                                let stats_path = new_path.clone();
+                                self.view_mode = ResultsViewMode::FieldValue {
+                                    row,
+                                    field,
+                                    path: new_path,
+                                    selected_index: 0,
+                                    scroll_offset: 0,
+                                };
+                                self.value_scroll = 0;
+                                self.maybe_start_stats_computation(field, stats_path);
+                                return true;
+                            }
+                        }
+                        Value::Object(obj) => {
+                            // Object: drill into selected key's value (even scalars)
+                            if let Some((key, _)) = obj.iter().nth(selected) {
+                                new_path.push(PathSegment::Key(key.clone()));
+                                let stats_path = new_path.clone();
+                                self.view_mode = ResultsViewMode::FieldValue {
+                                    row,
+                                    field,
+                                    path: new_path,
+                                    selected_index: 0,
+                                    scroll_offset: 0,
+                                };
+                                self.value_scroll = 0;
+                                self.maybe_start_stats_computation(field, stats_path);
+                                return true;
+                            }
+                        }
+                        _ => {} // Already at scalar, can't expand further
                     }
+                }
                 false
             }
         }
@@ -586,15 +757,95 @@ impl SortableTable {
                 // Nested value - raw string for strings, pretty JSON otherwise
                 if let Some(row_data) = self.rows.get(*row)
                     && let Some(field_val) = row_data.get(*field)
-                        && let Some(resolved) = resolve_path(field_val, path) {
-                            return match resolved {
-                                Value::String(s) => s.clone(),
-                                other => serde_json::to_string_pretty(other).unwrap_or_default(),
-                            };
-                        }
+                    && let Some(resolved) = resolve_path(field_val, path)
+                {
+                    return match resolved {
+                        Value::String(s) => s.clone(),
+                        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+                    };
+                }
                 String::new()
             }
         }
+    }
+
+    // === Path Stats Methods ===
+
+    /// Start stats computation for a field/path if not cached
+    pub fn maybe_start_stats_computation(&mut self, field: usize, path: ValuePath) {
+        // Invalidate cache if rows changed
+        if self.rows.len() != self.stats_cache_row_count {
+            self.stats_cache.clear();
+            self.stats_cache_row_count = self.rows.len();
+        }
+
+        // Check cache
+        let key = (field, path.clone());
+        if self.stats_cache.contains_key(&key) {
+            return;
+        }
+
+        // Check if already computing this path
+        if let Some((f, ref p, _)) = self.stats_pending {
+            if f == field && p == &path {
+                return;
+            }
+        }
+
+        // Extract values at path (clone just what we need)
+        let values: Vec<Option<Value>> = self
+            .rows
+            .iter()
+            .map(|row| row.get(field).and_then(|v| resolve_path(v, &path).cloned()))
+            .collect();
+
+        // Spawn background task
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let stats = compute_path_stats(values);
+            let _ = tx.send(stats);
+        });
+
+        self.stats_pending = Some((field, path, rx));
+    }
+
+    /// Poll for completed stats computation
+    pub fn poll_stats_completion(&mut self) {
+        let Some((field, ref path, ref mut rx)) = self.stats_pending else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(stats) => {
+                let key = (field, path.clone());
+                self.stats_cache.insert(key, stats);
+                self.stats_pending = None;
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {
+                // Still computing
+            }
+            Err(oneshot::error::TryRecvError::Closed) => {
+                // Task died, clear pending
+                self.stats_pending = None;
+            }
+        }
+    }
+
+    /// Get stats state for a field/path
+    pub fn get_path_stats(&self, field: usize, path: &ValuePath) -> PathStatsState<'_> {
+        let key = (field, path.clone());
+
+        if let Some(stats) = self.stats_cache.get(&key) {
+            return PathStatsState::Ready(stats);
+        }
+
+        if let Some((f, p, _)) = &self.stats_pending {
+            if *f == field && p == path {
+                return PathStatsState::Computing;
+            }
+        }
+
+        PathStatsState::NotStarted
     }
 
     /// Calculate how many columns fit and their widths, starting from col_offset.
@@ -1004,4 +1255,21 @@ impl Widget for ResultsWidget<'_> {
             ResultsWidget::Value(w) => w.render(area, buf),
         }
     }
+}
+
+/// Compute stats for values at a path (runs in background task)
+fn compute_path_stats(values: Vec<Option<Value>>) -> PathStats {
+    let mut stats = PathStats::default();
+    let mut unique_counts = HashMap::new();
+    stats.total_rows = values.len();
+
+    for value in values {
+        match value {
+            None => stats.null_count += 1,
+            Some(v) => stats.add_value(&v, &mut unique_counts),
+        }
+    }
+
+    stats.finalize(unique_counts);
+    stats
 }

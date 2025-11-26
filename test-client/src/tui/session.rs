@@ -18,7 +18,7 @@ pub enum MetricsViewMode {
 /// Aggregated metric data (grouped by name)
 #[derive(Debug, Clone)]
 pub struct AggregatedMetric {
-    pub history:       VecDeque<i64>, // For sparkline (last N values)
+    pub history:       VecDeque<i64>,   // For sparkline (last N values)
     pub chart_points:  Vec<(f64, f64)>, // For expanded chart (time_ms, value)
     pub current:       i64,
     pub min:           i64,
@@ -31,13 +31,13 @@ pub struct AggregatedMetric {
 impl AggregatedMetric {
     pub fn new() -> Self {
         Self {
-            history: VecDeque::with_capacity(SPARKLINE_SIZE),
-            chart_points: Vec::with_capacity(CHART_HISTORY_SIZE),
-            current: 0,
-            min: i64::MAX,
-            max: i64::MIN,
-            sum: 0,
-            count: 0,
+            history:           VecDeque::with_capacity(SPARKLINE_SIZE),
+            chart_points:      Vec::with_capacity(CHART_HISTORY_SIZE),
+            current:           0,
+            min:               i64::MAX,
+            max:               i64::MIN,
+            sum:               0,
+            count:             0,
             base_timestamp_us: None,
         }
     }
@@ -85,14 +85,14 @@ pub struct LogEntry {
 }
 
 /// View mode for the logs display
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogsViewMode {
     #[default]
     Grouped,
-    Expanded { thread_id: u64 },
+    Expanded {
+        thread_id: u64,
+    },
 }
-
 
 /// Grouped log data for a single thread
 #[derive(Debug, Clone)]
@@ -222,16 +222,16 @@ impl LogsData {
             }
             LogsViewMode::Expanded { thread_id } => {
                 if let Some(group) = self.groups.get(&thread_id)
-                    && self.expanded_selected < group.entries.len().saturating_sub(1) {
-                        self.expanded_selected += 1;
-                        let max_visible =
-                            self.expanded_scroll + self.visible_height.saturating_sub(1);
-                        if self.expanded_selected > max_visible {
-                            self.expanded_scroll = self
-                                .expanded_selected
-                                .saturating_sub(self.visible_height.saturating_sub(1));
-                        }
+                    && self.expanded_selected < group.entries.len().saturating_sub(1)
+                {
+                    self.expanded_selected += 1;
+                    let max_visible = self.expanded_scroll + self.visible_height.saturating_sub(1);
+                    if self.expanded_selected > max_visible {
+                        self.expanded_scroll = self
+                            .expanded_selected
+                            .saturating_sub(self.visible_height.saturating_sub(1));
                     }
+                }
             }
         }
     }
@@ -403,53 +403,54 @@ impl StatsData {
                 map.get("name").and_then(|n| n.as_str()),
                 map.get("value").and_then(|v| v.as_i64()),
                 map.get("current_time").and_then(|t| t.as_str()),
-            ) {
-                // Parse timestamp for aggregation
-                if let Ok(dt) = DateTime::parse_from_rfc3339(time_str) {
-                    let timestamp_us = dt.timestamp_micros();
+            )
+        {
+            // Parse timestamp for aggregation
+            if let Ok(dt) = DateTime::parse_from_rfc3339(time_str) {
+                let timestamp_us = dt.timestamp_micros();
 
-                    // Add to aggregated metrics
-                    if !self.metrics.contains_key(name) {
-                        self.metric_names.push(name.to_string());
-                        self.metric_names.sort();
-                        self.metrics.insert(name.to_string(), AggregatedMetric::new());
-                    }
-                    if let Some(metric) = self.metrics.get_mut(name) {
-                        metric.add_value(value, timestamp_us);
-                    }
+                // Add to aggregated metrics
+                if !self.metrics.contains_key(name) {
+                    self.metric_names.push(name.to_string());
+                    self.metric_names.sort();
+                    self.metrics.insert(name.to_string(), AggregatedMetric::new());
+                }
+                if let Some(metric) = self.metrics.get_mut(name) {
+                    metric.add_value(value, timestamp_us);
+                }
 
-                    // Also extract CPU and RAM metrics for header display
-                    match name {
-                        "UserTimeMicroseconds" => {
-                            let value_u64 = value as u64;
-                            self.prev_user_cpu_us = Some(value_u64);
-                            self.prev_timestamp_us = Some(timestamp_us);
-                            self.update_cpu_percentage(timestamp_us);
-                        }
-                        "SystemTimeMicroseconds" => {
-                            let value_u64 = value as u64;
-                            self.prev_system_cpu_us = Some(value_u64);
-                            self.prev_timestamp_us = Some(timestamp_us);
-                            self.update_cpu_percentage(timestamp_us);
-                        }
-                        "MemoryTrackerUsage" => {
-                            self.ram_current = value as u64;
-                            self.ram_history.push_back(self.ram_current);
-                            if self.ram_history.len() > SPARKLINE_SIZE {
-                                self.ram_history.pop_front();
-                            }
-                        }
-                        "MemoryTrackerPeakUsage" => {
-                            self.peak_ram_current = value as u64;
-                            self.peak_ram_history.push_back(self.peak_ram_current);
-                            if self.peak_ram_history.len() > SPARKLINE_SIZE {
-                                self.peak_ram_history.pop_front();
-                            }
-                        }
-                        _ => {}
+                // Also extract CPU and RAM metrics for header display
+                match name {
+                    "UserTimeMicroseconds" => {
+                        let value_u64 = value as u64;
+                        self.prev_user_cpu_us = Some(value_u64);
+                        self.prev_timestamp_us = Some(timestamp_us);
+                        self.update_cpu_percentage(timestamp_us);
                     }
+                    "SystemTimeMicroseconds" => {
+                        let value_u64 = value as u64;
+                        self.prev_system_cpu_us = Some(value_u64);
+                        self.prev_timestamp_us = Some(timestamp_us);
+                        self.update_cpu_percentage(timestamp_us);
+                    }
+                    "MemoryTrackerUsage" => {
+                        self.ram_current = value as u64;
+                        self.ram_history.push_back(self.ram_current);
+                        if self.ram_history.len() > SPARKLINE_SIZE {
+                            self.ram_history.pop_front();
+                        }
+                    }
+                    "MemoryTrackerPeakUsage" => {
+                        self.peak_ram_current = value as u64;
+                        self.peak_ram_history.push_back(self.peak_ram_current);
+                        if self.peak_ram_history.len() > SPARKLINE_SIZE {
+                            self.peak_ram_history.pop_front();
+                        }
+                    }
+                    _ => {}
                 }
             }
+        }
     }
 
     fn update_cpu_percentage(&mut self, timestamp_us: i64) {
@@ -693,9 +694,10 @@ impl Session {
 
     pub fn clear_expired_toast(&mut self) {
         if let Some((_, created)) = &self.toast
-            && created.elapsed() > std::time::Duration::from_secs(2) {
-                self.toast = None;
-            }
+            && created.elapsed() > std::time::Duration::from_secs(2)
+        {
+            self.toast = None;
+        }
     }
 
     /// Create a new query block from the current new_query text
@@ -743,9 +745,10 @@ impl Session {
         if let Some(current_id) = self.selected_query {
             let idx = self.blocks.iter().position(|b| b.id == current_id);
             if let Some(i) = idx
-                && i > 0 {
-                    self.selected_query = Some(self.blocks[i - 1].id);
-                }
+                && i > 0
+            {
+                self.selected_query = Some(self.blocks[i - 1].id);
+            }
         } else if !self.blocks.is_empty() {
             self.selected_query = Some(self.blocks.last().unwrap().id);
         }
@@ -756,9 +759,10 @@ impl Session {
         if let Some(current_id) = self.selected_query {
             let idx = self.blocks.iter().position(|b| b.id == current_id);
             if let Some(i) = idx
-                && i + 1 < self.blocks.len() {
-                    self.selected_query = Some(self.blocks[i + 1].id);
-                }
+                && i + 1 < self.blocks.len()
+            {
+                self.selected_query = Some(self.blocks[i + 1].id);
+            }
         } else if !self.blocks.is_empty() {
             self.selected_query = Some(self.blocks.first().unwrap().id);
         }

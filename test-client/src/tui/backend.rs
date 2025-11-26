@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use clickhouse_arrow::{ClickHouseEvent, Client, Event, NativeFormat, Qid, Settings};
+use chrono::NaiveDate;
+use clickhouse_arrow::{ClickHouseEvent, Client, Event, NativeFormat, Qid, Settings, Tz};
 use futures::StreamExt;
 use tokio::sync::{RwLock, broadcast, mpsc};
 
@@ -257,10 +258,32 @@ fn value_to_json(value: clickhouse_arrow::Value) -> serde_json::Value {
             serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
         }
         Value::Uuid(u) => serde_json::json!(u.to_string()),
-        Value::Date(d) => serde_json::json!(format!("{:?}", d)),
-        Value::Date32(d) => serde_json::json!(format!("{:?}", d)),
-        Value::DateTime(dt) => serde_json::json!(format!("{:?}", dt)),
-        Value::DateTime64(dt) => serde_json::json!(format!("{:?}", dt)),
+        Value::Date(d) => {
+            let date: NaiveDate = d.into();
+            serde_json::json!(date.format("%Y-%m-%d").to_string())
+        }
+        Value::Date32(d) => {
+            let date: NaiveDate = d.into();
+            serde_json::json!(date.format("%Y-%m-%d").to_string())
+        }
+        Value::DateTime(dt) => match TryInto::<chrono::DateTime<Tz>>::try_into(dt) {
+            Ok(chrono_dt) => {
+                serde_json::json!(chrono_dt.format("%Y-%m-%d %H:%M:%S %Z").to_string())
+            }
+            Err(_) => serde_json::json!(format!("{:?}", dt)),
+        },
+        Value::DateTime64(dt) => match TryInto::<chrono::DateTime<Tz>>::try_into(dt) {
+            Ok(chrono_dt) => {
+                let fmt = match dt.2 {
+                    3 => "%Y-%m-%d %H:%M:%S%.3f %Z",
+                    6 => "%Y-%m-%d %H:%M:%S%.6f %Z",
+                    9 => "%Y-%m-%d %H:%M:%S%.9f %Z",
+                    _ => "%Y-%m-%d %H:%M:%S %Z",
+                };
+                serde_json::json!(chrono_dt.format(fmt).to_string())
+            }
+            Err(_) => serde_json::json!(format!("{:?}", dt)),
+        },
         Value::Decimal32(_, n) => serde_json::json!(n),
         Value::Decimal64(_, n) => serde_json::json!(n),
         Value::Decimal128(_, n) => serde_json::json!(n.to_string()),

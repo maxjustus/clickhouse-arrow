@@ -55,6 +55,14 @@ impl App {
     pub async fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
         loop {
             self.session.clear_expired_toast();
+
+            // Poll for completed stats computations
+            if let Some(block) = self.session.selected_block_mut() {
+                if let Some(table) = &mut block.results {
+                    table.poll_stats_completion();
+                }
+            }
+
             terminal.draw(|f| render(f, self))?;
 
             if self.should_quit {
@@ -218,7 +226,7 @@ impl App {
             }
             Focus::SubPane(pane) => {
                 let pane = *pane;
-                self.handle_subpane_key(key, pane)?;
+                self.handle_subpane_key(key, pane).await?;
             }
         }
         Ok(())
@@ -274,24 +282,45 @@ impl App {
     async fn cancel_selected_query(&mut self) {
         if let Some(query_id) = self.session.selected_query
             && let Some(block) = self.session.blocks.get_mut(query_id)
-                && block.running && !block.cancel_requested {
-                    block.cancel_requested = true;
-                    let _ = self.cmd_tx.send(QueryCommand::Cancel { query_id }).await;
-                }
+            && block.running
+            && !block.cancel_requested
+        {
+            block.cancel_requested = true;
+            let _ = self.cmd_tx.send(QueryCommand::Cancel { query_id }).await;
+        }
     }
 
-    fn handle_subpane_key(&mut self, key: KeyEvent, pane: SubPane) -> Result<()> {
+    async fn handle_subpane_key(&mut self, key: KeyEvent, pane: SubPane) -> Result<()> {
         // Handle copy to clipboard (needs special handling due to borrow checker)
-        if pane == SubPane::Results && key.code == KeyCode::Char('c') {
-            if let Some(block) = self.session.selected_block()
-                && let Some(table) = &block.results {
-                    let content = table.get_clipboard_content();
-                    if !content.is_empty()
-                        && let Ok(mut clipboard) = arboard::Clipboard::new()
-                            && clipboard.set_text(content).is_ok() {
-                                self.session.show_toast("Copied to clipboard");
-                            }
+        if pane == SubPane::Results && key.code == KeyCode::Char('y') {
+            let content = if let Some(block) = self.session.selected_block()
+                && let Some(table) = &block.results
+            {
+                table.get_clipboard_content()
+            } else {
+                String::new()
+            };
+
+            if !content.is_empty() {
+                // Run clipboard operation on blocking thread pool to satisfy macOS NSPasteboard
+                // requirements
+                let result = tokio::task::spawn_blocking(move || {
+                    arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(content))
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(())) => {
+                        self.session.show_toast("Copied to clipboard");
+                    }
+                    Ok(Err(e)) => {
+                        self.session.show_toast(&format!("Copy failed: {}", e));
+                    }
+                    Err(e) => {
+                        self.session.show_toast(&format!("Copy error: {}", e));
+                    }
                 }
+            }
             return Ok(());
         }
 

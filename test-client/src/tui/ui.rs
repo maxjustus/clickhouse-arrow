@@ -4,13 +4,14 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Axis, Block, Borders, Chart, Clear, Dataset, GraphType, List, ListItem, Paragraph, Row, Table,
-    Wrap,
+    Axis, Block, Borders, Chart, Clear, Dataset, GraphType, LineGauge, List, ListItem, Paragraph,
+    Row, Table, Wrap,
 };
 use ratatui::{Frame, symbols};
 
 use crate::tui::app::App;
 use crate::tui::session::{Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, SubPane};
+use crate::tui::widgets::table::{PathStatsState, PathValueType, ResultsViewMode};
 
 pub fn render(f: &mut Frame, app: &mut App) {
     if app.show_help {
@@ -216,21 +217,33 @@ fn render_selected_query(
         } else {
             Constraint::Length(1)
         },
-        // Results - 50% of remaining space
+        // Results
         if is_pane_expanded(SubPane::Results, focused) {
-            Constraint::Ratio(2, 4)
+            if focused == Some(SubPane::Results) {
+                Constraint::Min(0) // Fill all space when exclusively focused
+            } else {
+                Constraint::Ratio(2, 4) // 50% in navigation mode
+            }
         } else {
             Constraint::Length(1)
         },
-        // Stats - 25% of remaining space
+        // Stats
         if is_pane_expanded(SubPane::Stats, focused) {
-            Constraint::Ratio(1, 4)
+            if focused == Some(SubPane::Stats) {
+                Constraint::Min(0)
+            } else {
+                Constraint::Ratio(1, 4) // 25% in navigation mode
+            }
         } else {
             Constraint::Length(1)
         },
-        // Logs - 25% of remaining space
+        // Logs
         if is_pane_expanded(SubPane::Logs, focused) {
-            Constraint::Ratio(1, 4)
+            if focused == Some(SubPane::Logs) {
+                Constraint::Min(0)
+            } else {
+                Constraint::Ratio(1, 4) // 25% in navigation mode
+            }
         } else {
             Constraint::Length(1)
         },
@@ -318,9 +331,29 @@ fn render_results_pane(
 
     if expanded {
         if let Some(ref table) = block.results {
-            let title = format!("{} Results", expand_char);
-            let widget = table.render(&title, area.width, style);
-            f.render_widget(widget, area);
+            // Check if we're in FieldValue mode and should show stats panel
+            let show_stats = matches!(table.view_mode, ResultsViewMode::FieldValue { .. });
+
+            if show_stats {
+                // Split area: main view (top), stats panel (bottom 5 lines)
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(0), Constraint::Length(5)])
+                    .split(area);
+
+                let title = format!("{} Results", expand_char);
+                let widget = table.render(&title, chunks[0].width, style);
+                f.render_widget(widget, chunks[0]);
+
+                // Render stats panel
+                if let ResultsViewMode::FieldValue { field, ref path, .. } = table.view_mode {
+                    render_path_stats_panel(f, chunks[1], table.get_path_stats(field, path), style);
+                }
+            } else {
+                let title = format!("{} Results", expand_char);
+                let widget = table.render(&title, area.width, style);
+                f.render_widget(widget, area);
+            }
         } else if block.running {
             let block_widget = Block::default()
                 .borders(Borders::ALL)
@@ -341,6 +374,128 @@ fn render_results_pane(
     }
 }
 
+/// Render the path stats panel below the value view
+fn render_path_stats_panel(
+    f: &mut Frame,
+    area: Rect,
+    stats_state: PathStatsState<'_>,
+    style: Style,
+) {
+    let block = Block::default().borders(Borders::ALL).title("Stats").border_style(style);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    match stats_state {
+        PathStatsState::Computing => {
+            let text =
+                Paragraph::new("Computing stats...").style(Style::default().fg(Color::Yellow));
+            f.render_widget(text, inner);
+        }
+        PathStatsState::NotStarted => {
+            let text =
+                Paragraph::new("Stats not available").style(Style::default().fg(Color::DarkGray));
+            f.render_widget(text, inner);
+        }
+        PathStatsState::Ready(stats) => {
+            let mut lines = Vec::new();
+
+            // Type and null info
+            let type_str = match stats.value_type {
+                PathValueType::Numeric => "Numeric",
+                PathValueType::String => "String",
+                PathValueType::Boolean => "Boolean",
+                PathValueType::Array => "Array",
+                PathValueType::Object => "Object",
+                PathValueType::Mixed => "Mixed",
+                PathValueType::AllNull => "All NULL",
+                PathValueType::Unknown => "Unknown",
+            };
+            let null_info = if stats.null_count > 0 {
+                format!(" ({} nulls)", stats.null_count)
+            } else {
+                String::new()
+            };
+
+            // First line: basic info + numeric stats if applicable
+            if let Some(ref num) = stats.numeric {
+                let sparkline = sparkline_f64(&num.values);
+                let p50 = num.percentile(50.0).map(|v| format!("{:.2}", v)).unwrap_or_default();
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} ({} vals{}): ", type_str, stats.total_rows, null_info),
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Span::styled(format!("min={:.2} ", num.min), Style::default().fg(Color::White)),
+                    Span::styled(format!("max={:.2} ", num.max), Style::default().fg(Color::White)),
+                    Span::styled(
+                        format!("avg={:.2} ", num.avg()),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(format!("p50={} ", p50), Style::default().fg(Color::White)),
+                    Span::styled(sparkline, Style::default().fg(Color::Green)),
+                ]));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!("{} ({} vals{})", type_str, stats.total_rows, null_info),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+
+            // Second line: unique value sample
+            if let Some(ref sample) = stats.unique_sample {
+                let truncated = if sample.truncated { "+" } else { "" };
+                let mut spans = vec![Span::styled(
+                    format!("Top of {} unique{}: ", sample.total_unique, truncated),
+                    Style::default().fg(Color::Gray),
+                )];
+                for (i, (val, count)) in sample.values.iter().take(5).enumerate() {
+                    if i > 0 {
+                        spans.push(Span::raw(", "));
+                    }
+                    let display_val: String = val.chars().take(15).collect();
+                    let ellipsis = if val.len() > 15 { ".." } else { "" };
+                    spans.push(Span::styled(
+                        format!("\"{}{}\"({})", display_val, ellipsis, count),
+                        Style::default().fg(Color::White),
+                    ));
+                }
+                lines.push(Line::from(spans));
+            }
+
+            let para = Paragraph::new(lines);
+            f.render_widget(para, inner);
+        }
+    }
+}
+
+/// Generate sparkline from f64 values
+fn sparkline_f64(values: &[f64]) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+    if values.is_empty() {
+        return String::new();
+    }
+
+    let min = values.iter().cloned().fold(f64::MAX, f64::min);
+    let max = values.iter().cloned().fold(f64::MIN, f64::max);
+    let range = (max - min).max(0.001);
+
+    // Take last 30 values for display
+    values
+        .iter()
+        .rev()
+        .take(30)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|&v| {
+            let normalized = (v - min) / range;
+            let idx = (normalized * 7.0).round() as usize;
+            BARS[idx.min(7)]
+        })
+        .collect()
+}
+
 fn render_stats_pane(
     f: &mut Frame,
     area: Rect,
@@ -359,20 +514,14 @@ fn render_stats_pane(
     let write_rows_rate = calc_rate(block.stats.rows_written, elapsed_ns);
     let write_bytes_rate = calc_rate(block.stats.bytes_written, elapsed_ns);
 
-    // Progress bar (if we know total)
-    let progress_bar = if let Some(total) = block.stats.total_rows {
+    // Progress ratio (if we know total)
+    let progress = block.stats.total_rows.and_then(|total| {
         if total > 0 {
-            let pct = (block.stats.rows_read * 100 / total).min(100);
-            let bar_width = 10;
-            let filled = (pct as usize * bar_width / 100).min(bar_width);
-            let empty = bar_width - filled;
-            format!(" [{}{}] {}%", "=".repeat(filled), " ".repeat(empty), pct)
+            Some((block.stats.rows_read as f64 / total as f64).min(1.0))
         } else {
-            String::new()
+            None
         }
-    } else {
-        String::new()
-    };
+    });
 
     let has_writes = block.stats.rows_written > 0;
 
@@ -383,22 +532,25 @@ fn render_stats_pane(
                 render_stats_metric_expanded(f, area, block, index, style);
             }
             MetricsViewMode::Table => {
-                // Split area: header lines + metrics table
-                let header_lines = if has_writes { 3 } else { 2 };
+                // Split area: header lines + progress line + metrics table
+                let text_lines: u16 = if has_writes { 3 } else { 2 };
+
+                let constraints: Vec<Constraint> =
+                    vec![Constraint::Length(text_lines), Constraint::Length(1), Constraint::Min(0)];
+
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(header_lines), Constraint::Min(0)])
+                    .constraints(constraints)
                     .split(area);
 
                 // Line 1: Read stats with rates
                 let read_line = format!(
-                    "{} Stats: Read {} rows ({}) @ {}/s, {}/s{}",
+                    "{} Stats: Read {} rows ({}) @ {}/s, {}/s",
                     expand_char,
                     format_number(block.stats.rows_read),
                     format_bytes(block.stats.bytes_read),
                     format_rate(read_rows_rate),
                     format_bytes(read_bytes_rate as u64),
-                    progress_bar
                 );
 
                 let mut lines = vec![Line::from(read_line)];
@@ -415,10 +567,10 @@ fn render_stats_pane(
                     lines.push(Line::from(write_line));
                 }
 
-                // CPU and RAM sparklines
-                let cpu_sparkline = sparkline_str(&block.stats.cpu_history);
-                let ram_sparkline = sparkline_str(&block.stats.ram_history);
-                let peak_ram_sparkline = sparkline_str(&block.stats.peak_ram_history);
+                // CPU and RAM sparklines (fixed 16 char width)
+                let cpu_sparkline = sparkline_str(&block.stats.cpu_history, 16);
+                let ram_sparkline = sparkline_str(&block.stats.ram_history, 16);
+                let peak_ram_sparkline = sparkline_str(&block.stats.peak_ram_history, 16);
                 let cpu_str = format!("CPU {} {}%", cpu_sparkline, block.stats.cpu_current);
                 let ram_str = format!(
                     "RAM {} {} (peak {} {})",
@@ -433,12 +585,31 @@ fn render_stats_pane(
                 let header = Paragraph::new(lines).style(style);
                 f.render_widget(header, chunks[0]);
 
+                // Progress line: gauge if we know total, otherwise text indicator
+                if let Some(ratio) = progress {
+                    let pct = (ratio * 100.0) as u16;
+                    let gauge = LineGauge::default()
+                        .filled_style(Style::default().fg(Color::Green))
+                        .line_set(symbols::line::NORMAL)
+                        .ratio(ratio)
+                        .label(format!("{}%", pct));
+                    f.render_widget(gauge, chunks[1]);
+                } else {
+                    // No total known - show reading indicator
+                    let dots = ".".repeat((block.stats.rows_read as usize / 1000) % 4);
+                    let progress_text =
+                        format!("Reading{} {} rows", dots, format_number(block.stats.rows_read));
+                    let para =
+                        Paragraph::new(progress_text).style(Style::default().fg(Color::Yellow));
+                    f.render_widget(para, chunks[1]);
+                }
+
                 // Render grouped metrics table
-                render_stats_metrics_table(f, chunks[1], block, style);
+                render_stats_metrics_table(f, chunks[2], block, style);
             }
         }
     } else {
-        // Collapsed: single line summary with rates
+        // Collapsed: single line summary with rates + optional progress gauge
         let cpu_pct = block.stats.cpu_current;
         let ram_str = format_bytes(block.stats.ram_current);
         let peak_ram_str = format_bytes(block.stats.peak_ram_current);
@@ -466,8 +637,28 @@ fn render_stats_pane(
                 peak_ram_str
             )
         };
-        let para = Paragraph::new(text).style(style);
-        f.render_widget(para, area);
+
+        if let Some(ratio) = progress {
+            // Split: text | gauge
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(40), Constraint::Length(30)])
+                .split(area);
+
+            let para = Paragraph::new(text).style(style);
+            f.render_widget(para, chunks[0]);
+
+            let pct = (ratio * 100.0) as u16;
+            let gauge = LineGauge::default()
+                .filled_style(Style::default().fg(Color::Green))
+                .line_set(symbols::line::NORMAL)
+                .ratio(ratio)
+                .label(format!("{}%", pct));
+            f.render_widget(gauge, chunks[1]);
+        } else {
+            let para = Paragraph::new(text).style(style);
+            f.render_widget(para, area);
+        }
     }
 }
 
@@ -500,6 +691,9 @@ fn render_stats_metrics_table(f: &mut Frame, area: Rect, block: &mut QueryBlock,
             let metric = block.stats.metrics.get(name)?;
             let sparkline = sparkline_str_i64(&metric.history);
             let current = format_metric_value(metric.current);
+            let min_str = format_metric_value(metric.min);
+            let max_str = format_metric_value(metric.max);
+            let avg_str = format_metric_value(metric.avg() as i64);
 
             let row_style = if i == selected_row {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
@@ -507,15 +701,25 @@ fn render_stats_metrics_table(f: &mut Frame, area: Rect, block: &mut QueryBlock,
                 Style::default()
             };
 
-            Some(Row::new(vec![name.clone(), sparkline, current]).style(row_style))
+            Some(
+                Row::new(vec![name.clone(), sparkline, current, min_str, max_str, avg_str])
+                    .style(row_style),
+            )
         })
         .collect();
 
-    let widths = [Constraint::Min(20), Constraint::Length(32), Constraint::Min(12)];
+    let widths = [
+        Constraint::Min(20),
+        Constraint::Length(32),
+        Constraint::Min(10),
+        Constraint::Min(10),
+        Constraint::Min(10),
+        Constraint::Min(10),
+    ];
 
     let table = Table::new(rows, widths)
         .header(
-            Row::new(vec!["Metric", "Sparkline", "Current"])
+            Row::new(vec!["Metric", "Sparkline", "Current", "Min", "Max", "Avg"])
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         )
         .block(Block::default().borders(Borders::ALL).title("Metrics").border_style(style));
@@ -584,7 +788,7 @@ fn render_stats_metric_expanded(
             // Add some padding
             let y_range = max_y - min_y;
             let y_padding = if y_range > 0.0 { y_range * 0.1 } else { 1.0 };
-            (min_x, max_x, min_y - y_padding, max_y + y_padding)
+            (min_x, max_x, (min_y - y_padding).max(0.0), max_y + y_padding)
         };
 
         let x_axis =
@@ -705,23 +909,27 @@ fn calc_rate(count: u64, elapsed_ns: u64) -> f64 {
     (count as f64) * 1_000_000_000.0 / (elapsed_ns as f64)
 }
 
-/// Generate sparkline string from history
-fn sparkline_str(history: &std::collections::VecDeque<u64>) -> String {
+/// Generate sparkline string from history with fixed width
+fn sparkline_str(history: &std::collections::VecDeque<u64>, width: usize) -> String {
     const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
     if history.is_empty() {
-        return "--------".to_string();
+        return BARS[0].to_string().repeat(width);
     }
 
     let max = history.iter().copied().max().unwrap_or(1).max(1);
 
-    history
-        .iter()
-        .map(|&v| {
-            let idx = ((v * 7) / max).min(7) as usize;
-            BARS[idx]
-        })
-        .collect()
+    // Take most recent `width` items, pad left if fewer
+    let start = history.len().saturating_sub(width);
+    let items: Vec<_> = history.iter().skip(start).copied().collect();
+    let pad_count = width.saturating_sub(items.len());
+
+    let mut result = BARS[0].to_string().repeat(pad_count);
+    for v in items {
+        let idx = ((v * 7) / max).min(7) as usize;
+        result.push(BARS[idx]);
+    }
+    result
 }
 
 /// Generate sparkline string from i64 history (shifts values so min becomes 0)
@@ -1029,7 +1237,7 @@ fn render_help(f: &mut Frame) {
         Line::from("  Alt+h/l           Scroll columns"),
         Line::from("  PgUp/PgDown       Page navigation"),
         Line::from("  s                 Sort by column"),
-        Line::from("  c                 Copy to clipboard (Results only)"),
+        Line::from("  y                 Copy to clipboard (Results only)"),
         Line::from(""),
         Line::from("Press ? or Esc to close help"),
     ];

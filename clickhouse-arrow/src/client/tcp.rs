@@ -39,8 +39,11 @@ impl Destination {
                 tokio::net::lookup_host(endpoint).await.map(Iterator::collect)
             }
         }
-        .map_err(|_| {
-            Error::MalformedConnectionInformation("Could not resolve destination".into())
+        .map_err(|e| {
+            Error::MalformedConnectionInformation(format!(
+                "Could not resolve destination '{}': {}",
+                self, e
+            ))
         })?;
 
         Ok(addrs
@@ -249,7 +252,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(Error::MalformedConnectionInformation(msg))
-            if msg == "Could not resolve destination"
+            if msg.contains("Could not resolve destination") && msg.contains("invalid-host-xyz:9000")
         ));
     }
 
@@ -269,7 +272,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(Error::MalformedConnectionInformation(msg))
-            if msg == "Could not resolve destination"
+            if msg.contains("Could not resolve destination") && msg.contains("invalid-host-xyz:9000")
         ));
     }
 

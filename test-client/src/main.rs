@@ -371,9 +371,10 @@ impl SessionState {
         let guard = self.active.lock().await;
         guard.as_ref().and_then(|active| {
             if active.request_id == request_id
-                && let ActiveKind::Insert { table, columns, .. } = &active.kind {
-                    return Some((table.clone(), columns.clone()));
-                }
+                && let ActiveKind::Insert { table, columns, .. } = &active.kind
+            {
+                return Some((table.clone(), columns.clone()));
+            }
             None
         })
     }
@@ -382,10 +383,11 @@ impl SessionState {
         let mut guard = self.active.lock().await;
         guard.as_mut().and_then(|active| {
             if active.request_id == request_id
-                && let ActiveKind::Insert { total_rows, .. } = &mut active.kind {
-                    *total_rows += delta;
-                    return Some(*total_rows);
-                }
+                && let ActiveKind::Insert { total_rows, .. } = &mut active.kind
+            {
+                *total_rows += delta;
+                return Some(*total_rows);
+            }
             None
         })
     }
@@ -394,9 +396,10 @@ impl SessionState {
         let guard = self.active.lock().await;
         guard.as_ref().and_then(|active| {
             if active.request_id == request_id
-                && let ActiveKind::Insert { total_rows, .. } = &active.kind {
-                    return Some(*total_rows);
-                }
+                && let ActiveKind::Insert { total_rows, .. } = &active.kind
+            {
+                return Some(*total_rows);
+            }
             None
         })
     }
