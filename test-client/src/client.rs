@@ -4,6 +4,61 @@ use anyhow::{Context, Result, anyhow};
 use clickhouse_arrow::{Client, ClientBuilder, CompressionMethod, InsertOptions, NativeFormat};
 use serde_json::Value;
 
+/// Connection parameters for rebuilding clients after connection loss
+#[derive(Clone)]
+pub struct ConnectionParams {
+    pub host:        String,
+    pub port:        u16,
+    pub user:        String,
+    pub password:    String,
+    pub database:    String,
+    pub secure:      bool,
+    pub compression: String,
+}
+
+impl ConnectionParams {
+    pub fn new(
+        host: impl Into<String>,
+        port: u16,
+        user: impl Into<String>,
+        password: impl Into<String>,
+        database: impl Into<String>,
+        secure: bool,
+        compression: impl Into<String>,
+    ) -> Self {
+        Self {
+            host: host.into(),
+            port,
+            user: user.into(),
+            password: password.into(),
+            database: database.into(),
+            secure,
+            compression: compression.into(),
+        }
+    }
+
+    /// Build a new client from these parameters
+    pub async fn build_client(&self) -> Result<Client<NativeFormat>> {
+        let endpoint = format!("{}:{}", self.host, self.port);
+
+        let mut builder = ClientBuilder::new()
+            .with_endpoint(&endpoint)
+            .with_username(&self.user)
+            .with_password(&self.password)
+            .with_database(&self.database)
+            .with_tls(self.secure);
+
+        match self.compression.as_str() {
+            "lz4" => builder = builder.with_compression(CompressionMethod::LZ4),
+            "zstd" => builder = builder.with_compression(CompressionMethod::ZSTD),
+            "none" => builder = builder.with_compression(CompressionMethod::None),
+            _ => return Err(anyhow!("Unsupported compression: {}", self.compression)),
+        }
+
+        builder.build_native().await.context("Failed to build ClickHouse client")
+    }
+}
+
 /// ClickHouse client wrapper for testing the native format implementation
 pub struct ClickHouseClient {
     client: Client<NativeFormat>,

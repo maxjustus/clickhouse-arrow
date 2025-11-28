@@ -16,7 +16,7 @@ use clickhouse_arrow::native::values::serde::RowDeserializer;
 use clickhouse_arrow::{
     ArrowOptions, Client, CompressionMethod, NativeFormat, Qid, QueryParams, SettingValue, Settings,
 };
-use client::ClickHouseClient;
+use client::{ClickHouseClient, ConnectionParams};
 use futures::StreamExt as _;
 use serde_json::Value;
 use serde_transcode::transcode;
@@ -625,6 +625,17 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Store connection params for reconnection
+    let conn_params = ConnectionParams::new(
+        &args.host,
+        args.port,
+        &args.user,
+        &args.password,
+        &args.database,
+        args.secure,
+        &args.compression,
+    );
+
     // Execute based on mode
     if let Some(query) = args.query {
         execute_query(
@@ -653,7 +664,7 @@ async fn main() -> Result<()> {
             ));
             std::process::exit(1);
         }
-        tui::run_tui(client.native_client().clone()).await?;
+        tui::run_tui(client.native_client().clone(), conn_params).await?;
     }
 
     Ok(())

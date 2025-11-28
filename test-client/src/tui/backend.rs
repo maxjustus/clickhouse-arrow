@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::NaiveDate;
 use clickhouse_arrow::{ClickHouseEvent, Client, Event, NativeFormat, Qid, Settings, Tz};
 use futures::StreamExt;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+use crate::client::ConnectionParams;
 use crate::tui::app::{AppEvent, QueryCommand};
 use crate::tui::query_store::{QueryCacheWriter, QueryStore};
 
@@ -13,11 +15,55 @@ type QidMap = Arc<RwLock<HashMap<Qid, usize>>>;
 type TaskMap = Arc<RwLock<HashMap<usize, tokio::task::JoinHandle<()>>>>;
 type CacheWriterMap = Arc<RwLock<HashMap<usize, Arc<Mutex<Option<QueryCacheWriter>>>>>>;
 
+/// Check if an error message indicates a connection problem (vs query error)
+fn is_connection_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("connection")
+        || lower.contains("io error")
+        || lower.contains("channel closed")
+        || lower.contains("timeout")
+        || lower.contains("eof")
+        || lower.contains("broken pipe")
+        || lower.contains("reset by peer")
+        || lower.contains("connection gone")
+}
+
+/// Reconnect with exponential backoff
+async fn reconnect_with_backoff(
+    params: &ConnectionParams,
+    event_tx: &mpsc::Sender<AppEvent>,
+) -> Client<NativeFormat> {
+    let mut delay = Duration::from_secs(1);
+    let max_delay = Duration::from_secs(60);
+    let mut attempt = 0u32;
+
+    loop {
+        attempt += 1;
+        let _ = event_tx.send(AppEvent::Reconnecting { attempt }).await;
+        tokio::time::sleep(delay).await;
+
+        match params.build_client().await {
+            Ok(client) => {
+                let _ = event_tx.send(AppEvent::Reconnected).await;
+                return client;
+            }
+            Err(e) => {
+                tracing::warn!("Reconnection attempt {} failed: {}", attempt, e);
+                delay = (delay * 2).min(max_delay);
+            }
+        }
+    }
+}
+
 pub fn spawn_backend(
     client: Client<NativeFormat>,
+    params: ConnectionParams,
     mut cmd_rx: mpsc::Receiver<QueryCommand>,
     event_tx: mpsc::Sender<AppEvent>,
 ) -> tokio::task::JoinHandle<()> {
+    // Wrap client for shared mutable access during reconnection
+    let client = Arc::new(RwLock::new(client));
+    let params = Arc::new(params);
     // Shared mapping from Qid -> query_id
     let qid_map: QidMap = Arc::new(RwLock::new(HashMap::new()));
     // Shared mapping from query_id -> task handle for cancellation
@@ -44,11 +90,12 @@ pub fn spawn_backend(
     // Stage 1: Fast drainer reads from broadcast into unbounded buffer
     // Stage 2: Process buffered events at TUI pace
 
-    let mut events_rx = client.subscribe_events();
     let (buffer_tx, mut buffer_rx) = mpsc::unbounded_channel::<Event>();
 
     // Stage 1: Fast drainer - reads broadcast as quickly as possible
+    let client_for_events = client.clone();
     tokio::spawn(async move {
+        let mut events_rx = client_for_events.read().await.subscribe_events();
         loop {
             match events_rx.recv().await {
                 Ok(event) => {
@@ -165,6 +212,7 @@ pub fn spawn_backend(
             match cmd {
                 QueryCommand::Execute { query_id, sql } => {
                     let client = client.clone();
+                    let params = params.clone();
                     let event_tx = event_tx.clone();
                     let qid_map = qid_map.clone();
                     let task_map_clone = task_map.clone();
@@ -173,6 +221,7 @@ pub fn spawn_backend(
                     let handle = tokio::spawn(async move {
                         execute_query(
                             &client,
+                            &params,
                             query_id,
                             &sql,
                             &event_tx,
@@ -201,7 +250,8 @@ pub fn spawn_backend(
 }
 
 async fn execute_query(
-    client: &Client<NativeFormat>,
+    client: &Arc<RwLock<Client<NativeFormat>>>,
+    params: &Arc<ConnectionParams>,
     query_id: usize,
     sql: &str,
     event_tx: &mpsc::Sender<AppEvent>,
@@ -247,10 +297,12 @@ async fn execute_query(
         .with_setting("send_profile_events", 1);
 
     let stream = match client
+        .read()
+        .await
         .query_raw_with_settings::<clickhouse_arrow::QueryParams, Settings>(
             sql.to_string(),
             None,
-            Some(settings),
+            Some(settings.clone()),
             qid,
         )
         .await
@@ -258,6 +310,17 @@ async fn execute_query(
         Ok(s) => s,
         Err(e) => {
             let error_msg = e.to_string();
+
+            // Check if this is a connection error
+            if is_connection_error(&error_msg) {
+                let _ = event_tx.send(AppEvent::ConnectionLost { error: error_msg.clone() }).await;
+
+                // Reconnect with backoff
+                let new_client = reconnect_with_backoff(params, event_tx).await;
+                *client.write().await = new_client;
+            }
+
+            // Still send query error (user needs to retry manually)
             let _ =
                 event_tx.send(AppEvent::QueryError { query_id, error: error_msg.clone() }).await;
 
@@ -303,6 +366,17 @@ async fn execute_query(
             }
             Err(e) => {
                 let error_msg = e.to_string();
+
+                // Check if this is a connection error during streaming
+                if is_connection_error(&error_msg) {
+                    let _ =
+                        event_tx.send(AppEvent::ConnectionLost { error: error_msg.clone() }).await;
+
+                    // Reconnect with backoff
+                    let new_client = reconnect_with_backoff(params, event_tx).await;
+                    *client.write().await = new_client;
+                }
+
                 let _ = event_tx
                     .send(AppEvent::QueryError { query_id, error: error_msg.clone() })
                     .await;

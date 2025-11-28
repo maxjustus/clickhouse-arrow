@@ -22,13 +22,15 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
-pub async fn run_tui(client: Client<NativeFormat>) -> Result<()> {
+use crate::client::ConnectionParams;
+
+pub async fn run_tui(client: Client<NativeFormat>, params: ConnectionParams) -> Result<()> {
     // Create channels
     let (cmd_tx, cmd_rx) = mpsc::channel(32);
     let (event_tx, event_rx) = mpsc::channel(1024);
 
     // Spawn backend task
-    let _backend = backend::spawn_backend(client, cmd_rx, event_tx);
+    let _backend = backend::spawn_backend(client, params, cmd_rx, event_tx);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();

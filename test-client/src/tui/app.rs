@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::time::Duration;
 
@@ -26,6 +27,10 @@ pub enum AppEvent {
     LogEvent { query_id: usize, log: serde_json::Value },
     ProgressEvent { query_id: usize, progress: serde_json::Value },
     QueryCached { query_id: usize, entry: QueryStoreEntry },
+    // Connection events
+    ConnectionLost { error: String },
+    Reconnecting { attempt: u32 },
+    Reconnected,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +46,9 @@ pub struct App {
     pub history:     History,
     cmd_tx:          mpsc::Sender<QueryCommand>,
     event_rx:        mpsc::Receiver<AppEvent>,
+    /// Maps query_id -> block_index for event routing
+    query_map:       HashMap<usize, usize>,
+    next_query_id:   usize,
 }
 
 impl App {
@@ -56,6 +64,8 @@ impl App {
             history,
             cmd_tx,
             event_rx,
+            query_map: HashMap::new(),
+            next_query_id: 0,
         })
     }
 
@@ -63,11 +73,11 @@ impl App {
         loop {
             self.session.clear_expired_toast();
 
-            // Poll for completed stats computations
-            if let Some(block) = self.session.selected_block_mut() {
-                if let Some(table) = &mut block.results {
-                    table.poll_stats_completion();
-                }
+            // Poll for completed zoomed value stats computations
+            if let Some(block) = self.session.selected_block_mut()
+                && let Some(table) = &mut block.results
+            {
+                table.poll_stats_completion();
             }
 
             terminal.draw(|f| render(f, self))?;
@@ -124,6 +134,10 @@ impl App {
                 self.show_help = true;
                 return Ok(());
             }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.session.focus = Focus::NewQuery;
+                self.session.mode = Mode::Edit;
+            }
             _ => {}
         }
 
@@ -148,10 +162,11 @@ impl App {
                         self.session.sidebar_toggle_section();
                     }
                     KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
-                        // Enter selected query's sub-panes (session only for now)
+                        // Enter selected item
                         match self.session.sidebar_section {
                             SidebarSection::Session => {
-                                if self.session.selected_query.is_some() {
+                                if self.session.sidebar_enter() {
+                                    // sidebar_enter returned true = focus results pane
                                     self.session.focus = Focus::SubPane(SubPane::Results);
                                 }
                             }
@@ -164,10 +179,6 @@ impl App {
                                 }
                             }
                         }
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') => {
-                        self.session.focus = Focus::NewQuery;
-                        self.session.mode = Mode::Edit;
                     }
                     KeyCode::Char('c') | KeyCode::Char('C') => {
                         self.cancel_selected_query().await;
@@ -228,9 +239,9 @@ impl App {
         // Escape exits edit mode
         if key.code == KeyCode::Esc {
             self.session.mode = Mode::Navigation;
-            // If escaping from new query, return to sidebar or selected query
+            // If escaping from new query, return to sidebar or selected block
             if matches!(self.session.focus, Focus::NewQuery) {
-                if self.session.selected_query.is_some() {
+                if self.session.selected_block.is_some() {
                     self.session.focus = Focus::SubPane(SubPane::Results);
                 } else {
                     self.session.focus = Focus::Sidebar;
@@ -262,13 +273,29 @@ impl App {
         match (key.code, is_ctrl, is_alt) {
             // Execute query
             (KeyCode::Enter, true, _) | (KeyCode::Enter, _, true) => {
-                if let Some((query_id, sql)) = self.session.execute_new_query() {
+                // Get original SQL for history before execute_new_query clears the editor
+                let original_sql = self.session.new_query.lines().join("\n");
+
+                if let Some(statements) = self.session.execute_new_query() {
                     // Save to history
-                    let _ = self.history.add(sql.clone(), None);
+                    let _ = self.history.add(original_sql, None);
                     self.history.reset_nav();
 
-                    let cmd = QueryCommand::Execute { query_id, sql };
-                    let _ = self.cmd_tx.send(cmd).await;
+                    // Execute each statement with a unique query_id
+                    // For now, execute all in parallel (TODO: sequential with stop on error)
+                    for (block_idx, sql) in statements {
+                        let query_id = self.next_query_id;
+                        self.next_query_id += 1;
+                        self.query_map.insert(query_id, block_idx);
+
+                        // Mark statement as running
+                        if let Some(block) = self.session.get_block_mut(block_idx) {
+                            block.running = true;
+                        }
+
+                        let cmd = QueryCommand::Execute { query_id, sql };
+                        let _ = self.cmd_tx.send(cmd).await;
+                    }
                 }
             }
             // Navigate to previous history entry
@@ -303,13 +330,18 @@ impl App {
     }
 
     async fn cancel_selected_query(&mut self) {
-        if let Some(query_id) = self.session.selected_query
-            && let Some(block) = self.session.blocks.get_mut(query_id)
+        // Cancel currently selected block if running
+        if let Some(block_idx) = self.session.selected_block
+            && let Some(block) = self.session.get_block_mut(block_idx)
             && block.running
             && !block.cancel_requested
         {
             block.cancel_requested = true;
-            let _ = self.cmd_tx.send(QueryCommand::Cancel { query_id }).await;
+            // Find the query_id for this block
+            if let Some((&query_id, _)) = self.query_map.iter().find(|&(_, &idx)| idx == block_idx)
+            {
+                let _ = self.cmd_tx.send(QueryCommand::Cancel { query_id }).await;
+            }
         }
     }
 
@@ -337,10 +369,10 @@ impl App {
                         self.session.show_toast("Copied to clipboard");
                     }
                     Ok(Err(e)) => {
-                        self.session.show_toast(&format!("Copy failed: {}", e));
+                        self.session.show_toast(format!("Copy failed: {}", e));
                     }
                     Err(e) => {
-                        self.session.show_toast(&format!("Copy error: {}", e));
+                        self.session.show_toast(format!("Copy error: {}", e));
                     }
                 }
             }
@@ -470,54 +502,88 @@ impl App {
         Ok(())
     }
 
+    /// Look up block_index from query_id
+    fn lookup_query(&self, query_id: usize) -> Option<usize> {
+        self.query_map.get(&query_id).copied()
+    }
+
     pub fn handle_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::QueryStarted { query_id } => {
                 // Block already created by execute_new_query
-                if let Some(block) = self.session.get_block_mut(query_id) {
-                    block.running = true;
+                if let Some(block_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                        block.running = true;
+                    }
                 }
             }
             AppEvent::QueryComplete { query_id } => {
-                if let Some(block) = self.session.get_block_mut(query_id) {
-                    block.running = false;
-                    block.cancel_requested = false;
+                if let Some(block_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                        block.running = false;
+                        block.cancel_requested = false;
+                    }
                 }
             }
             AppEvent::QueryError { query_id, error } => {
-                if let Some(block) = self.session.get_block_mut(query_id) {
-                    block.error = Some(error);
-                    block.running = false;
-                    block.cancel_requested = false;
+                if let Some(block_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                        block.error = Some(error);
+                        block.running = false;
+                        block.cancel_requested = false;
+                    }
                 }
             }
             AppEvent::RowReceived { query_id, row } => {
-                if let Some(block) = self.session.get_block_mut(query_id) {
-                    block.add_result_row(row);
+                if let Some(block_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                        block.add_result_row(row);
+                    }
                 }
             }
             AppEvent::ProfileEvent { query_id, event } => {
-                if let Some(block) = self.session.get_block_mut(query_id) {
-                    block.add_profile_event(event);
+                if let Some(block_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                        block.add_profile_event(event);
+                    }
                 }
             }
             AppEvent::LogEvent { query_id, log } => {
-                if let Some(block) = self.session.get_block_mut(query_id) {
-                    block.add_log(log);
+                if let Some(block_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                        block.add_log(log);
+                    }
                 }
             }
             AppEvent::ProgressEvent { query_id, progress } => {
-                if let Some(block) = self.session.get_block_mut(query_id) {
-                    block.add_progress(progress);
+                if let Some(block_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                        block.add_progress(progress);
+                    }
                 }
             }
             AppEvent::QueryCached { query_id, entry } => {
                 // Store the cache entry reference in the block
-                if let Some(block) = self.session.get_block_mut(query_id) {
-                    block.cache_id = Some(entry.id.clone());
+                if let Some(block_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                        block.cache_id = Some(entry.id.clone());
+                    }
                 }
                 // Add to persisted queries list
                 self.session.add_persisted_query(entry);
+            }
+            AppEvent::ConnectionLost { error } => {
+                let truncated: String = error.chars().take(50).collect();
+                self.session.show_toast(format!("Connection lost: {}", truncated));
+            }
+            AppEvent::Reconnecting { attempt } => {
+                // Only show toast on first attempt to avoid spam
+                if attempt == 1 {
+                    self.session.show_toast("Reconnecting...");
+                }
+            }
+            AppEvent::Reconnected => {
+                self.session.show_toast("Reconnected");
             }
         }
     }
@@ -536,9 +602,9 @@ impl App {
             }
         };
 
-        // Create new QueryBlock
-        let block_id = self.session.next_id();
-        let mut query_block = QueryBlock::new(block_id, archive.sql.clone());
+        // Create a new QueryBlock for the loaded query
+        let block_idx = self.session.blocks.len();
+        let mut query_block = QueryBlock::new(archive.sql.clone());
         query_block.running = false;
         query_block.cache_id = Some(entry.id.clone());
 
@@ -587,7 +653,7 @@ impl App {
 
         // Add to session and select
         self.session.blocks.push(query_block);
-        self.session.selected_query = Some(block_id);
+        self.session.selected_block = Some(block_idx);
         self.session.sidebar_section = SidebarSection::Session;
         self.session.focus = Focus::SubPane(SubPane::Results);
     }

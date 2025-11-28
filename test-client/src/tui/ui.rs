@@ -91,9 +91,9 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
         items.push(ListItem::new("-- Session --").style(session_header_style));
 
         // Session queries
-        for b in &app.session.blocks {
+        for (idx, b) in app.session.blocks.iter().enumerate() {
             let is_selected = app.session.sidebar_section == SidebarSection::Session
-                && app.session.selected_query == Some(b.id);
+                && app.session.selected_block == Some(idx);
             let indicator = if b.cancel_requested {
                 "x"
             } else if b.running {
@@ -110,7 +110,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
             let sql_preview: String = b.sql.chars().take(18).collect::<String>().replace('\n', " ");
 
             let text =
-                format!("{} Q{}: {} ({})", indicator, b.id + 1, sql_preview, b.result_count());
+                format!("{} Q{}: {} ({})", indicator, idx + 1, sql_preview, b.result_count());
 
             let style = if is_selected {
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -209,11 +209,11 @@ fn render_main_content(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     // Otherwise: just the selected query (full area, no new query box)
-    if let Some(block_id) = app.session.selected_query {
+    if let Some(block_idx) = app.session.selected_block {
         let focus = app.session.focus.clone();
         let mode = app.session.mode;
-        if let Some(block) = app.session.blocks.iter_mut().find(|b| b.id == block_id) {
-            render_selected_query(f, area, block, &focus, mode);
+        if let Some(block) = app.session.blocks.get_mut(block_idx) {
+            render_selected_query(f, area, block, block_idx, &focus, mode);
         }
     } else {
         let empty = Paragraph::new("No queries yet. Press 'n' to write a new query.")
@@ -241,6 +241,7 @@ fn render_selected_query(
     f: &mut Frame,
     area: Rect,
     block: &mut QueryBlock,
+    block_idx: usize,
     focus: &Focus,
     mode: Mode,
 ) {
@@ -257,7 +258,7 @@ fn render_selected_query(
         };
         format!(
             "Query {} > {} {}",
-            block.id + 1,
+            block_idx + 1,
             pane_name,
             if block.cancel_requested {
                 "[cancelling...]"
@@ -270,7 +271,7 @@ fn render_selected_query(
     } else {
         format!(
             "Query {} {}",
-            block.id + 1,
+            block_idx + 1,
             if block.cancel_requested {
                 "[cancelling...]"
             } else if block.running {
@@ -1261,7 +1262,7 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
             };
             let query_str = app
                 .session
-                .selected_query
+                .selected_block
                 .map(|id| format!("Q{}", id + 1))
                 .unwrap_or_else(|| "?".to_string());
             format!("{} > {}", query_str, pane_name)
@@ -1281,7 +1282,7 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
         // Cancel hint when query is running
         if app
             .session
-            .selected_query
+            .selected_block
             .and_then(|id| app.session.blocks.get(id))
             .filter(|block| block.running && !block.cancel_requested)
             .is_some()

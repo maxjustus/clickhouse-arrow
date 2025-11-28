@@ -555,10 +555,15 @@ impl StatsData {
     }
 }
 
-/// A single query and all its associated data
+/// Split SQL on `;\n` (semicolon followed by newline) or end of input.
+/// This handles semicolons inside string literals in most cases.
+pub fn split_statements(sql: &str) -> Vec<&str> {
+    sql.split(";\n").map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+}
+
+/// A single statement and all its associated data
 #[derive(Debug)]
 pub struct QueryBlock {
-    pub id:               usize,
     pub sql:              String,
     pub sql_scroll:       u16,
     pub results:          Option<SortableTable>,
@@ -572,9 +577,8 @@ pub struct QueryBlock {
 }
 
 impl QueryBlock {
-    pub fn new(id: usize, sql: String) -> Self {
+    pub fn new(sql: String) -> Self {
         Self {
-            id,
             sql,
             sql_scroll: 0,
             results: None,
@@ -582,7 +586,7 @@ impl QueryBlock {
             logs: Vec::new(),
             logs_data: LogsData::default(),
             error: None,
-            running: true,
+            running: false, // Not running until backend starts it
             cancel_requested: false,
             cache_id: None,
         }
@@ -639,7 +643,6 @@ impl QueryBlock {
 
     pub fn result_count(&self) -> usize { self.results.as_ref().map(|t| t.rows.len()).unwrap_or(0) }
 }
-
 /// Which sub-pane type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubPane {
@@ -673,15 +676,14 @@ pub enum SidebarSection {
 
 /// The entire session state
 pub struct Session {
-    pub blocks:             Vec<QueryBlock>,
+    pub blocks:             Vec<QueryBlock>, // All executed statements (flat list)
     pub new_query:          TextArea<'static>,
     pub focus:              Focus,
     pub mode:               Mode,
-    pub selected_query:     Option<usize>, // ID of query shown in main area (session block ID)
+    pub selected_block:     Option<usize>, // Index into blocks
     pub sidebar_section:    SidebarSection,
     pub persisted_queries:  Vec<QueryStoreEntry>, // Cached queries from QueryStore
     pub selected_persisted: Option<usize>,        // Index into persisted_queries
-    next_id:                usize,
     pub toast:              Option<(String, Instant)>,
 }
 
@@ -695,11 +697,10 @@ impl Session {
             new_query,
             focus: Focus::NewQuery,
             mode: Mode::Edit, // Start in edit mode in the new query pane
-            selected_query: None,
+            selected_block: None,
             sidebar_section: SidebarSection::Session,
             persisted_queries: Vec::new(),
             selected_persisted: None,
-            next_id: 0,
             toast: None,
         }
     }
@@ -724,13 +725,6 @@ impl Session {
         }
     }
 
-    /// Get next query ID and increment counter
-    pub fn next_id(&mut self) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
-    }
-
     pub fn show_toast(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), Instant::now()));
     }
@@ -743,60 +737,67 @@ impl Session {
         }
     }
 
-    /// Create a new query block from the current new_query text
-    pub fn execute_new_query(&mut self) -> Option<(usize, String)> {
+    /// Execute the current new_query text
+    /// Splits into statements, adds them to blocks, returns list of (block_index, sql) pairs
+    pub fn execute_new_query(&mut self) -> Option<Vec<(usize, String)>> {
         let sql = self.new_query.lines().join("\n");
         if sql.trim().is_empty() {
             return None;
         }
 
-        let id = self.next_id;
-        self.next_id += 1;
+        let statements = split_statements(&sql);
+        if statements.is_empty() {
+            return None;
+        }
 
-        let block = QueryBlock::new(id, sql.clone());
-        self.blocks.push(block);
+        let mut result = Vec::new();
+        let first_block_idx = self.blocks.len();
+
+        for stmt in statements {
+            let block_idx = self.blocks.len();
+            let block = QueryBlock::new(stmt.to_string());
+            self.blocks.push(block);
+            result.push((block_idx, stmt.to_string()));
+        }
 
         // Clear the new query editor
         self.new_query = TextArea::default();
         self.new_query.set_placeholder_text("Enter SQL query... (Ctrl+Enter to execute)");
 
-        // Select this query and focus its results
-        self.selected_query = Some(id);
+        // Select first new statement and focus its results
+        self.selected_block = Some(first_block_idx);
+        self.sidebar_section = SidebarSection::Session;
         self.focus = Focus::SubPane(SubPane::Results);
         self.mode = Mode::Navigation;
 
-        Some((id, sql))
+        Some(result)
     }
 
-    /// Get a mutable query block by ID
-    pub fn get_block_mut(&mut self, id: usize) -> Option<&mut QueryBlock> {
-        self.blocks.iter_mut().find(|b| b.id == id)
+    /// Get a mutable query block by index
+    pub fn get_block_mut(&mut self, idx: usize) -> Option<&mut QueryBlock> {
+        self.blocks.get_mut(idx)
     }
 
     /// Get the currently selected query block
     pub fn selected_block(&self) -> Option<&QueryBlock> {
-        self.selected_query.and_then(|id| self.blocks.iter().find(|b| b.id == id))
+        self.selected_block.and_then(|idx| self.blocks.get(idx))
     }
 
     /// Get the currently selected query block mutably
     pub fn selected_block_mut(&mut self) -> Option<&mut QueryBlock> {
-        self.selected_query.and_then(|id| self.blocks.iter_mut().find(|b| b.id == id))
+        self.selected_block.and_then(|idx| self.blocks.get_mut(idx))
     }
 
     /// Move sidebar selection up
     pub fn sidebar_prev(&mut self) {
         match self.sidebar_section {
             SidebarSection::Session => {
-                if let Some(current_id) = self.selected_query {
-                    let idx = self.blocks.iter().position(|b| b.id == current_id);
-                    if let Some(i) = idx {
-                        if i > 0 {
-                            self.selected_query = Some(self.blocks[i - 1].id);
-                        }
-                        // At top of session, don't move (could switch section with Tab)
+                if let Some(idx) = self.selected_block {
+                    if idx > 0 {
+                        self.selected_block = Some(idx - 1);
                     }
                 } else if !self.blocks.is_empty() {
-                    self.selected_query = Some(self.blocks.last().unwrap().id);
+                    self.selected_block = Some(self.blocks.len() - 1);
                 }
             }
             SidebarSection::Persisted => {
@@ -804,7 +805,6 @@ impl Session {
                     if idx > 0 {
                         self.selected_persisted = Some(idx - 1);
                     }
-                    // At top of persisted, don't move
                 } else if !self.persisted_queries.is_empty() {
                     self.selected_persisted = Some(self.persisted_queries.len() - 1);
                 }
@@ -816,16 +816,12 @@ impl Session {
     pub fn sidebar_next(&mut self) {
         match self.sidebar_section {
             SidebarSection::Session => {
-                if let Some(current_id) = self.selected_query {
-                    let idx = self.blocks.iter().position(|b| b.id == current_id);
-                    if let Some(i) = idx
-                        && i + 1 < self.blocks.len()
-                    {
-                        self.selected_query = Some(self.blocks[i + 1].id);
+                if let Some(idx) = self.selected_block {
+                    if idx + 1 < self.blocks.len() {
+                        self.selected_block = Some(idx + 1);
                     }
-                    // At bottom of session, don't move
                 } else if !self.blocks.is_empty() {
-                    self.selected_query = Some(self.blocks.first().unwrap().id);
+                    self.selected_block = Some(0);
                 }
             }
             SidebarSection::Persisted => {
@@ -833,11 +829,18 @@ impl Session {
                     if idx + 1 < self.persisted_queries.len() {
                         self.selected_persisted = Some(idx + 1);
                     }
-                    // At bottom of persisted, don't move
                 } else if !self.persisted_queries.is_empty() {
                     self.selected_persisted = Some(0);
                 }
             }
+        }
+    }
+
+    /// Enter into selected item (l key) - returns true if should focus SubPane
+    pub fn sidebar_enter(&mut self) -> bool {
+        match self.sidebar_section {
+            SidebarSection::Session => self.selected_block.is_some(),
+            SidebarSection::Persisted => false, // Handled separately (load from cache)
         }
     }
 
@@ -885,5 +888,45 @@ impl Session {
                 SubPane::Logs => SubPane::Stats,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_statements_basic() {
+        let sql = "SELECT 1;\nSELECT 2";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts, vec!["SELECT 1", "SELECT 2"]);
+    }
+
+    #[test]
+    fn test_split_statements_trailing_semicolon_newline() {
+        let sql = "SELECT 1;\n";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts, vec!["SELECT 1"]);
+    }
+
+    #[test]
+    fn test_split_statements_no_semicolon() {
+        let sql = "SELECT 1";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts, vec!["SELECT 1"]);
+    }
+
+    #[test]
+    fn test_split_statements_multiple() {
+        let sql = "CREATE TABLE foo;\nINSERT INTO foo;\nSELECT * FROM foo";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts, vec!["CREATE TABLE foo", "INSERT INTO foo", "SELECT * FROM foo"]);
+    }
+
+    #[test]
+    fn test_split_statements_empty_between() {
+        let sql = "SELECT 1;\n\n;\nSELECT 2";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts, vec!["SELECT 1", "SELECT 2"]);
     }
 }
