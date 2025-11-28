@@ -360,6 +360,8 @@ impl App {
         self.session.new_query.select_all();
         self.session.new_query.cut();
         self.session.new_query.insert_str(text);
+        // reset cursor to start
+        self.session.new_query.move_cursor(tui_textarea::CursorMove::Jump(0, 0));
     }
 
     async fn cancel_selected_query(&mut self) {
