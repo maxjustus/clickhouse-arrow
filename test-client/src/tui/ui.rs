@@ -183,7 +183,8 @@ fn render_main_content(f: &mut Frame, area: Rect, app: &mut App) {
         let para = Paragraph::new(error.as_str())
             .block(error_block)
             .style(Style::default().fg(Color::Red))
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((0, 0));
         f.render_widget(para, area);
         return;
     }
@@ -391,7 +392,8 @@ fn render_results_pane(
         let para = Paragraph::new(error.as_str())
             .block(error_block)
             .style(Style::default().fg(Color::Red))
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((0, 0));
         f.render_widget(para, area);
         return;
     }
