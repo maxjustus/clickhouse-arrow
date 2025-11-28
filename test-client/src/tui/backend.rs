@@ -294,7 +294,8 @@ async fn execute_query(
     let settings = Settings::default()
         .with_setting("send_logs_level", "trace")
         .with_setting("log_queries", 1)
-        .with_setting("send_profile_events", 1);
+        .with_setting("send_profile_events", 1)
+        .with_setting("limit", 100_000);
 
     let stream = match client
         .read()

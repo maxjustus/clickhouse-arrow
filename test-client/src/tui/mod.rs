@@ -29,6 +29,9 @@ pub async fn run_tui(client: Client<NativeFormat>, params: ConnectionParams) -> 
     let (cmd_tx, cmd_rx) = mpsc::channel(32);
     let (event_tx, event_rx) = mpsc::channel(1024);
 
+    // Clone event_tx for App (backend also needs one)
+    let app_event_tx = event_tx.clone();
+
     // Spawn backend task
     let _backend = backend::spawn_backend(client, params, cmd_rx, event_tx);
 
@@ -38,11 +41,11 @@ pub async fn run_tui(client: Client<NativeFormat>, params: ConnectionParams) -> 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(cmd_tx, event_rx)?;
+    let mut app = App::new(cmd_tx, app_event_tx, event_rx)?;
 
     // Load persisted queries from index
     if let Ok(store) = query_store::QueryStore::load().await {
-        app.session.load_persisted_queries(store.entries());
+        app.session.load_history(store.entries());
     }
 
     let res = app.run(&mut terminal).await;

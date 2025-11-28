@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use crate::tui::backend::row_to_json;
 use crate::tui::history::History;
 use crate::tui::query_store::{QueryArchiveReader, QueryStore, QueryStoreEntry};
-use crate::tui::session::{Focus, Mode, QueryBlock, Session, SidebarSection, SubPane};
+use crate::tui::session::{Focus, Mode, QueryBlock, Session, SubPane};
 use crate::tui::ui::render;
 use crate::tui::widgets::table::ResultsViewMode;
 
@@ -31,6 +31,10 @@ pub enum AppEvent {
     ConnectionLost { error: String },
     Reconnecting { attempt: u32 },
     Reconnected,
+    // Archive loading events
+    ArchiveRowLoaded { cache_id: String, row: serde_json::Value },
+    ArchiveLoadComplete { cache_id: String },
+    ArchiveLoadError { cache_id: String, error: String },
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +49,7 @@ pub struct App {
     pub show_help:   bool,
     pub history:     History,
     cmd_tx:          mpsc::Sender<QueryCommand>,
+    event_tx:        mpsc::Sender<AppEvent>,
     event_rx:        mpsc::Receiver<AppEvent>,
     /// Maps query_id -> block_index for event routing
     query_map:       HashMap<usize, usize>,
@@ -54,6 +59,7 @@ pub struct App {
 impl App {
     pub fn new(
         cmd_tx: mpsc::Sender<QueryCommand>,
+        event_tx: mpsc::Sender<AppEvent>,
         event_rx: mpsc::Receiver<AppEvent>,
     ) -> Result<Self> {
         let history = History::load().unwrap_or_default();
@@ -63,6 +69,7 @@ impl App {
             show_help: false,
             history,
             cmd_tx,
+            event_tx,
             event_rx,
             query_map: HashMap::new(),
             next_query_id: 0,
@@ -74,7 +81,7 @@ impl App {
             self.session.clear_expired_toast();
 
             // Poll for completed zoomed value stats computations
-            if let Some(block) = self.session.selected_block_mut()
+            if let Some(block) = self.session.displayed_block_mut()
                 && let Some(table) = &mut block.results
             {
                 table.poll_stats_completion();
@@ -120,6 +127,9 @@ impl App {
             return Ok(());
         }
 
+        // Clear app error on any key press
+        self.session.app_error = None;
+
         // Global keys work in all modes
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -152,32 +162,19 @@ impl App {
             Focus::Sidebar => {
                 match key.code {
                     KeyCode::Down | KeyCode::Char('j') => {
-                        self.session.sidebar_next();
+                        if self.session.sidebar_next() {
+                            self.load_selected_entry().await;
+                        }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        self.session.sidebar_prev();
-                    }
-                    KeyCode::Tab => {
-                        // Switch between Session and Persisted sections
-                        self.session.sidebar_toggle_section();
+                        if self.session.sidebar_prev() {
+                            self.load_selected_entry().await;
+                        }
                     }
                     KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
-                        // Enter selected item
-                        match self.session.sidebar_section {
-                            SidebarSection::Session => {
-                                if self.session.sidebar_enter() {
-                                    // sidebar_enter returned true = focus results pane
-                                    self.session.focus = Focus::SubPane(SubPane::Results);
-                                }
-                            }
-                            SidebarSection::Persisted => {
-                                // Load persisted query from archive
-                                if let Some(entry) =
-                                    self.session.selected_persisted_entry().cloned()
-                                {
-                                    self.load_persisted_query(&entry).await;
-                                }
-                            }
+                        // Enter results pane if we have data
+                        if self.session.displayed_block().is_some() {
+                            self.session.focus = Focus::SubPane(SubPane::Results);
                         }
                     }
                     KeyCode::Char('c') | KeyCode::Char('C') => {
@@ -239,9 +236,9 @@ impl App {
         // Escape exits edit mode
         if key.code == KeyCode::Esc {
             self.session.mode = Mode::Navigation;
-            // If escaping from new query, return to sidebar or selected block
+            // If escaping from new query, return to sidebar or results
             if matches!(self.session.focus, Focus::NewQuery) {
-                if self.session.selected_block.is_some() {
+                if self.session.displayed_block().is_some() {
                     self.session.focus = Focus::SubPane(SubPane::Results);
                 } else {
                     self.session.focus = Focus::Sidebar;
@@ -273,30 +270,66 @@ impl App {
         match (key.code, is_ctrl, is_alt) {
             // Execute query
             (KeyCode::Enter, true, _) | (KeyCode::Enter, _, true) => {
-                // Get original SQL for history before execute_new_query clears the editor
-                let original_sql = self.session.new_query.lines().join("\n");
-
-                if let Some(statements) = self.session.execute_new_query() {
-                    // Save to history
-                    let _ = self.history.add(original_sql, None);
-                    self.history.reset_nav();
-
-                    // Execute each statement with a unique query_id
-                    // For now, execute all in parallel (TODO: sequential with stop on error)
-                    for (block_idx, sql) in statements {
-                        let query_id = self.next_query_id;
-                        self.next_query_id += 1;
-                        self.query_map.insert(query_id, block_idx);
-
-                        // Mark statement as running
-                        if let Some(block) = self.session.get_block_mut(block_idx) {
-                            block.running = true;
-                        }
-
-                        let cmd = QueryCommand::Execute { query_id, sql };
-                        let _ = self.cmd_tx.send(cmd).await;
-                    }
+                let sql = self.session.new_query.lines().join("\n");
+                if sql.trim().is_empty() {
+                    return Ok(());
                 }
+
+                // Save to command history
+                let _ = self.history.add(sql.clone(), None);
+                self.history.reset_nav();
+
+                // Create history entry (metadata)
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let hash = QueryStore::hash_sql(&sql);
+                let id = format!("{}-{}", timestamp, hash);
+                let sql_preview: String = sql.chars().take(80).collect();
+
+                let entry = QueryStoreEntry {
+                    id: id.clone(),
+                    hash,
+                    sql_preview,
+                    timestamp,
+                    duration_ms: None,
+                    row_count: 0,
+                    error: None,
+                };
+
+                // Insert entry at top of history
+                self.session.add_history_entry(entry);
+
+                // Create QueryBlock for execution
+                let mut block = QueryBlock::new(sql.clone());
+                block.running = true;
+                self.session.running_queries.insert(0, block);
+
+                // Select this new entry and show it
+                self.session.selected_history = Some(0);
+                self.session.focus = Focus::SubPane(SubPane::Results);
+                self.session.mode = Mode::Navigation;
+
+                // Clear editor
+                self.session.new_query = tui_textarea::TextArea::default();
+                self.session
+                    .new_query
+                    .set_placeholder_text("Enter SQL query... (Ctrl+Enter to execute)");
+
+                // Send execute command
+                let query_id = self.next_query_id;
+                self.next_query_id += 1;
+
+                // Shift existing query_map indices before adding new entry
+                // (add_history_entry shifts running_queries indices, so we must match)
+                for hist_idx in self.query_map.values_mut() {
+                    *hist_idx += 1;
+                }
+                self.query_map.insert(query_id, 0); // Maps to history index 0
+
+                let cmd = QueryCommand::Execute { query_id, sql };
+                let _ = self.cmd_tx.send(cmd).await;
             }
             // Navigate to previous history entry
             (KeyCode::Char('p'), true, _) => {
@@ -330,16 +363,15 @@ impl App {
     }
 
     async fn cancel_selected_query(&mut self) {
-        // Cancel currently selected block if running
-        if let Some(block_idx) = self.session.selected_block
-            && let Some(block) = self.session.get_block_mut(block_idx)
+        // Cancel currently selected entry if it's running
+        if let Some(hist_idx) = self.session.selected_history
+            && let Some(block) = self.session.running_queries.get_mut(&hist_idx)
             && block.running
             && !block.cancel_requested
         {
             block.cancel_requested = true;
-            // Find the query_id for this block
-            if let Some((&query_id, _)) = self.query_map.iter().find(|&(_, &idx)| idx == block_idx)
-            {
+            // Find the query_id for this history index
+            if let Some((&query_id, _)) = self.query_map.iter().find(|&(_, &idx)| idx == hist_idx) {
                 let _ = self.cmd_tx.send(QueryCommand::Cancel { query_id }).await;
             }
         }
@@ -348,7 +380,7 @@ impl App {
     async fn handle_subpane_key(&mut self, key: KeyEvent, pane: SubPane) -> Result<()> {
         // Handle copy to clipboard (needs special handling due to borrow checker)
         if pane == SubPane::Results && key.code == KeyCode::Char('y') {
-            let content = if let Some(block) = self.session.selected_block()
+            let content = if let Some(block) = self.session.displayed_block()
                 && let Some(table) = &block.results
             {
                 table.get_clipboard_content()
@@ -369,17 +401,17 @@ impl App {
                         self.session.show_toast("Copied to clipboard");
                     }
                     Ok(Err(e)) => {
-                        self.session.show_toast(format!("Copy failed: {}", e));
+                        self.session.app_error = Some(format!("Copy failed: {}", e));
                     }
                     Err(e) => {
-                        self.session.show_toast(format!("Copy error: {}", e));
+                        self.session.app_error = Some(format!("Copy error: {}", e));
                     }
                 }
             }
             return Ok(());
         }
 
-        let block = match self.session.selected_block_mut() {
+        let block = match self.session.displayed_block_mut() {
             Some(b) => b,
             None => return Ok(()),
         };
@@ -502,7 +534,7 @@ impl App {
         Ok(())
     }
 
-    /// Look up block_index from query_id
+    /// Look up history_index from query_id
     fn lookup_query(&self, query_id: usize) -> Option<usize> {
         self.query_map.get(&query_id).copied()
     }
@@ -510,74 +542,79 @@ impl App {
     pub fn handle_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::QueryStarted { query_id } => {
-                // Block already created by execute_new_query
-                if let Some(block_idx) = self.lookup_query(query_id) {
-                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                if let Some(hist_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_running_mut(hist_idx) {
                         block.running = true;
                     }
                 }
             }
             AppEvent::QueryComplete { query_id } => {
-                if let Some(block_idx) = self.lookup_query(query_id) {
-                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                if let Some(hist_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_running_mut(hist_idx) {
                         block.running = false;
                         block.cancel_requested = false;
                     }
                 }
             }
             AppEvent::QueryError { query_id, error } => {
-                if let Some(block_idx) = self.lookup_query(query_id) {
-                    if let Some(block) = self.session.get_block_mut(block_idx) {
-                        block.error = Some(error);
+                if let Some(hist_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_running_mut(hist_idx) {
+                        block.error = Some(error.clone());
                         block.running = false;
                         block.cancel_requested = false;
+                    }
+                    // Update history entry with error
+                    if let Some(entry) = self.session.history.get_mut(hist_idx) {
+                        entry.error = Some(error);
                     }
                 }
             }
             AppEvent::RowReceived { query_id, row } => {
-                if let Some(block_idx) = self.lookup_query(query_id) {
-                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                if let Some(hist_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_running_mut(hist_idx) {
                         block.add_result_row(row);
                     }
                 }
             }
             AppEvent::ProfileEvent { query_id, event } => {
-                if let Some(block_idx) = self.lookup_query(query_id) {
-                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                if let Some(hist_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_running_mut(hist_idx) {
                         block.add_profile_event(event);
                     }
                 }
             }
             AppEvent::LogEvent { query_id, log } => {
-                if let Some(block_idx) = self.lookup_query(query_id) {
-                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                if let Some(hist_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_running_mut(hist_idx) {
                         block.add_log(log);
                     }
                 }
             }
             AppEvent::ProgressEvent { query_id, progress } => {
-                if let Some(block_idx) = self.lookup_query(query_id) {
-                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                if let Some(hist_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_running_mut(hist_idx) {
                         block.add_progress(progress);
                     }
                 }
             }
             AppEvent::QueryCached { query_id, entry } => {
-                // Store the cache entry reference in the block
-                if let Some(block_idx) = self.lookup_query(query_id) {
-                    if let Some(block) = self.session.get_block_mut(block_idx) {
+                // Update the history entry with cache info
+                if let Some(hist_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_running_mut(hist_idx) {
                         block.cache_id = Some(entry.id.clone());
                     }
+                    // Update row count in history entry
+                    if let Some(hist_entry) = self.session.history.get_mut(hist_idx) {
+                        hist_entry.row_count = entry.row_count;
+                        hist_entry.duration_ms = entry.duration_ms;
+                    }
                 }
-                // Add to persisted queries list
-                self.session.add_persisted_query(entry);
             }
             AppEvent::ConnectionLost { error } => {
                 let truncated: String = error.chars().take(50).collect();
                 self.session.show_toast(format!("Connection lost: {}", truncated));
             }
             AppEvent::Reconnecting { attempt } => {
-                // Only show toast on first attempt to avoid spam
                 if attempt == 1 {
                     self.session.show_toast("Reconnecting...");
                 }
@@ -585,53 +622,75 @@ impl App {
             AppEvent::Reconnected => {
                 self.session.show_toast("Reconnected");
             }
+            AppEvent::ArchiveRowLoaded { cache_id, row } => {
+                // Add row to current block if it matches the cache_id
+                if let Some(block) = self.session.current_block.as_mut() {
+                    if block.cache_id.as_ref() == Some(&cache_id) {
+                        block.add_result_row(row);
+                    }
+                }
+            }
+            AppEvent::ArchiveLoadComplete { cache_id: _ } => {
+                // Loading complete - nothing special to do, rows are already added
+            }
+            AppEvent::ArchiveLoadError { cache_id, error } => {
+                // Show error if still viewing this archive
+                if let Some(block) = self.session.current_block.as_ref() {
+                    if block.cache_id.as_ref() == Some(&cache_id) {
+                        self.session.app_error =
+                            Some(format!("Failed to parse results: {}", error));
+                    }
+                }
+            }
         }
     }
 
-    async fn load_persisted_query(&mut self, entry: &QueryStoreEntry) {
-        // Get archive path
+    /// Load selected history entry's data (async)
+    async fn load_selected_entry(&mut self) {
+        let Some(hist_idx) = self.session.selected_history else {
+            return;
+        };
+
+        // If it's a running query, data is already in running_queries
+        if self.session.running_queries.contains_key(&hist_idx) {
+            self.session.loading_entry_id = None;
+            return;
+        }
+
+        // Get entry to load
+        let Some(entry) = self.session.history.get(hist_idx).cloned() else {
+            return;
+        };
+
+        // Mark as loading
+        self.session.loading_entry_id = Some(entry.id.clone());
+        self.session.current_block = None;
+
+        // Load from archive
+        self.load_archive(&entry).await;
+    }
+
+    /// Load archive data into current_block with background streaming for results
+    async fn load_archive(&mut self, entry: &QueryStoreEntry) {
         let base_path = QueryStore::find_chc_dir();
         let archive_path = base_path.join(format!("{}.chc", entry.id));
 
-        // Open archive (sync - blocking)
         let archive = match QueryArchiveReader::open(&archive_path) {
             Ok(a) => a,
             Err(e) => {
-                self.session.show_toast(format!("Failed to open: {}", e));
+                self.session.app_error = Some(format!("Failed to open archive: {}", e));
+                self.session.loading_entry_id = None;
                 return;
             }
         };
 
-        // Create a new QueryBlock for the loaded query
-        let block_idx = self.session.blocks.len();
+        // Create query block immediately with metadata
         let mut query_block = QueryBlock::new(archive.sql.clone());
         query_block.running = false;
         query_block.cache_id = Some(entry.id.clone());
+        query_block.error = entry.error.clone();
 
-        // Parse native results back to JSON rows
-        if !archive.results.is_empty() {
-            let cursor = Cursor::new(archive.results);
-            let mut file_reader = FileStreamReader::<NativeFormat, _>::new(
-                cursor,
-                CompressionMethod::LZ4,
-                Default::default(),
-            );
-
-            match file_reader.read_all().await {
-                Ok(blocks) => {
-                    for mut block in blocks {
-                        for row in block.take_iter_rows() {
-                            query_block.add_result_row(row_to_json(row));
-                        }
-                    }
-                }
-                Err(e) => {
-                    self.session.show_toast(format!("Failed to parse results: {}", e));
-                }
-            }
-        }
-
-        // Parse profile events from JSONL
+        // Parse profile events (usually small, do synchronously)
         if !archive.profile.is_empty() {
             let content = String::from_utf8_lossy(&archive.profile);
             for line in content.lines() {
@@ -641,7 +700,7 @@ impl App {
             }
         }
 
-        // Parse logs from JSONL
+        // Parse logs (usually small, do synchronously)
         if !archive.logs.is_empty() {
             let content = String::from_utf8_lossy(&archive.logs);
             for line in content.lines() {
@@ -651,10 +710,54 @@ impl App {
             }
         }
 
-        // Add to session and select
-        self.session.blocks.push(query_block);
-        self.session.selected_block = Some(block_idx);
-        self.session.sidebar_section = SidebarSection::Session;
-        self.session.focus = Focus::SubPane(SubPane::Results);
+        // Set block immediately so UI shows query structure
+        self.session.current_block = Some(query_block);
+        self.session.loading_entry_id = None;
+
+        // Spawn background task to stream result rows
+        if !archive.results.is_empty() {
+            let cache_id = entry.id.clone();
+            let results_data = archive.results;
+            let event_tx = self.event_tx.clone();
+
+            tokio::spawn(async move {
+                let cursor = Cursor::new(results_data);
+                let mut file_reader = FileStreamReader::<NativeFormat, _>::new(
+                    cursor,
+                    CompressionMethod::LZ4,
+                    Default::default(),
+                );
+
+                loop {
+                    match file_reader.next().await {
+                        Ok(Some(mut block)) => {
+                            for row in block.take_iter_rows() {
+                                let _ = event_tx
+                                    .send(AppEvent::ArchiveRowLoaded {
+                                        cache_id: cache_id.clone(),
+                                        row:      row_to_json(row),
+                                    })
+                                    .await;
+                            }
+                        }
+                        Ok(None) => {
+                            let _ = event_tx
+                                .send(AppEvent::ArchiveLoadComplete { cache_id: cache_id.clone() })
+                                .await;
+                            break;
+                        }
+                        Err(e) => {
+                            let _ = event_tx
+                                .send(AppEvent::ArchiveLoadError {
+                                    cache_id: cache_id.clone(),
+                                    error:    e.to_string(),
+                                })
+                                .await;
+                            break;
+                        }
+                    }
+                }
+            });
+        }
     }
 }

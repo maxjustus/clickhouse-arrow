@@ -10,9 +10,7 @@ use ratatui::widgets::{
 use ratatui::{Frame, symbols};
 
 use crate::tui::app::App;
-use crate::tui::session::{
-    Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, SidebarSection, SubPane,
-};
+use crate::tui::session::{Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, SubPane};
 use crate::tui::widgets::table::{PathStatsState, PathValueType, ResultsViewMode};
 
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -31,15 +29,25 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     // Render toast if present (on top of everything)
     if let Some((msg, _)) = &app.session.toast {
-        let toast_width = (msg.len() as u16 + 4).min(f.area().width.saturating_sub(4));
+        const MAX_TOAST_WIDTH: u16 = 60;
+        const MAX_TOAST_HEIGHT: u16 = 5; // 3 text lines + 2 borders
+
+        let max_width = MAX_TOAST_WIDTH.min(f.area().width.saturating_sub(4));
+        let text_width = max_width.saturating_sub(2); // Account for borders
+
+        // Estimate lines needed for wrapped text
+        let estimated_lines = ((msg.len() as u16 + text_width - 1) / text_width.max(1)).max(1);
+        let toast_height = (estimated_lines + 2).min(MAX_TOAST_HEIGHT);
+
         let toast_area = Rect {
-            x:      f.area().width.saturating_sub(toast_width + 2),
+            x:      f.area().width.saturating_sub(max_width + 2),
             y:      1,
-            width:  toast_width,
-            height: 3,
+            width:  max_width,
+            height: toast_height,
         };
         let toast = Paragraph::new(msg.as_str())
             .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false })
             .alignment(Alignment::Center);
         f.render_widget(Clear, toast_area);
         f.render_widget(toast, toast_area);
@@ -65,15 +73,12 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(Color::DarkGray)
     };
 
-    let block = Block::default().borders(Borders::ALL).title("Queries").border_style(border_style);
+    let block = Block::default().borders(Borders::ALL).title("History").border_style(border_style);
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let has_session = !app.session.blocks.is_empty();
-    let has_persisted = !app.session.persisted_queries.is_empty();
-
-    if !has_session && !has_persisted {
+    if app.session.history.is_empty() {
         let empty = Paragraph::new("No queries yet").style(Style::default().fg(Color::DarkGray));
         f.render_widget(empty, inner);
         return;
@@ -81,97 +86,48 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
 
     let mut items: Vec<ListItem> = Vec::new();
 
-    // Session section header (if has queries)
-    if has_session {
-        let session_header_style = if app.session.sidebar_section == SidebarSection::Session {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    // Unified history list
+    for (idx, entry) in app.session.history.iter().enumerate() {
+        let is_selected = app.session.selected_history == Some(idx);
+        let is_running = app.session.running_queries.contains_key(&idx);
+        let running_block = app.session.running_queries.get(&idx);
+
+        // Determine indicator
+        let indicator = if running_block.map(|b| b.cancel_requested).unwrap_or(false) {
+            "x"
+        } else if is_running {
+            "*"
+        } else if entry.error.is_some() {
+            "!"
+        } else if is_selected {
+            ">"
         } else {
-            Style::default().fg(Color::DarkGray)
+            " "
         };
-        items.push(ListItem::new("-- Session --").style(session_header_style));
 
-        // Session queries
-        for (idx, b) in app.session.blocks.iter().enumerate() {
-            let is_selected = app.session.sidebar_section == SidebarSection::Session
-                && app.session.selected_block == Some(idx);
-            let indicator = if b.cancel_requested {
-                "x"
-            } else if b.running {
-                "*"
-            } else if b.error.is_some() {
-                "!"
-            } else if is_selected {
-                ">"
-            } else {
-                " "
-            };
+        // Truncate SQL preview
+        let sql_preview: String =
+            entry.sql_preview.chars().take(18).collect::<String>().replace('\n', " ");
 
-            // Truncate SQL to fit sidebar
-            let sql_preview: String = b.sql.chars().take(18).collect::<String>().replace('\n', " ");
+        // Format row count - use running block's count if available
+        let row_count = running_block.map(|b| b.result_count()).unwrap_or(entry.row_count as usize);
 
-            let text =
-                format!("{} Q{}: {} ({})", indicator, idx + 1, sql_preview, b.result_count());
+        // Format timestamp
+        let age = format_relative_time(entry.timestamp);
 
-            let style = if is_selected {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-            } else if b.error.is_some() {
-                Style::default().fg(Color::Red)
-            } else if b.running {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::White)
-            };
+        let text = format!("{} {} ({} rows) {}", indicator, sql_preview, row_count, age);
 
-            items.push(ListItem::new(text).style(style));
-        }
-    }
-
-    // Persisted section header (if has queries)
-    if has_persisted {
-        // Add blank line separator if session section exists
-        if has_session {
-            items.push(ListItem::new(""));
-        }
-
-        let persisted_header_style = if app.session.sidebar_section == SidebarSection::Persisted {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        let style = if is_selected {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else if entry.error.is_some() {
+            Style::default().fg(Color::Red)
+        } else if is_running {
+            Style::default().fg(Color::Yellow)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(Color::Gray)
         };
-        items.push(ListItem::new("-- History --").style(persisted_header_style));
 
-        // Persisted queries (most recent first)
-        for (i, entry) in app.session.persisted_queries.iter().enumerate() {
-            let is_selected = app.session.sidebar_section == SidebarSection::Persisted
-                && app.session.selected_persisted == Some(i);
-
-            let indicator = if entry.error.is_some() {
-                "!"
-            } else if is_selected {
-                ">"
-            } else {
-                " "
-            };
-
-            // Truncate SQL preview
-            let sql_preview: String =
-                entry.sql_preview.chars().take(18).collect::<String>().replace('\n', " ");
-
-            // Format timestamp as relative time
-            let age = format_relative_time(entry.timestamp);
-
-            let text = format!("{} {} ({} rows) {}", indicator, sql_preview, entry.row_count, age);
-
-            let style = if is_selected {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-            } else if entry.error.is_some() {
-                Style::default().fg(Color::Red)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-
-            items.push(ListItem::new(text).style(style));
-        }
+        items.push(ListItem::new(text).style(style));
     }
 
     let list = List::new(items);
@@ -208,13 +164,37 @@ fn render_main_content(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    // Otherwise: just the selected query (full area, no new query box)
-    if let Some(block_idx) = app.session.selected_block {
-        let focus = app.session.focus.clone();
-        let mode = app.session.mode;
-        if let Some(block) = app.session.blocks.get_mut(block_idx) {
-            render_selected_query(f, area, block, block_idx, &focus, mode);
-        }
+    // Check if we're loading
+    if app.session.loading_entry_id.is_some() {
+        let loading = Paragraph::new("Loading...")
+            .style(Style::default().fg(Color::Yellow))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title("Query Results"));
+        f.render_widget(loading, area);
+        return;
+    }
+
+    // Check for app-level error (archive loading, clipboard, etc.)
+    if let Some(ref error) = app.session.app_error {
+        let error_block = Block::default()
+            .borders(Borders::ALL)
+            .title("Error")
+            .border_style(Style::default().fg(Color::Red));
+        let para = Paragraph::new(error.as_str())
+            .block(error_block)
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: false });
+        f.render_widget(para, area);
+        return;
+    }
+
+    // Display current block (from running_queries or current_block)
+    let hist_idx = app.session.selected_history.unwrap_or(0);
+    let focus = app.session.focus.clone();
+    let mode = app.session.mode;
+
+    if let Some(block) = app.session.displayed_block_mut() {
+        render_selected_query(f, area, block, hist_idx, &focus, mode);
     } else {
         let empty = Paragraph::new("No queries yet. Press 'n' to write a new query.")
             .style(Style::default().fg(Color::DarkGray))
@@ -1262,14 +1242,14 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
             };
             let query_str = app
                 .session
-                .selected_block
+                .selected_history
                 .map(|id| format!("Q{}", id + 1))
                 .unwrap_or_else(|| "?".to_string());
             format!("{} > {}", query_str, pane_name)
         }
     };
 
-    let query_count = app.session.blocks.len();
+    let query_count = app.session.history.len();
     let query_info =
         if query_count > 0 { format!(" ({} queries)", query_count) } else { String::new() };
 
@@ -1280,12 +1260,12 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
         let mut parts = vec!["j/k: navigate", "l: enter", "h: back", "n: new query"];
 
         // Cancel hint when query is running
-        if app
-            .session
-            .selected_block
-            .and_then(|id| app.session.blocks.get(id))
-            .filter(|block| block.running && !block.cancel_requested)
-            .is_some()
+        if app.session.selected_is_running()
+            && app
+                .session
+                .displayed_block()
+                .filter(|block| block.running && !block.cancel_requested)
+                .is_some()
         {
             parts.push("C: cancel");
         }
