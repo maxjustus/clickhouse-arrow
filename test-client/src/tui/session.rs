@@ -321,6 +321,15 @@ pub struct StatsData {
     pub rows_written:  u64,
     pub bytes_written: u64,
 
+    // Max values during execution
+    pub max_rows_read:  u64,
+    pub max_bytes_read: u64,
+
+    // Final values from ProfileInfo (set once at query completion)
+    pub final_rows_read:  Option<u64>,
+    pub final_bytes_read: Option<u64>,
+    pub final_blocks:     Option<u64>,
+
     // Elapsed time for rate calculation (nanoseconds)
     pub elapsed_ns: u64,
 
@@ -355,6 +364,11 @@ impl Default for StatsData {
             total_rows:         None,
             rows_written:       0,
             bytes_written:      0,
+            max_rows_read:      0,
+            max_bytes_read:     0,
+            final_rows_read:    None,
+            final_bytes_read:   None,
+            final_blocks:       None,
             elapsed_ns:         0,
             cpu_history:        VecDeque::with_capacity(SPARKLINE_SIZE),
             cpu_current:        0,
@@ -388,12 +402,25 @@ impl StatsData {
     ) {
         self.rows_read = rows;
         self.bytes_read = bytes;
+
+        // Track max values
+        self.max_rows_read = self.max_rows_read.max(rows);
+        self.max_bytes_read = self.max_bytes_read.max(bytes);
+
         if total_rows.is_some() {
             self.total_rows = total_rows;
         }
         self.rows_written = rows_written;
         self.bytes_written = bytes_written;
         self.elapsed_ns = elapsed_ns;
+    }
+
+    pub fn set_final_stats(&mut self, profile_info: serde_json::Value) {
+        if let serde_json::Value::Object(ref map) = profile_info {
+            self.final_rows_read = map.get("rows").and_then(|v| v.as_u64());
+            self.final_bytes_read = map.get("bytes").and_then(|v| v.as_u64());
+            self.final_blocks = map.get("blocks").and_then(|v| v.as_u64());
+        }
     }
 
     pub fn add_profile_event(&mut self, event: serde_json::Value) {

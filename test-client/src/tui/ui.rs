@@ -347,18 +347,25 @@ fn render_sql_pane(
     let style = pane_style(focused, mode);
     let expand_char = if expanded { "▼" } else { "▶" };
 
+    // Format SQL for display
+    let formatted_sql = sqlformat::format(
+        &block.sql,
+        &sqlformat::QueryParams::None,
+        &sqlformat::FormatOptions::default(),
+    );
+
     if expanded {
         let sql_block = Block::default()
             .borders(Borders::ALL)
             .title(format!("{} SQL", expand_char))
             .border_style(style);
-        let para = Paragraph::new(block.sql.as_str())
+        let para = Paragraph::new(formatted_sql.as_str())
             .block(sql_block)
             .wrap(Wrap { trim: false })
             .scroll((block.sql_scroll, 0));
         f.render_widget(para, area);
     } else {
-        // Collapsed: show truncated SQL
+        // Collapsed: show truncated SQL (use original, not formatted)
         let sql_preview: String = block.sql.chars().take(60).collect();
         let text = format!("{} SQL: {}", expand_char, sql_preview.replace('\n', " "));
         let para = Paragraph::new(text).style(style);
@@ -602,7 +609,8 @@ fn render_stats_pane(
             }
             MetricsViewMode::Table => {
                 // Split area: header lines + progress line + metrics table
-                let text_lines: u16 = if has_writes { 3 } else { 2 };
+                // 3 lines for current/max/final, +1 if writes, +1 for CPU/RAM
+                let text_lines: u16 = if has_writes { 5 } else { 4 };
 
                 let constraints: Vec<Constraint> =
                     vec![Constraint::Length(text_lines), Constraint::Length(1), Constraint::Min(0)];
@@ -612,9 +620,9 @@ fn render_stats_pane(
                     .constraints(constraints)
                     .split(area);
 
-                // Line 1: Read stats with rates
-                let read_line = format!(
-                    "{} Stats: Read {} rows ({}) @ {}/s, {}/s",
+                // Line 1: Current stats with rates
+                let current_line = format!(
+                    "{} Stats Current: {} rows ({}) @ {}/s, {}/s",
                     expand_char,
                     format_number(block.stats.rows_read),
                     format_bytes(block.stats.bytes_read),
@@ -622,12 +630,39 @@ fn render_stats_pane(
                     format_bytes(read_bytes_rate as u64),
                 );
 
-                let mut lines = vec![Line::from(read_line)];
+                // Line 2: Max stats
+                let max_line = format!(
+                    "           Max:     {} rows ({})",
+                    format_number(block.stats.max_rows_read),
+                    format_bytes(block.stats.max_bytes_read),
+                );
 
-                // Line 2: Write stats (if any)
+                // Line 3: Final stats (from server ProfileInfo)
+                let final_line = match (block.stats.final_rows_read, block.stats.final_bytes_read) {
+                    (Some(rows), Some(bytes)) => {
+                        let blocks_str = block
+                            .stats
+                            .final_blocks
+                            .map(|b| format!(" in {} blocks", format_number(b)))
+                            .unwrap_or_default();
+                        format!(
+                            "           Final:   {} rows ({}){} [from server]",
+                            format_number(rows),
+                            format_bytes(bytes),
+                            blocks_str
+                        )
+                    }
+                    _ if block.running => "           Final:   (query in progress...)".to_string(),
+                    _ => "           Final:   (not available)".to_string(),
+                };
+
+                let mut lines =
+                    vec![Line::from(current_line), Line::from(max_line), Line::from(final_line)];
+
+                // Line 4: Write stats (if any)
                 if has_writes {
                     let write_line = format!(
-                        "         Write {} rows ({}) @ {}/s, {}/s",
+                        "           Write:   {} rows ({}) @ {}/s, {}/s",
                         format_number(block.stats.rows_written),
                         format_bytes(block.stats.bytes_written),
                         format_rate(write_rows_rate),
@@ -683,12 +718,22 @@ fn render_stats_pane(
         let ram_str = format_bytes(block.stats.ram_current);
         let peak_ram_str = format_bytes(block.stats.peak_ram_current);
 
+        // Prefer final values if available, otherwise use current
+        let (rows, bytes, label) = match (block.stats.final_rows_read, block.stats.final_bytes_read)
+        {
+            (Some(r), Some(b)) => (r, b, "Final"),
+            _ => (block.stats.rows_read, block.stats.bytes_read, "Curr"),
+        };
+
         let text = if has_writes {
             format!(
-                "{} Stats: R {} @ {}/s | W {} @ {}/s | CPU {}% | RAM {} (peak {})",
+                "{} Stats: {} {} rows ({}) | Max {} rows | W {} @ {}/s | CPU {}% | RAM {} (peak \
+                 {})",
                 expand_char,
-                format_number(block.stats.rows_read),
-                format_rate(read_rows_rate),
+                label,
+                format_number(rows),
+                format_bytes(bytes),
+                format_number(block.stats.max_rows_read),
                 format_number(block.stats.rows_written),
                 format_rate(write_rows_rate),
                 cpu_pct,
@@ -697,10 +742,12 @@ fn render_stats_pane(
             )
         } else {
             format!(
-                "{} Stats: R {} @ {}/s | CPU {}% | RAM {} (peak {})",
+                "{} Stats: {} {} rows ({}) | Max {} rows | CPU {}% | RAM {} (peak {})",
                 expand_char,
-                format_number(block.stats.rows_read),
-                format_rate(read_rows_rate),
+                label,
+                format_number(rows),
+                format_bytes(bytes),
+                format_number(block.stats.max_rows_read),
                 cpu_pct,
                 ram_str,
                 peak_ram_str
@@ -1202,7 +1249,7 @@ fn render_new_query_fullscreen(f: &mut Frame, area: Rect, app: &App) {
     let style = Style::default().fg(Color::Cyan);
 
     let title = if app.session.mode == Mode::Edit {
-        "New Query [EDIT] (Ctrl+Enter: run, Escape: cancel, Ctrl+P/N: history)"
+        "New Query [EDIT] (Ctrl+Enter: run, Ctrl+L: format, Ctrl+P/N: history)"
     } else {
         "New Query (press Enter to edit, Escape to cancel)"
     };

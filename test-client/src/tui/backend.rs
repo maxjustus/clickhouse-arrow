@@ -200,8 +200,25 @@ pub fn spawn_backend(
                         .send(AppEvent::ProgressEvent { query_id, progress: json })
                         .await;
                 }
-                ClickHouseEvent::ProfileInfo(_) => {
-                    // ProfileInfo is end-of-query summary, can add if needed
+                ClickHouseEvent::ProfileInfo(profile_info) => {
+                    let json = serde_json::json!({
+                        "rows": profile_info.rows,
+                        "blocks": profile_info.blocks,
+                        "bytes": profile_info.bytes,
+                    });
+
+                    // Write to cache
+                    if let Some(writer_arc) =
+                        cache_writers_clone.read().await.get(&query_id).cloned()
+                    {
+                        if let Some(writer) = writer_arc.lock().await.as_mut() {
+                            writer.write_profile_info(&json);
+                        }
+                    }
+
+                    let _ = event_tx_clone
+                        .send(AppEvent::ProfileInfoEvent { query_id, profile_info: json })
+                        .await;
                 }
             }
         }

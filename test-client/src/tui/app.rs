@@ -24,6 +24,7 @@ pub enum AppEvent {
     QueryError { query_id: usize, error: String },
     RowReceived { query_id: usize, row: serde_json::Value },
     ProfileEvent { query_id: usize, event: serde_json::Value },
+    ProfileInfoEvent { query_id: usize, profile_info: serde_json::Value },
     LogEvent { query_id: usize, log: serde_json::Value },
     ProgressEvent { query_id: usize, progress: serde_json::Value },
     QueryCached { query_id: usize, entry: QueryStoreEntry },
@@ -346,6 +347,19 @@ impl App {
                     self.set_new_query_text(&query);
                 }
             }
+            // Format SQL with Ctrl+L
+            (KeyCode::Char('l'), true, _) => {
+                let sql = self.session.new_query.lines().join("\n");
+                let formatted = sqlformat::format(
+                    &sql,
+                    &sqlformat::QueryParams::None,
+                    &sqlformat::FormatOptions::default(),
+                );
+                // ClickHouse-specific: format SETTINGS clause
+                let formatted = format_clickhouse(&formatted);
+                self.set_new_query_text(&formatted);
+                self.session.show_toast("SQL formatted");
+            }
             // Any other key - pass to textarea and reset nav
             _ => {
                 self.session.new_query.input(key);
@@ -585,6 +599,13 @@ impl App {
                     }
                 }
             }
+            AppEvent::ProfileInfoEvent { query_id, profile_info } => {
+                if let Some(hist_idx) = self.lookup_query(query_id) {
+                    if let Some(block) = self.session.get_running_mut(hist_idx) {
+                        block.stats.set_final_stats(profile_info);
+                    }
+                }
+            }
             AppEvent::LogEvent { query_id, log } => {
                 if let Some(hist_idx) = self.lookup_query(query_id) {
                     if let Some(block) = self.session.get_running_mut(hist_idx) {
@@ -712,6 +733,16 @@ impl App {
             }
         }
 
+        // Parse profile_info (final stats from server)
+        if !archive.profile_info.is_empty() {
+            let content = String::from_utf8_lossy(&archive.profile_info);
+            if let Some(line) = content.lines().next() {
+                if let Ok(json) = serde_json::from_str(line) {
+                    query_block.stats.set_final_stats(json);
+                }
+            }
+        }
+
         // Set block immediately so UI shows query structure
         self.session.current_block = Some(query_block);
         self.session.loading_entry_id = None;
@@ -762,4 +793,33 @@ impl App {
             });
         }
     }
+}
+
+/// ClickHouse keywords that should start on their own line
+const CLICKHOUSE_NEWLINE_KEYWORDS: &[&str] =
+    &["PREWHERE", "GLOBAL", "FINAL", "SAMPLE", "ARRAY JOIN"];
+
+/// Apply ClickHouse-specific formatting after sqlformat
+fn format_clickhouse(sql: &str) -> String {
+    let mut result = sql.to_string();
+
+    // Put certain keywords on their own line
+    for kw in CLICKHOUSE_NEWLINE_KEYWORDS {
+        let pattern = format!(" {} ", kw);
+        let replacement = format!("\n{} ", kw);
+        result = result.replace(&pattern, &replacement);
+    }
+
+    // SETTINGS gets special treatment: each setting on its own indented line
+    if let Some(pos) = result.find(" SETTINGS ") {
+        let (before, rest) = result.split_at(pos);
+        let settings_part = &rest[10..]; // skip " SETTINGS "
+
+        let settings: Vec<&str> = settings_part.split(',').map(|s| s.trim()).collect();
+        let formatted_settings = settings.join(",\n  ");
+
+        result = format!("{}\nSETTINGS\n  {}", before, formatted_settings);
+    }
+
+    result
 }
