@@ -9,6 +9,9 @@ use crate::tui::widgets::table::SortableTable;
 const SPARKLINE_SIZE: usize = 32;
 const CHART_HISTORY_SIZE: usize = 200;
 
+/// Number of rows to jump with { / } navigation
+pub const ROW_JUMP_COUNT: usize = 25;
+
 /// View mode for the metrics display
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricsViewMode {
@@ -92,6 +95,11 @@ pub enum LogsViewMode {
     Grouped,
     Expanded {
         thread_id: u64,
+    },
+    EntryDetail {
+        thread_id:     u64,
+        entry_index:   usize,
+        scroll_offset: u16,
     },
 }
 
@@ -187,7 +195,7 @@ impl LogsData {
     pub fn total_log_count(&self) -> usize { self.groups.values().map(|g| g.entries.len()).sum() }
 
     pub fn nav_up(&mut self) {
-        match self.view_mode {
+        match &mut self.view_mode {
             LogsViewMode::Grouped => {
                 if self.selected_row > 0 {
                     self.selected_row -= 1;
@@ -204,11 +212,14 @@ impl LogsData {
                     }
                 }
             }
+            LogsViewMode::EntryDetail { scroll_offset, .. } => {
+                *scroll_offset = scroll_offset.saturating_sub(1);
+            }
         }
     }
 
     pub fn nav_down(&mut self) {
-        match self.view_mode {
+        match &mut self.view_mode {
             LogsViewMode::Grouped => {
                 if !self.sorted_threads.is_empty()
                     && self.selected_row < self.sorted_threads.len() - 1
@@ -222,7 +233,7 @@ impl LogsData {
                 }
             }
             LogsViewMode::Expanded { thread_id } => {
-                if let Some(group) = self.groups.get(&thread_id)
+                if let Some(group) = self.groups.get(thread_id)
                     && self.expanded_selected < group.entries.len().saturating_sub(1)
                 {
                     self.expanded_selected += 1;
@@ -234,12 +245,16 @@ impl LogsData {
                     }
                 }
             }
+            LogsViewMode::EntryDetail { scroll_offset, .. } => {
+                // TODO: could limit based on text length, but simpler to just allow scrolling
+                *scroll_offset = scroll_offset.saturating_add(1);
+            }
         }
     }
 
     pub fn page_up(&mut self) {
         let page_size = self.visible_height.max(1);
-        match self.view_mode {
+        match &mut self.view_mode {
             LogsViewMode::Grouped => {
                 self.selected_row = self.selected_row.saturating_sub(page_size);
                 self.scroll_offset = self.scroll_offset.saturating_sub(page_size);
@@ -248,12 +263,15 @@ impl LogsData {
                 self.expanded_selected = self.expanded_selected.saturating_sub(page_size);
                 self.expanded_scroll = self.expanded_scroll.saturating_sub(page_size);
             }
+            LogsViewMode::EntryDetail { scroll_offset, .. } => {
+                *scroll_offset = scroll_offset.saturating_sub(page_size as u16);
+            }
         }
     }
 
     pub fn page_down(&mut self) {
         let page_size = self.visible_height.max(1);
-        match self.view_mode {
+        match &mut self.view_mode {
             LogsViewMode::Grouped => {
                 let max_row = self.sorted_threads.len().saturating_sub(1);
                 self.selected_row = (self.selected_row + page_size).min(max_row);
@@ -264,7 +282,7 @@ impl LogsData {
                 }
             }
             LogsViewMode::Expanded { thread_id } => {
-                if let Some(group) = self.groups.get(&thread_id) {
+                if let Some(group) = self.groups.get(thread_id) {
                     let max_row = group.entries.len().saturating_sub(1);
                     self.expanded_selected = (self.expanded_selected + page_size).min(max_row);
                     let max_visible = self.expanded_scroll + self.visible_height.saturating_sub(1);
@@ -274,6 +292,9 @@ impl LogsData {
                             .saturating_sub(self.visible_height.saturating_sub(1));
                     }
                 }
+            }
+            LogsViewMode::EntryDetail { scroll_offset, .. } => {
+                *scroll_offset = scroll_offset.saturating_add(page_size as u16);
             }
         }
     }
@@ -290,7 +311,16 @@ impl LogsData {
                     false
                 }
             }
-            LogsViewMode::Expanded { .. } => false, // Already at deepest level
+            LogsViewMode::Expanded { thread_id } => {
+                // Drill into selected entry
+                self.view_mode = LogsViewMode::EntryDetail {
+                    thread_id,
+                    entry_index: self.expanded_selected,
+                    scroll_offset: 0,
+                };
+                true
+            }
+            LogsViewMode::EntryDetail { .. } => false, // Deepest level
         }
     }
 
@@ -304,6 +334,142 @@ impl LogsData {
                     self.selected_row = idx;
                 }
                 true
+            }
+            LogsViewMode::EntryDetail { thread_id, entry_index, .. } => {
+                self.view_mode = LogsViewMode::Expanded { thread_id };
+                // Restore selection to the entry we were viewing
+                self.expanded_selected = entry_index;
+                true
+            }
+        }
+    }
+
+    /// Move to previous row/entry (works in all view modes)
+    pub fn prev_detail_entry(&mut self) {
+        match &mut self.view_mode {
+            LogsViewMode::Grouped => {
+                if self.selected_row > 0 {
+                    self.selected_row -= 1;
+                    if self.selected_row < self.scroll_offset {
+                        self.scroll_offset = self.selected_row;
+                    }
+                }
+            }
+            LogsViewMode::Expanded { .. } => {
+                if self.expanded_selected > 0 {
+                    self.expanded_selected -= 1;
+                    if self.expanded_selected < self.expanded_scroll {
+                        self.expanded_scroll = self.expanded_selected;
+                    }
+                }
+            }
+            LogsViewMode::EntryDetail { entry_index, scroll_offset, .. } => {
+                if *entry_index > 0 {
+                    *entry_index -= 1;
+                    *scroll_offset = 0;
+                }
+            }
+        }
+    }
+
+    /// Move to next row/entry (works in all view modes)
+    pub fn next_detail_entry(&mut self) {
+        match &mut self.view_mode {
+            LogsViewMode::Grouped => {
+                let max_row = self.sorted_threads.len().saturating_sub(1);
+                if self.selected_row < max_row {
+                    self.selected_row += 1;
+                    let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
+                    if self.selected_row > max_visible {
+                        self.scroll_offset =
+                            self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
+                    }
+                }
+            }
+            LogsViewMode::Expanded { thread_id } => {
+                if let Some(group) = self.groups.get(thread_id) {
+                    let max_row = group.entries.len().saturating_sub(1);
+                    if self.expanded_selected < max_row {
+                        self.expanded_selected += 1;
+                        let max_visible =
+                            self.expanded_scroll + self.visible_height.saturating_sub(1);
+                        if self.expanded_selected > max_visible {
+                            self.expanded_scroll = self
+                                .expanded_selected
+                                .saturating_sub(self.visible_height.saturating_sub(1));
+                        }
+                    }
+                }
+            }
+            LogsViewMode::EntryDetail { thread_id, entry_index, scroll_offset } => {
+                let max = self.groups.get(thread_id).map(|g| g.entries.len()).unwrap_or(0);
+                if *entry_index < max.saturating_sub(1) {
+                    *entry_index += 1;
+                    *scroll_offset = 0;
+                }
+            }
+        }
+    }
+
+    /// Jump backward by `count` rows/entries (works in all view modes)
+    pub fn prev_detail_entry_jump(&mut self, count: usize) {
+        match &mut self.view_mode {
+            LogsViewMode::Grouped => {
+                self.selected_row = self.selected_row.saturating_sub(count);
+                if self.selected_row < self.scroll_offset {
+                    self.scroll_offset = self.selected_row;
+                }
+            }
+            LogsViewMode::Expanded { .. } => {
+                self.expanded_selected = self.expanded_selected.saturating_sub(count);
+                if self.expanded_selected < self.expanded_scroll {
+                    self.expanded_scroll = self.expanded_selected;
+                }
+            }
+            LogsViewMode::EntryDetail { thread_id, entry_index, scroll_offset } => {
+                let max = self
+                    .groups
+                    .get(thread_id)
+                    .map(|g| g.entries.len().saturating_sub(1))
+                    .unwrap_or(0);
+                *entry_index = entry_index.saturating_sub(count).min(max);
+                *scroll_offset = 0;
+            }
+        }
+    }
+
+    /// Jump forward by `count` rows/entries (works in all view modes)
+    pub fn next_detail_entry_jump(&mut self, count: usize) {
+        match &mut self.view_mode {
+            LogsViewMode::Grouped => {
+                let max_row = self.sorted_threads.len().saturating_sub(1);
+                self.selected_row = (self.selected_row + count).min(max_row);
+                let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
+                if self.selected_row > max_visible {
+                    self.scroll_offset =
+                        self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
+                }
+            }
+            LogsViewMode::Expanded { thread_id } => {
+                if let Some(group) = self.groups.get(thread_id) {
+                    let max_row = group.entries.len().saturating_sub(1);
+                    self.expanded_selected = (self.expanded_selected + count).min(max_row);
+                    let max_visible = self.expanded_scroll + self.visible_height.saturating_sub(1);
+                    if self.expanded_selected > max_visible {
+                        self.expanded_scroll = self
+                            .expanded_selected
+                            .saturating_sub(self.visible_height.saturating_sub(1));
+                    }
+                }
+            }
+            LogsViewMode::EntryDetail { thread_id, entry_index, scroll_offset } => {
+                let max = self
+                    .groups
+                    .get(thread_id)
+                    .map(|g| g.entries.len().saturating_sub(1))
+                    .unwrap_or(0);
+                *entry_index = (*entry_index + count).min(max);
+                *scroll_offset = 0;
             }
         }
     }
@@ -580,6 +746,64 @@ impl StatsData {
             }
         }
     }
+
+    /// Move to previous row (works in both Table and Expanded modes)
+    pub fn prev_detail_row(&mut self) {
+        if self.selected_row > 0 {
+            self.selected_row -= 1;
+            // Adjust scroll if needed
+            if self.selected_row < self.scroll_offset {
+                self.scroll_offset = self.selected_row;
+            }
+            // Update Expanded mode index if active
+            if let MetricsViewMode::Expanded { index } = &mut self.view_mode {
+                *index = self.selected_row;
+            }
+        }
+    }
+
+    /// Move to next row (works in both Table and Expanded modes)
+    pub fn next_detail_row(&mut self) {
+        let max_row = self.metric_names.len().saturating_sub(1);
+        if self.selected_row < max_row {
+            self.selected_row += 1;
+            // Adjust scroll if needed
+            let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
+            if self.selected_row > max_visible {
+                self.scroll_offset =
+                    self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
+            }
+            // Update Expanded mode index if active
+            if let MetricsViewMode::Expanded { index } = &mut self.view_mode {
+                *index = self.selected_row;
+            }
+        }
+    }
+
+    /// Jump backward by `count` rows
+    pub fn prev_detail_row_jump(&mut self, count: usize) {
+        self.selected_row = self.selected_row.saturating_sub(count);
+        if self.selected_row < self.scroll_offset {
+            self.scroll_offset = self.selected_row;
+        }
+        if let MetricsViewMode::Expanded { index } = &mut self.view_mode {
+            *index = self.selected_row;
+        }
+    }
+
+    /// Jump forward by `count` rows
+    pub fn next_detail_row_jump(&mut self, count: usize) {
+        let max_row = self.metric_names.len().saturating_sub(1);
+        self.selected_row = (self.selected_row + count).min(max_row);
+        let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
+        if self.selected_row > max_visible {
+            self.scroll_offset =
+                self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
+        }
+        if let MetricsViewMode::Expanded { index } = &mut self.view_mode {
+            *index = self.selected_row;
+        }
+    }
 }
 
 /// A single statement and all its associated data
@@ -702,11 +926,12 @@ pub struct Session {
     pub running_queries: HashMap<usize, QueryBlock>,
 
     // UI state
-    pub new_query: TextArea<'static>,
-    pub focus:     Focus,
-    pub mode:      Mode,
-    pub toast:     Option<(String, Instant)>,
-    pub app_error: Option<String>, // Non-query errors (archive, clipboard, etc.)
+    pub new_query:      TextArea<'static>,
+    pub focus:          Focus,
+    pub mode:           Mode,
+    pub toast:          Option<(String, Instant)>,
+    pub app_error:      Option<String>, // Non-query errors (archive, clipboard, etc.)
+    pub previous_focus: Option<Focus>,  // For returning from NewQuery
 }
 
 impl Session {
@@ -725,6 +950,7 @@ impl Session {
             mode: Mode::Edit,
             toast: None,
             app_error: None,
+            previous_focus: None,
         }
     }
 

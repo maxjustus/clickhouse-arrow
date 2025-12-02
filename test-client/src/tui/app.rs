@@ -13,7 +13,9 @@ use tokio::sync::mpsc;
 use crate::tui::backend::row_to_json;
 use crate::tui::history::History;
 use crate::tui::query_store::{QueryArchiveReader, QueryStore, QueryStoreEntry};
-use crate::tui::session::{Focus, Mode, QueryBlock, Session, SubPane};
+use crate::tui::session::{
+    Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, ROW_JUMP_COUNT, Session, SubPane,
+};
 use crate::tui::ui::render;
 use crate::tui::widgets::table::ResultsViewMode;
 
@@ -120,7 +122,26 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
-        // Help screen intercepts all keys
+        // 'n' or 'i' jumps to new query from anywhere - except when already editing NewQuery
+        let in_new_query_edit =
+            matches!(self.session.focus, Focus::NewQuery) && self.session.mode == Mode::Edit;
+        if !in_new_query_edit
+            && matches!(
+                key.code,
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('i') | KeyCode::Char('I')
+            )
+        {
+            self.show_help = false;
+            // Store current focus for return (unless already in NewQuery)
+            if !matches!(self.session.focus, Focus::NewQuery) {
+                self.session.previous_focus = Some(self.session.focus.clone());
+            }
+            self.session.focus = Focus::NewQuery;
+            self.session.mode = Mode::Edit;
+            return Ok(());
+        }
+
+        // Help screen intercepts all other keys
         if self.show_help {
             if let KeyCode::Esc | KeyCode::Char('?') = key.code {
                 self.show_help = false;
@@ -145,9 +166,30 @@ impl App {
                 self.show_help = true;
                 return Ok(());
             }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.session.focus = Focus::NewQuery;
-                self.session.mode = Mode::Edit;
+            // Ctrl+Tab: Next query in history
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.session.sidebar_next() {
+                    self.load_selected_entry().await;
+                }
+                return Ok(());
+            }
+            // Ctrl+Shift+Tab: Previous query in history
+            KeyCode::BackTab
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                if self.session.sidebar_prev() {
+                    self.load_selected_entry().await;
+                }
+                return Ok(());
+            }
+            // Alt+1 through Alt+9: Jump directly to history entry
+            KeyCode::Char(c @ '1'..='9') if key.modifiers.contains(KeyModifiers::ALT) => {
+                let index = (c as usize) - ('1' as usize);
+                if self.session.select_history_by_index(index) {
+                    self.load_selected_entry().await;
+                }
+                return Ok(());
             }
             _ => {}
         }
@@ -200,10 +242,6 @@ impl App {
                         // Go back to sidebar
                         self.session.focus = Focus::Sidebar;
                     }
-                    KeyCode::Char('n') | KeyCode::Char('N') => {
-                        self.session.focus = Focus::NewQuery;
-                        self.session.mode = Mode::Edit;
-                    }
                     KeyCode::Char('c') | KeyCode::Char('C') => {
                         self.cancel_selected_query().await;
                     }
@@ -237,15 +275,98 @@ impl App {
         // Escape exits edit mode
         if key.code == KeyCode::Esc {
             self.session.mode = Mode::Navigation;
-            // If escaping from new query, return to sidebar or results
+            // If escaping from new query, return to previous focus or fallback
             if matches!(self.session.focus, Focus::NewQuery) {
-                if self.session.displayed_block().is_some() {
+                if let Some(prev) = self.session.previous_focus.take() {
+                    self.session.focus = prev;
+                } else if self.session.displayed_block().is_some() {
                     self.session.focus = Focus::SubPane(SubPane::Results);
                 } else {
                     self.session.focus = Focus::Sidebar;
                 }
             }
             return Ok(());
+        }
+
+        // Ctrl+P/N in SubPane: context-dependent behavior
+        // - Base table view: switch queries in history
+        // - Detail/split view: navigate rows
+        if let Focus::SubPane(pane) = self.session.focus {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                match key.code {
+                    KeyCode::Char('p') => {
+                        if let Some(block) = self.session.displayed_block_mut() {
+                            let in_detail = match pane {
+                                SubPane::Results => block
+                                    .results
+                                    .as_ref()
+                                    .map(|t| !matches!(t.view_mode, ResultsViewMode::Table))
+                                    .unwrap_or(false),
+                                SubPane::Stats => {
+                                    !matches!(block.stats.view_mode, MetricsViewMode::Table)
+                                }
+                                SubPane::Logs => {
+                                    !matches!(block.logs_data.view_mode, LogsViewMode::Grouped)
+                                }
+                                _ => false,
+                            };
+                            if in_detail {
+                                match pane {
+                                    SubPane::Results => {
+                                        if let Some(t) = &mut block.results {
+                                            t.prev_detail_row();
+                                        }
+                                    }
+                                    SubPane::Stats => block.stats.prev_detail_row(),
+                                    SubPane::Logs => block.logs_data.prev_detail_entry(),
+                                    _ => {}
+                                }
+                            } else {
+                                self.session.sidebar_prev();
+                            }
+                        } else {
+                            self.session.sidebar_prev();
+                        }
+                        return Ok(());
+                    }
+                    KeyCode::Char('n') => {
+                        if let Some(block) = self.session.displayed_block_mut() {
+                            let in_detail = match pane {
+                                SubPane::Results => block
+                                    .results
+                                    .as_ref()
+                                    .map(|t| !matches!(t.view_mode, ResultsViewMode::Table))
+                                    .unwrap_or(false),
+                                SubPane::Stats => {
+                                    !matches!(block.stats.view_mode, MetricsViewMode::Table)
+                                }
+                                SubPane::Logs => {
+                                    !matches!(block.logs_data.view_mode, LogsViewMode::Grouped)
+                                }
+                                _ => false,
+                            };
+                            if in_detail {
+                                match pane {
+                                    SubPane::Results => {
+                                        if let Some(t) = &mut block.results {
+                                            t.next_detail_row();
+                                        }
+                                    }
+                                    SubPane::Stats => block.stats.next_detail_row(),
+                                    SubPane::Logs => block.logs_data.next_detail_entry(),
+                                    _ => {}
+                                }
+                            } else {
+                                self.session.sidebar_next();
+                            }
+                        } else {
+                            self.session.sidebar_next();
+                        }
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
         }
 
         match &self.session.focus {
@@ -504,6 +625,11 @@ impl App {
                                     table.sort_by_column(0);
                                 }
                             }
+                            // Row navigation in detail view ([ / ] or Shift+K / Shift+J)
+                            (KeyCode::Char('[') | KeyCode::Char('K'), _) => table.prev_detail_row(),
+                            (KeyCode::Char(']') | KeyCode::Char('J'), _) => table.next_detail_row(),
+                            (KeyCode::Char('{'), _) => table.prev_detail_row_jump(ROW_JUMP_COUNT),
+                            (KeyCode::Char('}'), _) => table.next_detail_row_jump(ROW_JUMP_COUNT),
                             _ => {}
                         }
                     }
@@ -528,6 +654,11 @@ impl App {
                             self.session.mode = Mode::Navigation;
                         }
                     }
+                    // Row navigation ([ / ] or Shift+K / Shift+J)
+                    KeyCode::Char('[') | KeyCode::Char('K') => block.stats.prev_detail_row(),
+                    KeyCode::Char(']') | KeyCode::Char('J') => block.stats.next_detail_row(),
+                    KeyCode::Char('{') => block.stats.prev_detail_row_jump(ROW_JUMP_COUNT),
+                    KeyCode::Char('}') => block.stats.next_detail_row_jump(ROW_JUMP_COUNT),
                     _ => {}
                 }
             }
@@ -544,6 +675,11 @@ impl App {
                         self.session.mode = Mode::Navigation;
                     }
                 }
+                // Entry navigation ([ / ] or Shift+K / Shift+J)
+                KeyCode::Char('[') | KeyCode::Char('K') => block.logs_data.prev_detail_entry(),
+                KeyCode::Char(']') | KeyCode::Char('J') => block.logs_data.next_detail_entry(),
+                KeyCode::Char('{') => block.logs_data.prev_detail_entry_jump(ROW_JUMP_COUNT),
+                KeyCode::Char('}') => block.logs_data.next_detail_entry_jump(ROW_JUMP_COUNT),
                 _ => {}
             },
         }

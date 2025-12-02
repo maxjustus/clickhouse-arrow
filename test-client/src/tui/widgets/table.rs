@@ -540,6 +540,7 @@ impl SortableTable {
     pub fn focus_header(&mut self) {
         self.header_focused = true;
         self.focused_col = self.col_offset;
+        self.maybe_start_stats_computation(self.focused_col, vec![]);
     }
 
     /// Exit header focus and return to data rows
@@ -553,6 +554,7 @@ impl SortableTable {
             if self.focused_col < self.col_offset {
                 self.col_offset = self.focused_col;
             }
+            self.maybe_start_stats_computation(self.focused_col, vec![]);
         }
     }
 
@@ -566,6 +568,7 @@ impl SortableTable {
             if self.focused_col >= self.col_offset + visible {
                 self.col_offset = self.focused_col.saturating_sub(visible - 1);
             }
+            self.maybe_start_stats_computation(self.focused_col, vec![]);
         }
     }
 
@@ -643,6 +646,119 @@ impl SortableTable {
                         self.value_scroll = self.value_scroll.saturating_sub(1);
                     }
                 }
+            }
+        }
+    }
+
+    /// Move to previous row (works in all view modes)
+    pub fn prev_detail_row(&mut self) {
+        match &mut self.view_mode {
+            ResultsViewMode::Table => {
+                if self.selected_row > 0 {
+                    self.selected_row -= 1;
+                    // Adjust scroll if needed
+                    if self.selected_row < self.scroll_offset {
+                        self.scroll_offset = self.selected_row;
+                    }
+                }
+            }
+            ResultsViewMode::FieldList { row, scroll_offset } => {
+                if *row > 0 {
+                    *row -= 1;
+                    *scroll_offset = 0;
+                    self.selected_row = *row;
+                }
+            }
+            ResultsViewMode::FieldValue { row, scroll_offset, .. } => {
+                if *row > 0 {
+                    *row -= 1;
+                    *scroll_offset = 0;
+                    self.value_scroll = 0;
+                    self.selected_row = *row;
+                }
+            }
+        }
+    }
+
+    /// Move to next row (works in all view modes)
+    pub fn next_detail_row(&mut self) {
+        let max_row = self.rows.len().saturating_sub(1);
+        match &mut self.view_mode {
+            ResultsViewMode::Table => {
+                if self.selected_row < max_row {
+                    self.selected_row += 1;
+                    // Adjust scroll if needed
+                    let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
+                    if self.selected_row > max_visible {
+                        self.scroll_offset =
+                            self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
+                    }
+                }
+            }
+            ResultsViewMode::FieldList { row, scroll_offset } => {
+                if *row < max_row {
+                    *row += 1;
+                    *scroll_offset = 0;
+                    self.selected_row = *row;
+                }
+            }
+            ResultsViewMode::FieldValue { row, scroll_offset, .. } => {
+                if *row < max_row {
+                    *row += 1;
+                    *scroll_offset = 0;
+                    self.value_scroll = 0;
+                    self.selected_row = *row;
+                }
+            }
+        }
+    }
+
+    /// Jump backward by `count` rows (works in all view modes)
+    pub fn prev_detail_row_jump(&mut self, count: usize) {
+        let max_row = self.rows.len().saturating_sub(1);
+        match &mut self.view_mode {
+            ResultsViewMode::Table => {
+                self.selected_row = self.selected_row.saturating_sub(count);
+                if self.selected_row < self.scroll_offset {
+                    self.scroll_offset = self.selected_row;
+                }
+            }
+            ResultsViewMode::FieldList { row, scroll_offset } => {
+                *row = row.saturating_sub(count).min(max_row);
+                *scroll_offset = 0;
+                self.selected_row = *row;
+            }
+            ResultsViewMode::FieldValue { row, scroll_offset, .. } => {
+                *row = row.saturating_sub(count).min(max_row);
+                *scroll_offset = 0;
+                self.value_scroll = 0;
+                self.selected_row = *row;
+            }
+        }
+    }
+
+    /// Jump forward by `count` rows (works in all view modes)
+    pub fn next_detail_row_jump(&mut self, count: usize) {
+        let max_row = self.rows.len().saturating_sub(1);
+        match &mut self.view_mode {
+            ResultsViewMode::Table => {
+                self.selected_row = (self.selected_row + count).min(max_row);
+                let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
+                if self.selected_row > max_visible {
+                    self.scroll_offset =
+                        self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
+                }
+            }
+            ResultsViewMode::FieldList { row, scroll_offset } => {
+                *row = (*row + count).min(max_row);
+                *scroll_offset = 0;
+                self.selected_row = *row;
+            }
+            ResultsViewMode::FieldValue { row, scroll_offset, .. } => {
+                *row = (*row + count).min(max_row);
+                *scroll_offset = 0;
+                self.value_scroll = 0;
+                self.selected_row = *row;
             }
         }
     }
@@ -1333,6 +1449,45 @@ impl SortableTable {
                     available_width,
                 ),
         }
+    }
+
+    /// Render only the detail view (FieldList or FieldValue). For split view.
+    pub fn render_detail<'a>(
+        &'a self,
+        title: &'a str,
+        available_width: u16,
+        border_style: Style,
+    ) -> ResultsWidget<'a> {
+        match &self.view_mode {
+            ResultsViewMode::FieldList { row, scroll_offset } => ResultsWidget::List(
+                self.render_field_list(title, *row, *scroll_offset, border_style, available_width),
+            ),
+            ResultsViewMode::FieldValue { row, field, path, selected_index, scroll_offset } => self
+                .render_nested_value(
+                    title,
+                    *row,
+                    *field,
+                    path,
+                    *selected_index,
+                    *scroll_offset,
+                    border_style,
+                    available_width,
+                ),
+            ResultsViewMode::Table => {
+                // Shouldn't be called in Table mode, but return empty list as fallback
+                ResultsWidget::List(List::new::<Vec<ListItem>>(vec![]))
+            }
+        }
+    }
+
+    /// Render field list for the currently selected row (used in Table mode split view)
+    pub fn render_selected_row_detail<'a>(
+        &'a self,
+        title: &'a str,
+        available_width: u16,
+        border_style: Style,
+    ) -> List<'a> {
+        self.render_field_list(title, self.selected_row, 0, border_style, available_width)
     }
 }
 
