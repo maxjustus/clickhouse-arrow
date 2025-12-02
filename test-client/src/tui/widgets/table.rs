@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use ratatui::layout::Constraint;
@@ -7,8 +8,9 @@ use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Tab
 use serde_json::Value;
 use tokio::sync::oneshot;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortOrder {
+    #[default]
     Ascending,
     Descending,
 }
@@ -487,12 +489,29 @@ impl SortableTable {
 
     fn apply_sort(&mut self) {
         if let Some(col) = self.sort_column {
-            // Sort using display string representation for consistency
             let order = self.sort_order;
             self.rows.sort_by(|a, b| {
-                let a_str = a.get(col).map(|v| format_cell_value(v, 100));
-                let b_str = b.get(col).map(|v| format_cell_value(v, 100));
-                let ord = a_str.cmp(&b_str);
+                let a_val = a.get(col);
+                let b_val = b.get(col);
+
+                let ord = match (a_val, b_val) {
+                    // Both are numbers - compare numerically
+                    (Some(Value::Number(a_num)), Some(Value::Number(b_num))) => {
+                        match (a_num.as_f64(), b_num.as_f64()) {
+                            (Some(a_f), Some(b_f)) => {
+                                a_f.partial_cmp(&b_f).unwrap_or(Ordering::Equal)
+                            }
+                            _ => Ordering::Equal,
+                        }
+                    }
+                    // Fall back to string comparison for other types
+                    _ => {
+                        let a_str = a_val.map(|v| format_cell_value(v, 100));
+                        let b_str = b_val.map(|v| format_cell_value(v, 100));
+                        a_str.cmp(&b_str)
+                    }
+                };
+
                 match order {
                     SortOrder::Ascending => ord,
                     SortOrder::Descending => ord.reverse(),
@@ -1043,24 +1062,35 @@ impl SortableTable {
     /// Calculate how many columns fit and their widths, starting from col_offset.
     /// Returns (num_visible_cols, Vec<allocated_widths>)
     fn columns_for_width(&self, available_width: u16) -> (usize, Vec<u16>) {
-        let mut remaining = available_width.saturating_sub(4) as usize; // borders
-        let mut widths = Vec::new();
+        let usable = available_width.saturating_sub(4) as usize; // borders
+        let mut base_widths = Vec::new();
+        let mut total_base = 0usize;
 
+        // First pass: calculate base widths (content-aware, capped at 50)
         for i in self.col_offset..self.columns.len() {
             let header_width = self.columns[i].len();
             let content_width = self.col_widths.get(i).copied().unwrap_or(header_width);
-            // Min = header width, Max = 50 chars
             let col_width = content_width.max(header_width).min(50);
 
             let needed = col_width + 1; // +1 for spacing
-            if needed > remaining && !widths.is_empty() {
-                break; // No room for this column
+            if total_base + needed > usable && !base_widths.is_empty() {
+                break;
             }
 
-            widths.push(col_width.min(remaining) as u16);
-            remaining = remaining.saturating_sub(needed);
+            base_widths.push(col_width);
+            total_base += needed;
         }
 
+        // Second pass: distribute remaining space proportionally
+        let remaining = usable.saturating_sub(total_base);
+        if remaining > 0 && !base_widths.is_empty() {
+            let extra_per_col = remaining / base_widths.len();
+            for w in &mut base_widths {
+                *w += extra_per_col;
+            }
+        }
+
+        let widths: Vec<u16> = base_widths.into_iter().map(|w| w as u16).collect();
         (widths.len(), widths)
     }
 

@@ -4,7 +4,7 @@ use std::time::Instant;
 use tui_textarea::TextArea;
 
 use crate::tui::query_store::QueryStoreEntry;
-use crate::tui::widgets::table::SortableTable;
+use crate::tui::widgets::table::{ResultsViewMode, SortOrder, SortableTable};
 
 const SPARKLINE_SIZE: usize = 32;
 const CHART_HISTORY_SIZE: usize = 200;
@@ -13,10 +13,40 @@ const CHART_HISTORY_SIZE: usize = 200;
 pub const ROW_JUMP_COUNT: usize = 25;
 
 /// View mode for the metrics display
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MetricsViewMode {
+    #[default]
     Table,
-    Expanded { index: usize },
+    Expanded {
+        index: usize,
+    },
+}
+
+/// Cached UI state for a query (preserved when switching between queries)
+#[derive(Debug, Clone, Default)]
+pub struct ViewState {
+    // Results table
+    pub results_selected_row:   usize,
+    pub results_scroll_offset:  usize,
+    pub results_col_offset:     usize,
+    pub results_view_mode:      ResultsViewMode,
+    pub results_header_focused: bool,
+    pub results_focused_col:    usize,
+    pub results_sort_column:    Option<usize>,
+    pub results_sort_order:     SortOrder,
+
+    // Stats
+    pub stats_selected_row:  usize,
+    pub stats_scroll_offset: usize,
+    pub stats_view_mode:     MetricsViewMode,
+
+    // Logs
+    pub logs_selected_row:  usize,
+    pub logs_scroll_offset: usize,
+    pub logs_view_mode:     LogsViewMode,
+
+    // SQL
+    pub sql_scroll: u16,
 }
 
 /// Aggregated metric data (grouped by name)
@@ -687,6 +717,10 @@ impl StatsData {
             if self.selected_row < self.scroll_offset {
                 self.scroll_offset = self.selected_row;
             }
+            // Update Expanded mode index if active
+            if let MetricsViewMode::Expanded { index } = &mut self.view_mode {
+                *index = self.selected_row;
+            }
         }
     }
 
@@ -699,6 +733,10 @@ impl StatsData {
             if self.selected_row > max_visible {
                 self.scroll_offset =
                     self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
+            }
+            // Update Expanded mode index if active
+            if let MetricsViewMode::Expanded { index } = &mut self.view_mode {
+                *index = self.selected_row;
             }
         }
     }
@@ -809,16 +847,17 @@ impl StatsData {
 /// A single statement and all its associated data
 #[derive(Debug)]
 pub struct QueryBlock {
-    pub sql:              String,
-    pub sql_scroll:       u16,
-    pub results:          Option<SortableTable>,
-    pub stats:            StatsData,
-    pub logs:             Vec<LogEntry>,
-    pub logs_data:        LogsData,
-    pub error:            Option<String>,
-    pub running:          bool,
-    pub cancel_requested: bool,
-    pub cache_id:         Option<String>, // ID in QueryStore if cached
+    pub sql:                String,
+    pub sql_scroll:         u16,
+    pub results:            Option<SortableTable>,
+    pub stats:              StatsData,
+    pub logs:               Vec<LogEntry>,
+    pub logs_data:          LogsData,
+    pub error:              Option<String>,
+    pub running:            bool,
+    pub cancel_requested:   bool,
+    pub cache_id:           Option<String>, // ID in QueryStore if cached
+    pub pending_view_state: Option<ViewState>, // Applied when results table is created
 }
 
 impl QueryBlock {
@@ -834,6 +873,7 @@ impl QueryBlock {
             running: false, // Not running until backend starts it
             cancel_requested: false,
             cache_id: None,
+            pending_view_state: None,
         }
     }
 
@@ -855,9 +895,24 @@ impl QueryBlock {
 
     pub fn add_result_row(&mut self, row: serde_json::Value) {
         if let serde_json::Value::Object(map) = row {
-            if self.results.is_none() {
+            let table_just_created = self.results.is_none();
+
+            if table_just_created {
                 let columns: Vec<String> = map.keys().cloned().collect();
                 self.results = Some(SortableTable::new(columns));
+
+                // Apply any pending view state now that table exists
+                if let Some(state) = self.pending_view_state.take() {
+                    if let Some(ref mut table) = self.results {
+                        table.sort_column = state.results_sort_column;
+                        table.sort_order = state.results_sort_order;
+                        table.view_mode = state.results_view_mode;
+                        table.header_focused = state.results_header_focused;
+                        table.focused_col = state.results_focused_col;
+                        table.col_offset = state.results_col_offset;
+                        // Note: selected_row and scroll_offset are applied after all rows loaded
+                    }
+                }
             }
 
             if let Some(ref mut table) = self.results {
@@ -887,6 +942,75 @@ impl QueryBlock {
     }
 
     pub fn result_count(&self) -> usize { self.results.as_ref().map(|t| t.rows.len()).unwrap_or(0) }
+
+    /// Extract current UI state for caching
+    pub fn extract_view_state(&self) -> ViewState {
+        let (
+            results_selected_row,
+            results_scroll_offset,
+            results_col_offset,
+            results_view_mode,
+            results_header_focused,
+            results_focused_col,
+            results_sort_column,
+            results_sort_order,
+        ) = if let Some(ref table) = self.results {
+            (
+                table.selected_row,
+                table.scroll_offset,
+                table.col_offset,
+                table.view_mode.clone(),
+                table.header_focused,
+                table.focused_col,
+                table.sort_column,
+                table.sort_order,
+            )
+        } else {
+            Default::default()
+        };
+
+        ViewState {
+            results_selected_row,
+            results_scroll_offset,
+            results_col_offset,
+            results_view_mode,
+            results_header_focused,
+            results_focused_col,
+            results_sort_column,
+            results_sort_order,
+            stats_selected_row: self.stats.selected_row,
+            stats_scroll_offset: self.stats.scroll_offset,
+            stats_view_mode: self.stats.view_mode,
+            logs_selected_row: self.logs_data.selected_row,
+            logs_scroll_offset: self.logs_data.scroll_offset,
+            logs_view_mode: self.logs_data.view_mode.clone(),
+            sql_scroll: self.sql_scroll,
+        }
+    }
+
+    /// Apply cached UI state
+    pub fn apply_view_state(&mut self, state: &ViewState) {
+        if let Some(ref mut table) = self.results {
+            table.selected_row = state.results_selected_row.min(table.rows.len().saturating_sub(1));
+            table.scroll_offset = state.results_scroll_offset;
+            table.col_offset = state.results_col_offset;
+            table.view_mode = state.results_view_mode.clone();
+            table.header_focused = state.results_header_focused;
+            table.focused_col = state.results_focused_col;
+            table.sort_column = state.results_sort_column;
+            table.sort_order = state.results_sort_order;
+        } else {
+            // Results table doesn't exist yet - store for later application
+            self.pending_view_state = Some(state.clone());
+        }
+        self.stats.selected_row = state.stats_selected_row;
+        self.stats.scroll_offset = state.stats_scroll_offset;
+        self.stats.view_mode = state.stats_view_mode;
+        self.logs_data.selected_row = state.logs_selected_row;
+        self.logs_data.scroll_offset = state.logs_scroll_offset;
+        self.logs_data.view_mode = state.logs_view_mode.clone();
+        self.sql_scroll = state.sql_scroll;
+    }
 }
 /// Which sub-pane type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1038,6 +1162,17 @@ impl Session {
             return true;
         }
         false
+    }
+
+    /// Select history entry by absolute index (0-based), returns true if selection changed
+    pub fn select_history_by_index(&mut self, index: usize) -> bool {
+        if index < self.history.len() {
+            let changed = self.selected_history != Some(index);
+            self.selected_history = Some(index);
+            changed
+        } else {
+            false
+        }
     }
 
     /// Check if selected entry is a running query

@@ -312,6 +312,7 @@ async fn execute_query(
         .with_setting("send_logs_level", "trace")
         .with_setting("log_queries", 1)
         .with_setting("send_profile_events", 1)
+        .with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1)
         .with_setting("limit", 100_000);
 
     let stream = match client
@@ -544,6 +545,10 @@ fn value_to_json(value: clickhouse_arrow::Value) -> serde_json::Value {
         Value::Ipv4(ip) => serde_json::json!(format!("{:?}", ip)),
         Value::Ipv6(ip) => serde_json::json!(format!("{:?}", ip)),
         Value::Variant(_, boxed) | Value::Dynamic(_, boxed) => value_to_json(*boxed),
+        Value::Json(v) => v.clone(),
+        Value::Object(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+            serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+        }),
         // For geo and other complex types, fall back to debug string
         other => serde_json::Value::String(format!("{:?}", other)),
     }

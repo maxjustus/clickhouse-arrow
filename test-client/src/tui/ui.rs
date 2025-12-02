@@ -281,12 +281,16 @@ fn render_selected_query(
 
     // Sub-pane layout - in edit mode only focused pane expands, otherwise all expand
     let sub_constraints = vec![
+        // SQL
         if is_pane_expanded(SubPane::Sql, focused) {
-            // Lines needed = SQL line count + 2 (borders)
-            let sql_lines = block.sql.lines().count() as u16 + 2;
-            // Max height = equal share (total height / 4 panes)
-            let max_height = inner.height / 4;
-            Constraint::Length(sql_lines.min(max_height).max(3))
+            if focused == Some(SubPane::Sql) {
+                Constraint::Min(0) // Fill all space when exclusively focused
+            } else {
+                // Dynamic height in navigation mode
+                let sql_lines = block.sql.lines().count() as u16 + 2;
+                let max_height = inner.height / 4;
+                Constraint::Length(sql_lines.min(max_height).max(3))
+            }
         } else {
             Constraint::Length(1)
         },
@@ -393,9 +397,11 @@ fn render_results_pane(
     let row_count = block.result_count();
 
     // Update visible dimensions for scroll calculations
+    // Table uses 67% of width when expanded (67/33 split with detail panel)
+    let table_width = area.width * 67 / 100;
     if let Some(ref mut table) = block.results {
         table.set_visible_height(area.height);
-        table.set_visible_width(area.width);
+        table.set_visible_width(table_width);
     }
 
     if let Some(ref error) = block.error {
@@ -1473,12 +1479,16 @@ fn render_help(f: &mut Frame) {
         Line::from("  ?                 Toggle help"),
         Line::from("  Ctrl+Q            Quit"),
         Line::from(""),
+        Line::from("Query History Navigation (Global):"),
+        Line::from("  Ctrl+P            Previous query in history"),
+        Line::from("  Ctrl+N            Next query in history"),
+        Line::from("  Alt+1..9          Jump to query 1-9"),
+        Line::from(""),
         Line::from("Edit Mode (New Query):"),
         Line::from("  Escape            Exit to navigation mode"),
         Line::from("  Ctrl+Enter        Execute query"),
         Line::from("  Alt+Enter         Execute query (alternative)"),
-        Line::from("  Ctrl+P            Previous history entry"),
-        Line::from("  Ctrl+N            Next history entry"),
+        Line::from("  Ctrl+P/N          Recall history (replaces text)"),
         Line::from(""),
         Line::from("Edit Mode (Results/Stats/Logs):"),
         Line::from("  j/k or Up/Down    Navigate rows"),
@@ -1618,12 +1628,12 @@ fn render_categorical_column_viz(f: &mut Frame, area: Rect, unique_sample: &Uniq
             if *max_count > 0 { ((*count as f64 / *max_count as f64) * 20.0) as usize } else { 0 };
         let bar = "█".repeat(bar_width);
 
-        let display_val: String = val.chars().take(12).collect();
-        let ellipsis = if val.len() > 12 { ".." } else { "" };
+        let display_val: String = val.chars().take(40).collect();
+        let ellipsis = if val.len() > 40 { ".." } else { "" };
 
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{:12}{}: ", display_val, ellipsis),
+                format!("{:40}{}: ", display_val, ellipsis),
                 Style::default().fg(Color::White),
             ),
             Span::styled(bar, Style::default().fg(Color::Cyan)),
@@ -1640,10 +1650,7 @@ fn render_column_stats_modal_overlay(f: &mut Frame, area: Rect, app: &App) {
 
     let block = if let Some(idx) = session.selected_history {
         // Check running query first, then current block
-        session
-            .running_queries
-            .get(&idx)
-            .or(session.current_block.as_ref())
+        session.running_queries.get(&idx).or(session.current_block.as_ref())
     } else {
         session.current_block.as_ref()
     };
@@ -1651,38 +1658,40 @@ fn render_column_stats_modal_overlay(f: &mut Frame, area: Rect, app: &App) {
     if let Some(block) = block {
         if let Some(ref table) = block.results {
             if table.header_focused {
-                let column_name: &str = table
-                    .columns
-                    .get(table.focused_col)
-                    .map(|s| s.as_str())
-                    .unwrap_or("Unknown");
+                let column_name: &str =
+                    table.columns.get(table.focused_col).map(|s| s.as_str()).unwrap_or("Unknown");
 
-                    match table.get_path_stats(table.focused_col, &vec![]) {
-                        PathStatsState::Ready(stats) => {
-                            // Skip if only one unique value (no variation to show)
-                            if let Some(ref sample) = stats.unique_sample {
-                                if sample.total_unique <= 1 {
-                                    return;
-                                }
+                match table.get_path_stats(table.focused_col, &vec![]) {
+                    PathStatsState::Ready(stats) => {
+                        // Skip if only one unique value (no variation to show)
+                        if let Some(ref sample) = stats.unique_sample {
+                            if sample.total_unique <= 1 {
+                                return;
                             }
-
-                            render_column_stats_modal(f, area, table, column_name, stats);
                         }
-                        PathStatsState::Computing => {
-                            let modal_area = bottom_right_rect(25, 25, area);
-                            f.render_widget(Clear, modal_area);
 
-                            let loading = Paragraph::new("Computing stats...")
-                                .style(Style::default().fg(Color::Yellow))
-                                .block(
-                                    Block::default()
-                                        .borders(Borders::ALL)
-                                        .border_style(Style::default().fg(Color::Yellow))
-                                        .title(" Column Stats "),
-                                );
-                            f.render_widget(loading, modal_area);
+                        // Skip if no visualizable data (Array, Object, AllNull types)
+                        if stats.numeric.is_none() && stats.unique_sample.is_none() {
+                            return;
                         }
-                        PathStatsState::NotStarted => {}
+
+                        render_column_stats_modal(f, area, table, column_name, stats);
+                    }
+                    PathStatsState::Computing => {
+                        let modal_area = bottom_right_rect(25, 25, area);
+                        f.render_widget(Clear, modal_area);
+
+                        let loading = Paragraph::new("Computing stats...")
+                            .style(Style::default().fg(Color::Yellow))
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .border_style(Style::default().fg(Color::Yellow))
+                                    .title(" Column Stats "),
+                            );
+                        f.render_widget(loading, modal_area);
+                    }
+                    PathStatsState::NotStarted => {}
                 }
             }
         }

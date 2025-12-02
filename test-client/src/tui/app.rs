@@ -15,6 +15,7 @@ use crate::tui::history::History;
 use crate::tui::query_store::{QueryArchiveReader, QueryStore, QueryStoreEntry};
 use crate::tui::session::{
     Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, ROW_JUMP_COUNT, Session, SubPane,
+    ViewState,
 };
 use crate::tui::ui::render;
 use crate::tui::widgets::table::ResultsViewMode;
@@ -36,7 +37,7 @@ pub enum AppEvent {
     Reconnected,
     // Archive loading events
     ArchiveRowLoaded { cache_id: String, row: serde_json::Value },
-    ArchiveLoadComplete { cache_id: String },
+    ArchiveLoadComplete,
     ArchiveLoadError { cache_id: String, error: String },
 }
 
@@ -47,16 +48,18 @@ pub enum QueryCommand {
 }
 
 pub struct App {
-    pub session:     Session,
-    pub should_quit: bool,
-    pub show_help:   bool,
-    pub history:     History,
-    cmd_tx:          mpsc::Sender<QueryCommand>,
-    event_tx:        mpsc::Sender<AppEvent>,
-    event_rx:        mpsc::Receiver<AppEvent>,
+    pub session:      Session,
+    pub should_quit:  bool,
+    pub show_help:    bool,
+    pub history:      History,
+    cmd_tx:           mpsc::Sender<QueryCommand>,
+    event_tx:         mpsc::Sender<AppEvent>,
+    event_rx:         mpsc::Receiver<AppEvent>,
     /// Maps query_id -> block_index for event routing
-    query_map:       HashMap<usize, usize>,
-    next_query_id:   usize,
+    query_map:        HashMap<usize, usize>,
+    next_query_id:    usize,
+    /// Cached UI state per query (keyed by cache_id)
+    view_state_cache: HashMap<String, ViewState>,
 }
 
 impl App {
@@ -76,6 +79,7 @@ impl App {
             event_rx,
             query_map: HashMap::new(),
             next_query_id: 0,
+            view_state_cache: HashMap::new(),
         })
     }
 
@@ -123,15 +127,25 @@ impl App {
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         // 'n' or 'i' jumps to new query from anywhere - except when already editing NewQuery
+        // Shift+N or Shift+I pre-populates with current query's SQL
         let in_new_query_edit =
             matches!(self.session.focus, Focus::NewQuery) && self.session.mode == Mode::Edit;
         if !in_new_query_edit
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(
                 key.code,
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('i') | KeyCode::Char('I')
             )
         {
             self.show_help = false;
+
+            // Shift variant: pre-populate with current query's SQL
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if let Some(sql) = self.session.displayed_block().map(|b| b.sql.clone()) {
+                    self.set_new_query_text(&sql);
+                }
+            }
+
             // Store current focus for return (unless already in NewQuery)
             if !matches!(self.session.focus, Focus::NewQuery) {
                 self.session.previous_focus = Some(self.session.focus.clone());
@@ -166,26 +180,36 @@ impl App {
                 self.show_help = true;
                 return Ok(());
             }
-            // Ctrl+Tab: Next query in history
-            KeyCode::Tab if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.session.sidebar_next() {
-                    self.load_selected_entry().await;
+            // Ctrl+P: Previous query in history (global, except in NewQuery edit)
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !(self.session.mode == Mode::Edit
+                    && matches!(self.session.focus, Focus::NewQuery))
+                {
+                    self.save_current_view_state();
+                    if self.session.sidebar_prev() {
+                        self.load_selected_entry().await;
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                // Fall through to mode handler for NewQuery edit
             }
-            // Ctrl+Shift+Tab: Previous query in history
-            KeyCode::BackTab
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
-                if self.session.sidebar_prev() {
-                    self.load_selected_entry().await;
+            // Ctrl+N: Next query in history (global, except in NewQuery edit)
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !(self.session.mode == Mode::Edit
+                    && matches!(self.session.focus, Focus::NewQuery))
+                {
+                    self.save_current_view_state();
+                    if self.session.sidebar_next() {
+                        self.load_selected_entry().await;
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                // Fall through to mode handler for NewQuery edit
             }
             // Alt+1 through Alt+9: Jump directly to history entry
             KeyCode::Char(c @ '1'..='9') if key.modifiers.contains(KeyModifiers::ALT) => {
                 let index = (c as usize) - ('1' as usize);
+                self.save_current_view_state();
                 if self.session.select_history_by_index(index) {
                     self.load_selected_entry().await;
                 }
@@ -205,11 +229,13 @@ impl App {
             Focus::Sidebar => {
                 match key.code {
                     KeyCode::Down | KeyCode::Char('j') => {
+                        self.save_current_view_state();
                         if self.session.sidebar_next() {
                             self.load_selected_entry().await;
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
+                        self.save_current_view_state();
                         if self.session.sidebar_prev() {
                             self.load_selected_entry().await;
                         }
@@ -789,7 +815,7 @@ impl App {
                     }
                 }
             }
-            AppEvent::ArchiveLoadComplete { cache_id: _ } => {
+            AppEvent::ArchiveLoadComplete => {
                 // Loading complete - nothing special to do, rows are already added
             }
             AppEvent::ArchiveLoadError { cache_id, error } => {
@@ -801,6 +827,17 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Save current query's view state to cache before switching
+    fn save_current_view_state(&mut self) {
+        if let Some(idx) = self.session.selected_history
+            && let Some(entry) = self.session.history.get(idx)
+            && let Some(block) = self.session.displayed_block()
+        {
+            let state = block.extract_view_state();
+            self.view_state_cache.insert(entry.id.clone(), state);
         }
     }
 
@@ -883,6 +920,13 @@ impl App {
         self.session.current_block = Some(query_block);
         self.session.loading_entry_id = None;
 
+        // Restore cached view state if available
+        if let Some(state) = self.view_state_cache.get(&entry.id) {
+            if let Some(block) = self.session.current_block.as_mut() {
+                block.apply_view_state(state);
+            }
+        }
+
         // Spawn background task to stream result rows
         if !archive.results.is_empty() {
             let cache_id = entry.id.clone();
@@ -910,9 +954,7 @@ impl App {
                             }
                         }
                         Ok(None) => {
-                            let _ = event_tx
-                                .send(AppEvent::ArchiveLoadComplete { cache_id: cache_id.clone() })
-                                .await;
+                            let _ = event_tx.send(AppEvent::ArchiveLoadComplete).await;
                             break;
                         }
                         Err(e) => {
