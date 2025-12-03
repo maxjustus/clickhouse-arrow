@@ -116,10 +116,16 @@ fn render_history_cards(f: &mut Frame, area: Rect, app: &App) {
     // footer)
     const CARD_HEIGHT: u16 = 8;
     let visible_cards = (inner.height / CARD_HEIGHT).max(1) as usize;
+    let total_cards = app.session.history.len();
 
     // Calculate scroll offset to keep selected card visible
-    let selected = app.session.selected_card.unwrap_or(0);
-    let scroll_offset = if selected >= visible_cards { selected - visible_cards + 1 } else { 0 };
+    // When input is focused (None), scroll to show last cards (near input)
+    let scroll_offset = if let Some(selected) = app.session.selected_card {
+        if selected >= visible_cards { selected - visible_cards + 1 } else { 0 }
+    } else {
+        // Input focused - scroll to show cards nearest to input (bottom of list)
+        total_cards.saturating_sub(visible_cards)
+    };
 
     // Render visible cards
     let mut y_offset = 0;
@@ -144,9 +150,9 @@ fn render_history_cards(f: &mut Frame, area: Rect, app: &App) {
     }
 
     // Show scroll indicator if needed
-    let total_cards = app.session.history.len();
     if total_cards > visible_cards {
-        let indicator = format!(" {}/{} ", selected + 1, total_cards);
+        let position = app.session.selected_card.map(|s| s + 1).unwrap_or(total_cards + 1);
+        let indicator = format!(" {}/{} ", position, total_cards + 1); // +1 for input
         let indicator_area = Rect {
             x:      inner.x + inner.width.saturating_sub(indicator.len() as u16 + 1),
             y:      inner.y + inner.height.saturating_sub(1),

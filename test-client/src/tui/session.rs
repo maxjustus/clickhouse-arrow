@@ -1040,9 +1040,8 @@ pub enum Mode {
 /// The entire session state
 pub struct Session {
     // History of queries (shown as cards)
-    pub history:        Vec<QueryStoreEntry>,
-    pub selected_card:  Option<usize>, // None = input focused, Some(i) = card i selected
-    pub history_scroll: usize,         // Scroll offset for history view
+    pub history:       Vec<QueryStoreEntry>,
+    pub selected_card: Option<usize>, // None = input focused, Some(i) = card i selected
 
     // Currently displayed query data (when viewing full results)
     pub current_block:    Option<QueryBlock>,
@@ -1067,7 +1066,6 @@ impl Session {
         Self {
             history: Vec::new(),
             selected_card: None, // Start with input focused
-            history_scroll: 0,
             current_block: None,
             loading_entry_id: None,
             running_queries: HashMap::new(),
