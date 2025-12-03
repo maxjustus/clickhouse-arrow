@@ -4,8 +4,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Axis, Block, Borders, Chart, Clear, Dataset, GraphType, LineGauge, List, ListItem, Paragraph,
-    Row, Table, Wrap,
+    Axis, Block, Borders, Chart, Clear, Dataset, GraphType, LineGauge, Paragraph, Row, Table, Wrap,
 };
 use ratatui::{Frame, symbols};
 
@@ -61,84 +60,241 @@ pub fn render(f: &mut Frame, app: &mut App) {
 }
 
 fn render_session(f: &mut Frame, area: Rect, app: &mut App) {
-    // Split: sidebar | main content
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(28), Constraint::Min(40)])
-        .split(area);
-
-    render_sidebar(f, chunks[0], app);
-    render_main_content(f, chunks[1], app);
+    match &app.session.focus {
+        Focus::HistoryView => {
+            // Full-width history view with query cards
+            render_history_view(f, area, app);
+        }
+        Focus::SubPane(_) => {
+            // Full-width results view
+            render_results_fullscreen(f, area, app);
+        }
+    }
 }
 
-fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
-    let sidebar_focused =
-        matches!(app.session.focus, Focus::HistoryView) && app.session.selected_card.is_some();
-    let border_style = if sidebar_focused {
+/// Render the full-width history view with query cards and input at bottom
+fn render_history_view(f: &mut Frame, area: Rect, app: &mut App) {
+    // Check if we're focused on input (no card selected)
+    let input_focused = app.session.selected_card.is_none();
+
+    // If input is focused in edit mode, show full-screen editor
+    if input_focused && app.session.mode == Mode::Edit {
+        render_new_query_fullscreen(f, area, app);
+        return;
+    }
+
+    // Calculate layout: cards take most space, input at bottom
+    let input_height: u16 = if input_focused { 6 } else { 3 };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(input_height)])
+        .split(area);
+
+    // Render cards area
+    render_history_cards(f, chunks[0], app);
+
+    // Render input area at bottom
+    render_input_card(f, chunks[1], app, input_focused);
+}
+
+/// Render the scrollable list of query cards
+fn render_history_cards(f: &mut Frame, area: Rect, app: &App) {
+    let border_style = Style::default().fg(Color::DarkGray);
+    let block = Block::default().borders(Borders::ALL).title("History").border_style(border_style);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if app.session.history.is_empty() {
+        let empty = Paragraph::new("No queries yet. Press 'n' to write a new query.")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(empty, inner);
+        return;
+    }
+
+    // Calculate card height (fixed at 8 lines for now: header, sql, divider, 3 preview rows,
+    // footer)
+    const CARD_HEIGHT: u16 = 8;
+    let visible_cards = (inner.height / CARD_HEIGHT).max(1) as usize;
+
+    // Calculate scroll offset to keep selected card visible
+    let selected = app.session.selected_card.unwrap_or(0);
+    let scroll_offset = if selected >= visible_cards { selected - visible_cards + 1 } else { 0 };
+
+    // Render visible cards
+    let mut y_offset = 0;
+    for (idx, entry) in app.session.history.iter().enumerate().skip(scroll_offset) {
+        if y_offset + CARD_HEIGHT > inner.height {
+            break;
+        }
+
+        let card_area = Rect {
+            x:      inner.x,
+            y:      inner.y + y_offset,
+            width:  inner.width,
+            height: CARD_HEIGHT,
+        };
+
+        let is_selected = app.session.selected_card == Some(idx);
+        let is_running = app.session.running_queries.contains_key(&idx);
+        let running_block = app.session.running_queries.get(&idx);
+
+        render_query_card(f, card_area, entry, is_selected, is_running, running_block);
+        y_offset += CARD_HEIGHT;
+    }
+
+    // Show scroll indicator if needed
+    let total_cards = app.session.history.len();
+    if total_cards > visible_cards {
+        let indicator = format!(" {}/{} ", selected + 1, total_cards);
+        let indicator_area = Rect {
+            x:      inner.x + inner.width.saturating_sub(indicator.len() as u16 + 1),
+            y:      inner.y + inner.height.saturating_sub(1),
+            width:  indicator.len() as u16,
+            height: 1,
+        };
+        let indicator_para = Paragraph::new(indicator).style(Style::default().fg(Color::DarkGray));
+        f.render_widget(indicator_para, indicator_area);
+    }
+}
+
+/// Render a single query card
+fn render_query_card(
+    f: &mut Frame,
+    area: Rect,
+    entry: &crate::tui::query_store::QueryStoreEntry,
+    is_selected: bool,
+    is_running: bool,
+    running_block: Option<&QueryBlock>,
+) {
+    let border_style = if is_selected {
+        Style::default().fg(Color::Yellow)
+    } else if entry.error.is_some() {
+        Style::default().fg(Color::Red)
+    } else if is_running {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    // Card title: timestamp and duration
+    let age = format_relative_time(entry.timestamp);
+    let duration = entry
+        .duration_ms
+        .map(|ms| format!("{}ms", ms))
+        .unwrap_or_else(|| if is_running { "running...".to_string() } else { "-".to_string() });
+
+    let indicator = if running_block.map(|b| b.cancel_requested).unwrap_or(false) {
+        "x "
+    } else if is_running {
+        "* "
+    } else if entry.error.is_some() {
+        "! "
+    } else {
+        ""
+    };
+
+    let title = format!("{}{} | {}", indicator, age, duration);
+
+    let block = Block::default().borders(Borders::ALL).title(title).border_style(border_style);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Card content
+    let mut lines: Vec<Line> = Vec::new();
+
+    // SQL preview (truncated to 2 lines)
+    let sql_preview: String = entry.sql_preview.replace('\n', " ");
+    let max_sql_chars = (inner.width as usize * 2).min(160);
+    let truncated_sql: String = sql_preview.chars().take(max_sql_chars).collect();
+    let sql_style = if is_selected {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    lines.push(Line::from(Span::styled(truncated_sql, sql_style)));
+
+    // Error message or row count
+    if let Some(ref error) = entry.error {
+        let error_preview: String = error.chars().take(inner.width as usize - 2).collect();
+        lines.push(Line::from(Span::styled(error_preview, Style::default().fg(Color::Red))));
+    } else {
+        // Row count
+        let row_count = running_block.map(|b| b.result_count()).unwrap_or(entry.row_count as usize);
+        let row_str = format!("{} rows", row_count);
+        lines.push(Line::from(Span::styled(row_str, Style::default().fg(Color::DarkGray))));
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, inner);
+}
+
+/// Render the input card at the bottom
+fn render_input_card(f: &mut Frame, area: Rect, app: &App, is_focused: bool) {
+    let border_style = if is_focused {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::DarkGray)
     };
 
-    let block = Block::default().borders(Borders::ALL).title("History").border_style(border_style);
-
+    let title = if is_focused { "New Query (Enter to edit)" } else { "New Query" };
+    let block = Block::default().borders(Borders::ALL).title(title).border_style(border_style);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if app.session.history.is_empty() {
-        let empty = Paragraph::new("No queries yet").style(Style::default().fg(Color::DarkGray));
-        f.render_widget(empty, inner);
+    // Show placeholder or current input
+    let text = app.session.new_query.lines().join("\n");
+    if text.is_empty() {
+        let placeholder = Paragraph::new("Press 'n' or Enter to write a query...")
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(placeholder, inner);
+    } else {
+        let preview: String = text.chars().take(inner.width as usize * 2).collect();
+        let para = Paragraph::new(preview).style(Style::default().fg(Color::White));
+        f.render_widget(para, inner);
+    }
+}
+
+/// Render full-screen results view (when viewing a specific query)
+fn render_results_fullscreen(f: &mut Frame, area: Rect, app: &mut App) {
+    // Check if we're loading
+    if app.session.loading_entry_id.is_some() {
+        let loading = Paragraph::new("Loading...")
+            .style(Style::default().fg(Color::Yellow))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title("Query Results"));
+        f.render_widget(loading, area);
         return;
     }
 
-    let mut items: Vec<ListItem> = Vec::new();
-
-    // Unified history list
-    for (idx, entry) in app.session.history.iter().enumerate() {
-        let is_selected = app.session.selected_card == Some(idx);
-        let is_running = app.session.running_queries.contains_key(&idx);
-        let running_block = app.session.running_queries.get(&idx);
-
-        // Determine indicator
-        let indicator = if running_block.map(|b| b.cancel_requested).unwrap_or(false) {
-            "x"
-        } else if is_running {
-            "*"
-        } else if entry.error.is_some() {
-            "!"
-        } else if is_selected {
-            ">"
-        } else {
-            " "
-        };
-
-        // Truncate SQL preview
-        let sql_preview: String =
-            entry.sql_preview.chars().take(18).collect::<String>().replace('\n', " ");
-
-        // Format row count - use running block's count if available
-        let row_count = running_block.map(|b| b.result_count()).unwrap_or(entry.row_count as usize);
-
-        // Format timestamp
-        let age = format_relative_time(entry.timestamp);
-
-        let text = format!("{} {} ({} rows) {}", indicator, sql_preview, row_count, age);
-
-        let style = if is_selected {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-        } else if entry.error.is_some() {
-            Style::default().fg(Color::Red)
-        } else if is_running {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-
-        items.push(ListItem::new(text).style(style));
+    // Check for app-level error
+    if let Some(ref error) = app.session.app_error {
+        let error_block = Block::default()
+            .borders(Borders::ALL)
+            .title("Error")
+            .border_style(Style::default().fg(Color::Red));
+        let para = Paragraph::new(error.as_str())
+            .block(error_block)
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: false })
+            .scroll((0, 0));
+        f.render_widget(para, area);
+        return;
     }
 
-    let list = List::new(items);
-    f.render_widget(list, inner);
+    // Display current block
+    let hist_idx = app.session.selected_card.unwrap_or(0);
+    let focus = app.session.focus.clone();
+    let mode = app.session.mode;
+
+    if let Some(block) = app.session.displayed_block_mut() {
+        render_selected_query(f, area, block, hist_idx, &focus, mode);
+    } else {
+        let empty = Paragraph::new("No data. Press Esc to return to history.")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL).title("Query Results"));
+        f.render_widget(empty, area);
+    }
 }
 
 /// Format unix timestamp as relative time (e.g., "2m ago", "1h ago", "3d ago")
@@ -161,53 +317,6 @@ fn format_relative_time(timestamp: u64) -> String {
         format!("{}h", diff / 3600)
     } else {
         format!("{}d", diff / 86400)
-    }
-}
-
-fn render_main_content(f: &mut Frame, area: Rect, app: &mut App) {
-    // Full-screen editor when in HistoryView with input focused
-    if matches!(app.session.focus, Focus::HistoryView) && app.session.selected_card.is_none() {
-        render_new_query_fullscreen(f, area, app);
-        return;
-    }
-
-    // Check if we're loading
-    if app.session.loading_entry_id.is_some() {
-        let loading = Paragraph::new("Loading...")
-            .style(Style::default().fg(Color::Yellow))
-            .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL).title("Query Results"));
-        f.render_widget(loading, area);
-        return;
-    }
-
-    // Check for app-level error (archive loading, clipboard, etc.)
-    if let Some(ref error) = app.session.app_error {
-        let error_block = Block::default()
-            .borders(Borders::ALL)
-            .title("Error")
-            .border_style(Style::default().fg(Color::Red));
-        let para = Paragraph::new(error.as_str())
-            .block(error_block)
-            .style(Style::default().fg(Color::Red))
-            .wrap(Wrap { trim: false })
-            .scroll((0, 0));
-        f.render_widget(para, area);
-        return;
-    }
-
-    // Display current block (from running_queries or current_block)
-    let hist_idx = app.session.selected_card.unwrap_or(0);
-    let focus = app.session.focus.clone();
-    let mode = app.session.mode;
-
-    if let Some(block) = app.session.displayed_block_mut() {
-        render_selected_query(f, area, block, hist_idx, &focus, mode);
-    } else {
-        let empty = Paragraph::new("No queries yet. Press 'n' to write a new query.")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL).title("Query Results"));
-        f.render_widget(empty, area);
     }
 }
 
