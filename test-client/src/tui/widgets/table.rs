@@ -29,10 +29,6 @@ pub type ValuePath = Vec<PathSegment>;
 pub enum ResultsViewMode {
     #[default]
     Table,
-    FieldList {
-        row:           usize,
-        scroll_offset: usize,
-    },
     FieldValue {
         row:            usize,
         field:          usize,
@@ -376,6 +372,9 @@ pub struct SortableTable {
     pub value_scroll:   usize,
     pub visible_height: usize,
 
+    // Detail panel focus (for single-row view in Table mode)
+    pub detail_focused: bool,
+
     // Header focus for column sorting
     pub header_focused: bool,
     pub focused_col:    usize,
@@ -404,6 +403,7 @@ impl SortableTable {
             selected_field: 0,
             value_scroll: 0,
             visible_height: 20,
+            detail_focused: false,
             header_focused: false,
             focused_col: 0,
             visible_cols: 10,
@@ -601,14 +601,16 @@ impl SortableTable {
     /// Navigate down in current view mode
     pub fn nav_down(&mut self) {
         match &mut self.view_mode {
-            ResultsViewMode::Table => self.next_row(),
-            ResultsViewMode::FieldList { scroll_offset, .. } => {
-                if self.selected_field < self.columns.len().saturating_sub(1) {
-                    self.selected_field += 1;
-                    // Scroll if selection goes past visible area
-                    if self.selected_field >= *scroll_offset + self.visible_height {
-                        *scroll_offset += 1;
+            ResultsViewMode::Table => {
+                if self.detail_focused {
+                    // Navigate fields in detail panel
+                    if self.selected_field < self.columns.len().saturating_sub(1) {
+                        self.selected_field += 1;
+                        // Scroll down to follow field
+                        self.value_scroll = self.value_scroll.saturating_add(5);
                     }
+                } else {
+                    self.next_row();
                 }
             }
             ResultsViewMode::FieldValue { row, field, path, selected_index, scroll_offset } => {
@@ -638,13 +640,16 @@ impl SortableTable {
     /// Navigate up in current view mode
     pub fn nav_up(&mut self) {
         match &mut self.view_mode {
-            ResultsViewMode::Table => self.prev_row(),
-            ResultsViewMode::FieldList { scroll_offset, .. } => {
-                if self.selected_field > 0 {
-                    self.selected_field -= 1;
-                    if self.selected_field < *scroll_offset {
-                        *scroll_offset = self.selected_field;
+            ResultsViewMode::Table => {
+                if self.detail_focused {
+                    // Navigate fields in detail panel
+                    if self.selected_field > 0 {
+                        self.selected_field -= 1;
+                        // Scroll up to follow field
+                        self.value_scroll = self.value_scroll.saturating_sub(5);
                     }
+                } else {
+                    self.prev_row();
                 }
             }
             ResultsViewMode::FieldValue { row, field, path, selected_index, scroll_offset } => {
@@ -675,17 +680,9 @@ impl SortableTable {
             ResultsViewMode::Table => {
                 if self.selected_row > 0 {
                     self.selected_row -= 1;
-                    // Adjust scroll if needed
                     if self.selected_row < self.scroll_offset {
                         self.scroll_offset = self.selected_row;
                     }
-                }
-            }
-            ResultsViewMode::FieldList { row, scroll_offset } => {
-                if *row > 0 {
-                    *row -= 1;
-                    *scroll_offset = 0;
-                    self.selected_row = *row;
                 }
             }
             ResultsViewMode::FieldValue { row, scroll_offset, .. } => {
@@ -706,19 +703,11 @@ impl SortableTable {
             ResultsViewMode::Table => {
                 if self.selected_row < max_row {
                     self.selected_row += 1;
-                    // Adjust scroll if needed
                     let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
                     if self.selected_row > max_visible {
                         self.scroll_offset =
                             self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
                     }
-                }
-            }
-            ResultsViewMode::FieldList { row, scroll_offset } => {
-                if *row < max_row {
-                    *row += 1;
-                    *scroll_offset = 0;
-                    self.selected_row = *row;
                 }
             }
             ResultsViewMode::FieldValue { row, scroll_offset, .. } => {
@@ -734,7 +723,6 @@ impl SortableTable {
 
     /// Jump backward by `count` rows (works in all view modes)
     pub fn prev_detail_row_jump(&mut self, count: usize) {
-        let max_row = self.rows.len().saturating_sub(1);
         match &mut self.view_mode {
             ResultsViewMode::Table => {
                 self.selected_row = self.selected_row.saturating_sub(count);
@@ -742,12 +730,8 @@ impl SortableTable {
                     self.scroll_offset = self.selected_row;
                 }
             }
-            ResultsViewMode::FieldList { row, scroll_offset } => {
-                *row = row.saturating_sub(count).min(max_row);
-                *scroll_offset = 0;
-                self.selected_row = *row;
-            }
             ResultsViewMode::FieldValue { row, scroll_offset, .. } => {
+                let max_row = self.rows.len().saturating_sub(1);
                 *row = row.saturating_sub(count).min(max_row);
                 *scroll_offset = 0;
                 self.value_scroll = 0;
@@ -768,11 +752,6 @@ impl SortableTable {
                         self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
                 }
             }
-            ResultsViewMode::FieldList { row, scroll_offset } => {
-                *row = (*row + count).min(max_row);
-                *scroll_offset = 0;
-                self.selected_row = *row;
-            }
             ResultsViewMode::FieldValue { row, scroll_offset, .. } => {
                 *row = (*row + count).min(max_row);
                 *scroll_offset = 0;
@@ -786,38 +765,38 @@ impl SortableTable {
     pub fn expand(&mut self) -> bool {
         match &self.view_mode {
             ResultsViewMode::Table => {
-                if !self.rows.is_empty() {
-                    self.view_mode = ResultsViewMode::FieldList {
-                        row:           self.selected_row,
-                        scroll_offset: 0,
-                    };
+                if self.rows.is_empty() {
+                    return false;
+                }
+                if !self.detail_focused {
+                    // Focus the detail panel
+                    self.detail_focused = true;
                     self.selected_field = 0;
+                    self.value_scroll = 0;
                     true
                 } else {
-                    false
-                }
-            }
-            ResultsViewMode::FieldList { row, .. } => {
-                let row = *row;
-                // Don't expand empty collections
-                if let Some(cell) = self.get_cell_value(row, self.selected_field) {
-                    match cell {
-                        Value::Array(arr) if arr.is_empty() => return false,
-                        Value::Object(obj) if obj.is_empty() => return false,
-                        _ => {} // Allow: scalars, non-empty collections
+                    // Already focused on detail, drill into selected field
+                    let row = self.selected_row;
+                    // Don't expand empty collections
+                    if let Some(cell) = self.get_cell_value(row, self.selected_field) {
+                        match cell {
+                            Value::Array(arr) if arr.is_empty() => return false,
+                            Value::Object(obj) if obj.is_empty() => return false,
+                            _ => {} // Allow: scalars, non-empty collections
+                        }
                     }
+                    let field = self.selected_field;
+                    self.view_mode = ResultsViewMode::FieldValue {
+                        row,
+                        field,
+                        path: Vec::new(),
+                        selected_index: 0,
+                        scroll_offset: 0,
+                    };
+                    self.value_scroll = 0;
+                    self.maybe_start_stats_computation(field, Vec::new());
+                    true
                 }
-                let field = self.selected_field;
-                self.view_mode = ResultsViewMode::FieldValue {
-                    row,
-                    field,
-                    path: Vec::new(),
-                    selected_index: 0,
-                    scroll_offset: 0,
-                };
-                self.value_scroll = 0;
-                self.maybe_start_stats_computation(field, Vec::new());
-                true
             }
             ResultsViewMode::FieldValue { row, field, path, selected_index, .. } => {
                 // Try to drill into the selected item within a collection
@@ -897,21 +876,23 @@ impl SortableTable {
     pub fn collapse(&mut self) -> bool {
         match &self.view_mode {
             ResultsViewMode::Table => {
-                // At top level, signal to exit edit mode
-                false
-            }
-            ResultsViewMode::FieldList { row, .. } => {
-                let row = *row;
-                self.view_mode = ResultsViewMode::Table;
-                self.selected_row = row;
-                true
+                if self.detail_focused {
+                    // Unfocus detail panel
+                    self.detail_focused = false;
+                    true
+                } else {
+                    // At top level, signal to exit edit mode
+                    false
+                }
             }
             ResultsViewMode::FieldValue { row, field, path, .. } => {
                 let row = *row;
                 let field = *field;
                 if path.is_empty() {
-                    // At field level, go back to field list
-                    self.view_mode = ResultsViewMode::FieldList { row, scroll_offset: 0 };
+                    // At field level, go back to Table with detail focused
+                    self.view_mode = ResultsViewMode::Table;
+                    self.selected_row = row;
+                    self.detail_focused = true;
                     self.selected_field = field;
                 } else {
                     // Pop path segment to go up one level
@@ -934,34 +915,35 @@ impl SortableTable {
     pub fn get_clipboard_content(&self) -> String {
         match &self.view_mode {
             ResultsViewMode::Table => {
-                // All rows as JSON array of objects
-                let objects: Vec<Value> = self
-                    .rows
-                    .iter()
-                    .map(|row| {
+                if self.detail_focused {
+                    // Single row as JSON object
+                    if let Some(row_data) = self.rows.get(self.selected_row) {
                         let obj: serde_json::Map<String, Value> = self
                             .columns
                             .iter()
-                            .zip(row.iter())
+                            .zip(row_data.iter())
                             .map(|(col, val)| (col.clone(), val.clone()))
                             .collect();
-                        Value::Object(obj)
-                    })
-                    .collect();
-                serde_json::to_string_pretty(&objects).unwrap_or_default()
-            }
-            ResultsViewMode::FieldList { row, .. } => {
-                // Single row as JSON object
-                if let Some(row_data) = self.rows.get(*row) {
-                    let obj: serde_json::Map<String, Value> = self
-                        .columns
-                        .iter()
-                        .zip(row_data.iter())
-                        .map(|(col, val)| (col.clone(), val.clone()))
-                        .collect();
-                    serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_default()
+                        serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_default()
+                    } else {
+                        String::new()
+                    }
                 } else {
-                    String::new()
+                    // All rows as JSON array of objects
+                    let objects: Vec<Value> = self
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            let obj: serde_json::Map<String, Value> = self
+                                .columns
+                                .iter()
+                                .zip(row.iter())
+                                .map(|(col, val)| (col.clone(), val.clone()))
+                                .collect();
+                            Value::Object(obj)
+                        })
+                        .collect();
+                    serde_json::to_string_pretty(&objects).unwrap_or_default()
                 }
             }
             ResultsViewMode::FieldValue { row, field, path, .. } => {
@@ -1062,7 +1044,7 @@ impl SortableTable {
     /// Calculate how many columns fit and their widths, starting from col_offset.
     /// Returns (num_visible_cols, Vec<allocated_widths>)
     fn columns_for_width(&self, available_width: u16) -> (usize, Vec<u16>) {
-        let usable = available_width.saturating_sub(4) as usize; // borders
+        let usable = available_width.saturating_sub(2) as usize; // 2 for borders (left + right)
         let mut base_widths = Vec::new();
         let mut total_base = 0usize;
 
@@ -1072,7 +1054,9 @@ impl SortableTable {
             let content_width = self.col_widths.get(i).copied().unwrap_or(header_width);
             let col_width = content_width.max(header_width).min(50);
 
-            let needed = col_width + 1; // +1 for spacing
+            // column_spacing(1) adds spacing BETWEEN columns, not after each
+            let spacing = if base_widths.is_empty() { 0 } else { 1 };
+            let needed = col_width + spacing;
             if total_base + needed > usable && !base_widths.is_empty() {
                 break;
             }
@@ -1175,68 +1159,6 @@ impl SortableTable {
                     .border_style(border_style),
             )
             .column_spacing(1)
-    }
-
-    fn render_field_list(
-        &self,
-        title: &str,
-        row: usize,
-        scroll_offset: usize,
-        border_style: Style,
-        available_width: u16,
-    ) -> List<'_> {
-        let row_data = self.rows.get(row);
-
-        // Calculate max_len dynamically: width - borders(4) - indicator(2) - name column(~25) - ":
-        // "(2)
-        let value_max_len = (available_width.saturating_sub(35) as usize).max(20);
-
-        let items: Vec<ListItem> = self
-            .columns
-            .iter()
-            .enumerate()
-            .skip(scroll_offset)
-            .take(self.visible_height)
-            .map(|(i, col_name)| {
-                let value = row_data.and_then(|r| r.get(i));
-                let display =
-                    value.map(|v| format_cell_value(v, value_max_len)).unwrap_or_default();
-
-                let style = if i == self.selected_field {
-                    Style::default().bg(Color::DarkGray).fg(Color::White)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-
-                // Show expand indicator for expandable values
-                let expandable = value.is_some_and(is_expandable);
-                let expand_indicator = if expandable { "> " } else { "  " };
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(expand_indicator, Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("{}: ", col_name), Style::default().fg(Color::Yellow)),
-                    Span::styled(display, style),
-                ]))
-            })
-            .collect();
-
-        let scroll_info = if self.columns.len() > self.visible_height {
-            format!(
-                " (fields {}-{}/{})",
-                scroll_offset + 1,
-                (scroll_offset + self.visible_height).min(self.columns.len()),
-                self.columns.len()
-            )
-        } else {
-            format!(" ({} fields)", self.columns.len())
-        };
-
-        List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("{} - Row {}{}", title, row + 1, scroll_info))
-                .border_style(border_style),
-        )
     }
 
     /// Render a nested value view (collection or scalar)
@@ -1464,9 +1386,6 @@ impl SortableTable {
             ResultsViewMode::Table => {
                 ResultsWidget::Table(self.render_widget(title, available_width, border_style))
             }
-            ResultsViewMode::FieldList { row, scroll_offset } => ResultsWidget::List(
-                self.render_field_list(title, *row, *scroll_offset, border_style, available_width),
-            ),
             ResultsViewMode::FieldValue { row, field, path, selected_index, scroll_offset } => self
                 .render_nested_value(
                     title,
@@ -1481,7 +1400,7 @@ impl SortableTable {
         }
     }
 
-    /// Render only the detail view (FieldList or FieldValue). For split view.
+    /// Render the detail view for split view (Table mode detail panel or FieldValue).
     pub fn render_detail<'a>(
         &'a self,
         title: &'a str,
@@ -1489,9 +1408,6 @@ impl SortableTable {
         border_style: Style,
     ) -> ResultsWidget<'a> {
         match &self.view_mode {
-            ResultsViewMode::FieldList { row, scroll_offset } => ResultsWidget::List(
-                self.render_field_list(title, *row, *scroll_offset, border_style, available_width),
-            ),
             ResultsViewMode::FieldValue { row, field, path, selected_index, scroll_offset } => self
                 .render_nested_value(
                     title,
@@ -1504,20 +1420,65 @@ impl SortableTable {
                     available_width,
                 ),
             ResultsViewMode::Table => {
-                // Shouldn't be called in Table mode, but return empty list as fallback
-                ResultsWidget::List(List::new::<Vec<ListItem>>(vec![]))
+                // Show selected row detail
+                ResultsWidget::Value(self.render_selected_row_detail(
+                    title,
+                    available_width,
+                    border_style,
+                ))
             }
         }
     }
 
-    /// Render field list for the currently selected row (used in Table mode split view)
+    /// Render full detail view for the currently selected row (used in Table mode split view)
+    /// Shows every column's complete value with line wrapping instead of truncation.
     pub fn render_selected_row_detail<'a>(
         &'a self,
         title: &'a str,
-        available_width: u16,
+        _available_width: u16,
         border_style: Style,
-    ) -> List<'a> {
-        self.render_field_list(title, self.selected_row, 0, border_style, available_width)
+    ) -> Paragraph<'a> {
+        let row_data = self.rows.get(self.selected_row);
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        for (i, col_name) in self.columns.iter().enumerate() {
+            let value = row_data.and_then(|r| r.get(i));
+
+            // Highlight selected field name when detail is focused
+            let name_style = if self.detail_focused && i == self.selected_field {
+                Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+
+            // Field name line
+            lines.push(Line::from(Span::styled(format!("{}:", col_name), name_style)));
+
+            // Full value - all values pretty-printed as JSON
+            let display = match value {
+                Some(v) => serde_json::to_string_pretty(v).unwrap_or_else(|_| format!("{:?}", v)),
+                None => String::new(),
+            };
+
+            // Add value lines (indented)
+            for line in display.lines() {
+                lines.push(Line::from(format!("  {}", line)));
+            }
+
+            // Empty line between fields
+            lines.push(Line::from(""));
+        }
+
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("{} - Row {}", title, self.selected_row + 1))
+                    .border_style(border_style),
+            )
+            .wrap(Wrap { trim: false })
+            .scroll((self.value_scroll as u16, 0))
     }
 }
 

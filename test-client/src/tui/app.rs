@@ -298,11 +298,21 @@ impl App {
     }
 
     async fn handle_edit_key(&mut self, key: KeyEvent) -> Result<()> {
-        // Escape exits edit mode
+        // Escape handling
         if key.code == KeyCode::Esc {
-            self.session.mode = Mode::Navigation;
-            // If escaping from new query, return to previous focus or fallback
+            // In NewQuery: first Escape clears text, second exits
             if matches!(self.session.focus, Focus::NewQuery) {
+                let text = self.session.new_query.lines().join("\n");
+                if !text.trim().is_empty() {
+                    // Clear the editor instead of exiting
+                    self.session.new_query = tui_textarea::TextArea::default();
+                    self.session
+                        .new_query
+                        .set_placeholder_text("Enter SQL query... (Ctrl+Enter to execute)");
+                    return Ok(());
+                }
+                // Empty editor - exit to previous focus
+                self.session.mode = Mode::Navigation;
                 if let Some(prev) = self.session.previous_focus.take() {
                     self.session.focus = prev;
                 } else if self.session.displayed_block().is_some() {
@@ -310,7 +320,10 @@ impl App {
                 } else {
                     self.session.focus = Focus::Sidebar;
                 }
+                return Ok(());
             }
+            // Other focuses: just exit edit mode
+            self.session.mode = Mode::Navigation;
             return Ok(());
         }
 
@@ -415,7 +428,82 @@ impl App {
         let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let is_alt = key.modifiers.contains(KeyModifiers::ALT);
 
+        // Search mode (Ctrl+R) handling
+        if self.history.is_searching() {
+            match key.code {
+                KeyCode::Esc => {
+                    let draft = self.history.cancel_search().to_string();
+                    self.set_new_query_text(&draft);
+                    return Ok(());
+                }
+                KeyCode::Enter if is_ctrl || is_alt => {
+                    // Ctrl+Enter: accept and execute immediately (fall through)
+                    self.history.end_search();
+                }
+                KeyCode::Enter => {
+                    // Plain Enter: accept current match, exit search, don't execute
+                    self.history.end_search();
+                    return Ok(());
+                }
+                KeyCode::Char('p') if is_ctrl => {
+                    if let Some(query) = self.history.search_prev() {
+                        let query = query.to_string();
+                        self.set_new_query_text(&query);
+                    }
+                    return Ok(());
+                }
+                KeyCode::Char('n') if is_ctrl => {
+                    if let Some(query) = self.history.search_next() {
+                        let query = query.to_string();
+                        self.set_new_query_text(&query);
+                    }
+                    return Ok(());
+                }
+                KeyCode::Char('r') if is_ctrl => {
+                    // Ctrl+R again navigates to next match (like bash)
+                    if let Some(query) = self.history.search_prev() {
+                        let query = query.to_string();
+                        self.set_new_query_text(&query);
+                    }
+                    return Ok(());
+                }
+                KeyCode::Backspace => {
+                    let mut pattern = self.history.search_pattern().to_string();
+                    pattern.pop();
+                    self.history.update_search(&pattern);
+                    if let Some(query) = self.history.current_search_result() {
+                        let query = query.to_string();
+                        self.set_new_query_text(&query);
+                    }
+                    return Ok(());
+                }
+                KeyCode::Char(c) if !is_ctrl && !is_alt => {
+                    let mut pattern = self.history.search_pattern().to_string();
+                    pattern.push(c);
+                    self.history.update_search(&pattern);
+                    if let Some(query) = self.history.current_search_result() {
+                        let query = query.to_string();
+                        self.set_new_query_text(&query);
+                    }
+                    return Ok(());
+                }
+                _ => {
+                    return Ok(());
+                }
+            }
+            // Only Ctrl+Enter reaches here - falls through to execute below
+        }
+
         match (key.code, is_ctrl, is_alt) {
+            // Start history search
+            (KeyCode::Char('r'), true, _) => {
+                let current = self.session.new_query.lines().join("\n");
+                self.history.start_search(&current);
+                if let Some(query) = self.history.current_search_result() {
+                    let query = query.to_string();
+                    self.set_new_query_text(&query);
+                }
+            }
             // Execute query
             (KeyCode::Enter, true, _) | (KeyCode::Enter, _, true) => {
                 let sql = self.session.new_query.lines().join("\n");

@@ -430,26 +430,18 @@ fn render_results_pane(
                         .constraints([Constraint::Percentage(67), Constraint::Percentage(33)])
                         .split(area);
 
-                    let table_widget = table.render(&title, chunks[0].width, style);
+                    // Style depends on which panel is focused
+                    let (table_style, detail_style) = if table.detail_focused {
+                        (dimmed_style, style)
+                    } else {
+                        (style, dimmed_style)
+                    };
+
+                    let table_widget = table.render(&title, chunks[0].width, table_style);
                     f.render_widget(table_widget, chunks[0]);
 
                     let detail_widget =
-                        table.render_selected_row_detail(&title, chunks[1].width, dimmed_style);
-                    f.render_widget(detail_widget, chunks[1]);
-                }
-                ResultsViewMode::FieldList { .. } => {
-                    // Split view: table left (67%), detail right (33%)
-                    let chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Percentage(67), Constraint::Percentage(33)])
-                        .split(area);
-
-                    // Left: table view (dimmed)
-                    let table_widget = table.render_widget(&title, chunks[0].width, dimmed_style);
-                    f.render_widget(table_widget, chunks[0]);
-
-                    // Right: detail view (focused)
-                    let detail_widget = table.render_detail(&title, chunks[1].width, style);
+                        table.render_selected_row_detail(&title, chunks[1].width, detail_style);
                     f.render_widget(detail_widget, chunks[1]);
                 }
                 ResultsViewMode::FieldValue { field, path, .. } => {
@@ -1374,10 +1366,18 @@ fn render_log_entry_detail(
 fn render_new_query_fullscreen(f: &mut Frame, area: Rect, app: &App) {
     let style = Style::default().fg(Color::Cyan);
 
-    let title = if app.session.mode == Mode::Edit {
-        "New Query [EDIT] (Ctrl+Enter: run, Ctrl+L: format, Ctrl+P/N: history)"
+    let title: String = if app.history.is_searching() {
+        let pattern = app.history.search_pattern();
+        let pos = app.history.search_match_position();
+        let count = app.history.search_match_count();
+        format!(
+            "Search: '{}' ({}/{}) - Ctrl+P/N: navigate, Enter: accept, Esc: cancel",
+            pattern, pos, count
+        )
+    } else if app.session.mode == Mode::Edit {
+        "New Query [EDIT] (Ctrl+Enter: run, Ctrl+R: search, Ctrl+P/N: history)".to_string()
     } else {
-        "New Query (press Enter to edit, Escape to cancel)"
+        "New Query (press Enter to edit, Escape to cancel)".to_string()
     };
 
     let block = Block::default().borders(Borders::ALL).title(title).border_style(style);

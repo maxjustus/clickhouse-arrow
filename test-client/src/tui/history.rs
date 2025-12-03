@@ -16,22 +16,35 @@ pub struct HistoryEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct History {
-    entries:   Vec<HistoryEntry>,
+    entries:        Vec<HistoryEntry>,
     #[serde(skip)]
-    path:      PathBuf,
+    path:           PathBuf,
     #[serde(skip)]
-    nav_index: Option<usize>, // None = not navigating, Some(i) = at history[i]
+    nav_index:      Option<usize>, // None = not navigating, Some(i) = at history[i]
     #[serde(skip)]
-    draft:     String, // Saves current input when starting navigation
+    draft:          String, // Saves current input when starting navigation
+    // Search mode (Ctrl+R)
+    #[serde(skip)]
+    search_active:  bool,
+    #[serde(skip)]
+    search_pattern: String,
+    #[serde(skip)]
+    search_matches: Vec<usize>, // indices into entries (newest first)
+    #[serde(skip)]
+    search_index:   usize, // index into search_matches
 }
 
 impl Default for History {
     fn default() -> Self {
         Self {
-            entries:   Vec::new(),
-            path:      Self::history_path().unwrap_or_default(),
-            nav_index: None,
-            draft:     String::new(),
+            entries:        Vec::new(),
+            path:           Self::history_path().unwrap_or_default(),
+            nav_index:      None,
+            draft:          String::new(),
+            search_active:  false,
+            search_pattern: String::new(),
+            search_matches: Vec::new(),
+            search_index:   0,
         }
     }
 }
@@ -46,9 +59,13 @@ impl History {
             history.path = path;
             history.nav_index = None;
             history.draft = String::new();
+            history.search_active = false;
+            history.search_pattern = String::new();
+            history.search_matches = Vec::new();
+            history.search_index = 0;
             Ok(history)
         } else {
-            Ok(Self { entries: Vec::new(), path, nav_index: None, draft: String::new() })
+            Ok(Self::default())
         }
     }
 
@@ -120,6 +137,80 @@ impl History {
     pub fn reset_nav(&mut self) {
         self.nav_index = None;
         self.draft.clear();
+    }
+
+    // --- Search mode (Ctrl+R) ---
+
+    pub fn start_search(&mut self, current: &str) {
+        self.draft = current.to_string();
+        self.search_active = true;
+        self.search_pattern.clear();
+        // All entries match empty pattern, newest first
+        self.search_matches = (0..self.entries.len()).rev().collect();
+        self.search_index = 0;
+    }
+
+    pub fn update_search(&mut self, pattern: &str) {
+        self.search_pattern = pattern.to_string();
+        let lower = pattern.to_lowercase();
+        self.search_matches = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.query.to_lowercase().contains(&lower))
+            .map(|(i, _)| i)
+            .rev() // newest first
+            .collect();
+        self.search_index = 0;
+    }
+
+    pub fn search_prev(&mut self) -> Option<&str> {
+        if self.search_matches.is_empty() {
+            return None;
+        }
+        if self.search_index + 1 < self.search_matches.len() {
+            self.search_index += 1;
+        }
+        self.current_search_result()
+    }
+
+    pub fn search_next(&mut self) -> Option<&str> {
+        if self.search_matches.is_empty() {
+            return None;
+        }
+        if self.search_index > 0 {
+            self.search_index -= 1;
+        }
+        self.current_search_result()
+    }
+
+    pub fn current_search_result(&self) -> Option<&str> {
+        self.search_matches
+            .get(self.search_index)
+            .and_then(|&i| self.entries.get(i))
+            .map(|e| e.query.as_str())
+    }
+
+    pub fn cancel_search(&mut self) -> &str {
+        self.end_search();
+        &self.draft
+    }
+
+    pub fn end_search(&mut self) {
+        self.search_active = false;
+        self.search_pattern.clear();
+        self.search_matches.clear();
+        self.search_index = 0;
+    }
+
+    pub fn is_searching(&self) -> bool { self.search_active }
+
+    pub fn search_pattern(&self) -> &str { &self.search_pattern }
+
+    pub fn search_match_count(&self) -> usize { self.search_matches.len() }
+
+    pub fn search_match_position(&self) -> usize {
+        if self.search_matches.is_empty() { 0 } else { self.search_index + 1 }
     }
 
     fn history_path() -> Result<PathBuf> {
