@@ -109,7 +109,8 @@ impl App {
                     Event::Paste(text) => {
                         // Always paste into new query editor
                         self.session.new_query.insert_str(&text);
-                        self.session.focus = Focus::NewQuery;
+                        self.session.focus = Focus::HistoryView;
+                        self.session.selected_card = None; // Focus input
                         self.session.mode = Mode::Edit;
                     }
                     _ => {}
@@ -126,11 +127,12 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
-        // 'n' or 'i' jumps to new query from anywhere - except when already editing NewQuery
+        // 'n' or 'i' jumps to new query input from anywhere - except when already editing input
         // Shift+N or Shift+I pre-populates with current query's SQL
-        let in_new_query_edit =
-            matches!(self.session.focus, Focus::NewQuery) && self.session.mode == Mode::Edit;
-        if !in_new_query_edit
+        let in_input_edit = matches!(self.session.focus, Focus::HistoryView)
+            && self.session.selected_card.is_none()
+            && self.session.mode == Mode::Edit;
+        if !in_input_edit
             && !key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(
                 key.code,
@@ -146,11 +148,9 @@ impl App {
                 }
             }
 
-            // Store current focus for return (unless already in NewQuery)
-            if !matches!(self.session.focus, Focus::NewQuery) {
-                self.session.previous_focus = Some(self.session.focus.clone());
-            }
-            self.session.focus = Focus::NewQuery;
+            // Go to history view with input focused
+            self.session.focus = Focus::HistoryView;
+            self.session.selected_card = None;
             self.session.mode = Mode::Edit;
             return Ok(());
         }
@@ -180,37 +180,39 @@ impl App {
                 self.show_help = true;
                 return Ok(());
             }
-            // Ctrl+P: Previous query in history (global, except in NewQuery edit)
+            // Ctrl+P: Previous query card (global, except in input edit)
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if !(self.session.mode == Mode::Edit
-                    && matches!(self.session.focus, Focus::NewQuery))
-                {
+                let in_input_edit = self.session.mode == Mode::Edit
+                    && matches!(self.session.focus, Focus::HistoryView)
+                    && self.session.selected_card.is_none();
+                if !in_input_edit {
                     self.save_current_view_state();
-                    if self.session.sidebar_prev() {
+                    if self.session.card_prev() {
                         self.load_selected_entry().await;
                     }
                     return Ok(());
                 }
-                // Fall through to mode handler for NewQuery edit
+                // Fall through to mode handler for input edit
             }
-            // Ctrl+N: Next query in history (global, except in NewQuery edit)
+            // Ctrl+N: Next query card (global, except in input edit)
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if !(self.session.mode == Mode::Edit
-                    && matches!(self.session.focus, Focus::NewQuery))
-                {
+                let in_input_edit = self.session.mode == Mode::Edit
+                    && matches!(self.session.focus, Focus::HistoryView)
+                    && self.session.selected_card.is_none();
+                if !in_input_edit {
                     self.save_current_view_state();
-                    if self.session.sidebar_next() {
+                    if self.session.card_next() {
                         self.load_selected_entry().await;
                     }
                     return Ok(());
                 }
-                // Fall through to mode handler for NewQuery edit
+                // Fall through to mode handler for input edit
             }
             // Alt+1 through Alt+9: Jump directly to history entry
             KeyCode::Char(c @ '1'..='9') if key.modifiers.contains(KeyModifiers::ALT) => {
                 let index = (c as usize) - ('1' as usize);
                 self.save_current_view_state();
-                if self.session.select_history_by_index(index) {
+                if self.session.select_card_by_index(index) {
                     self.load_selected_entry().await;
                 }
                 return Ok(());
@@ -226,25 +228,36 @@ impl App {
 
     async fn handle_navigation_key(&mut self, key: KeyEvent) -> Result<()> {
         match &self.session.focus {
-            Focus::Sidebar => {
+            Focus::HistoryView => {
                 match key.code {
                     KeyCode::Down | KeyCode::Char('j') => {
+                        // Navigate to next card (or from input to first card)
                         self.save_current_view_state();
-                        if self.session.sidebar_next() {
+                        if self.session.card_next() {
                             self.load_selected_entry().await;
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
+                        // Navigate to previous card
                         self.save_current_view_state();
-                        if self.session.sidebar_prev() {
+                        if self.session.card_prev() {
                             self.load_selected_entry().await;
                         }
                     }
                     KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
-                        // Enter results pane if we have data
-                        if self.session.displayed_block().is_some() {
+                        // If on a card, enter full results view
+                        if self.session.selected_card.is_some()
+                            && self.session.displayed_block().is_some()
+                        {
                             self.session.focus = Focus::SubPane(SubPane::Results);
+                        } else {
+                            // On input, enter edit mode
+                            self.session.mode = Mode::Edit;
                         }
+                    }
+                    KeyCode::Char('i') => {
+                        // Enter edit mode (for input or for viewing card details)
+                        self.session.mode = Mode::Edit;
                     }
                     KeyCode::Char('c') | KeyCode::Char('C') => {
                         self.cancel_selected_query().await;
@@ -264,31 +277,12 @@ impl App {
                         // Enter edit mode for any pane
                         self.session.mode = Mode::Edit;
                     }
-                    KeyCode::Left | KeyCode::Char('h') => {
-                        // Go back to sidebar
-                        self.session.focus = Focus::Sidebar;
+                    KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
+                        // Go back to history view
+                        self.session.focus = Focus::HistoryView;
                     }
                     KeyCode::Char('c') | KeyCode::Char('C') => {
                         self.cancel_selected_query().await;
-                    }
-                    _ => {}
-                }
-            }
-            Focus::NewQuery => {
-                match key.code {
-                    KeyCode::Left | KeyCode::Char('h') => {
-                        self.session.focus = Focus::Sidebar;
-                    }
-                    KeyCode::Enter | KeyCode::Char('i') => {
-                        self.session.mode = Mode::Edit;
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        // From new query, go to sidebar
-                        self.session.focus = Focus::Sidebar;
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        // From new query, go to sidebar
-                        self.session.focus = Focus::Sidebar;
                     }
                     _ => {}
                 }
@@ -300,8 +294,10 @@ impl App {
     async fn handle_edit_key(&mut self, key: KeyEvent) -> Result<()> {
         // Escape handling
         if key.code == KeyCode::Esc {
-            // In NewQuery: first Escape clears text, second exits
-            if matches!(self.session.focus, Focus::NewQuery) {
+            // In input area (HistoryView with no card selected)
+            if matches!(self.session.focus, Focus::HistoryView)
+                && self.session.selected_card.is_none()
+            {
                 let text = self.session.new_query.lines().join("\n");
                 if !text.trim().is_empty() {
                     // Clear the editor instead of exiting
@@ -311,15 +307,8 @@ impl App {
                         .set_placeholder_text("Enter SQL query... (Ctrl+Enter to execute)");
                     return Ok(());
                 }
-                // Empty editor - exit to previous focus
+                // Empty editor - just exit edit mode, stay in history view
                 self.session.mode = Mode::Navigation;
-                if let Some(prev) = self.session.previous_focus.take() {
-                    self.session.focus = prev;
-                } else if self.session.displayed_block().is_some() {
-                    self.session.focus = Focus::SubPane(SubPane::Results);
-                } else {
-                    self.session.focus = Focus::Sidebar;
-                }
                 return Ok(());
             }
             // Other focuses: just exit edit mode
@@ -361,10 +350,10 @@ impl App {
                                     _ => {}
                                 }
                             } else {
-                                self.session.sidebar_prev();
+                                self.session.card_prev();
                             }
                         } else {
-                            self.session.sidebar_prev();
+                            self.session.card_prev();
                         }
                         return Ok(());
                     }
@@ -396,10 +385,10 @@ impl App {
                                     _ => {}
                                 }
                             } else {
-                                self.session.sidebar_next();
+                                self.session.card_next();
                             }
                         } else {
-                            self.session.sidebar_next();
+                            self.session.card_next();
                         }
                         return Ok(());
                     }
@@ -409,12 +398,14 @@ impl App {
         }
 
         match &self.session.focus {
-            Focus::NewQuery => {
-                self.handle_new_query_key(key).await?;
-            }
-            Focus::Sidebar => {
-                // Sidebar doesn't have edit mode
-                self.session.mode = Mode::Navigation;
+            Focus::HistoryView => {
+                // In history view: if on input, handle keys; if on a card, enter navigation
+                if self.session.selected_card.is_none() {
+                    self.handle_new_query_key(key).await?;
+                } else {
+                    // On a card - edit mode not meaningful, go to navigation
+                    self.session.mode = Mode::Navigation;
+                }
             }
             Focus::SubPane(pane) => {
                 let pane = *pane;
@@ -543,7 +534,7 @@ impl App {
                 self.session.running_queries.insert(0, block);
 
                 // Select this new entry and show it
-                self.session.selected_history = Some(0);
+                self.session.selected_card = Some(0);
                 self.session.focus = Focus::SubPane(SubPane::Results);
                 self.session.mode = Mode::Navigation;
 
@@ -615,7 +606,7 @@ impl App {
 
     async fn cancel_selected_query(&mut self) {
         // Cancel currently selected entry if it's running
-        if let Some(hist_idx) = self.session.selected_history
+        if let Some(hist_idx) = self.session.selected_card
             && let Some(block) = self.session.running_queries.get_mut(&hist_idx)
             && block.running
             && !block.cancel_requested
@@ -920,7 +911,7 @@ impl App {
 
     /// Save current query's view state to cache before switching
     fn save_current_view_state(&mut self) {
-        if let Some(idx) = self.session.selected_history
+        if let Some(idx) = self.session.selected_card
             && let Some(entry) = self.session.history.get(idx)
             && let Some(block) = self.session.displayed_block()
         {
@@ -931,7 +922,7 @@ impl App {
 
     /// Load selected history entry's data (async)
     async fn load_selected_entry(&mut self) {
-        let Some(hist_idx) = self.session.selected_history else {
+        let Some(hist_idx) = self.session.selected_card else {
             return;
         };
 

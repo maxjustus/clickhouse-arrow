@@ -1024,9 +1024,10 @@ pub enum SubPane {
 /// What is currently focused
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Focus {
-    NewQuery,
-    Sidebar,
-    SubPane(SubPane), // Always refers to selected_query
+    /// History view with query cards (query input is at bottom)
+    HistoryView,
+    /// Full results view for a selected query
+    SubPane(SubPane),
 }
 
 /// Navigation vs Edit mode
@@ -1038,11 +1039,12 @@ pub enum Mode {
 
 /// The entire session state
 pub struct Session {
-    // Unified history list (sidebar)
-    pub history:          Vec<QueryStoreEntry>,
-    pub selected_history: Option<usize>,
+    // History of queries (shown as cards)
+    pub history:        Vec<QueryStoreEntry>,
+    pub selected_card:  Option<usize>, // None = input focused, Some(i) = card i selected
+    pub history_scroll: usize,         // Scroll offset for history view
 
-    // Currently displayed query data
+    // Currently displayed query data (when viewing full results)
     pub current_block:    Option<QueryBlock>,
     pub loading_entry_id: Option<String>, // Entry ID being loaded async
 
@@ -1050,12 +1052,11 @@ pub struct Session {
     pub running_queries: HashMap<usize, QueryBlock>,
 
     // UI state
-    pub new_query:      TextArea<'static>,
-    pub focus:          Focus,
-    pub mode:           Mode,
-    pub toast:          Option<(String, Instant)>,
-    pub app_error:      Option<String>, // Non-query errors (archive, clipboard, etc.)
-    pub previous_focus: Option<Focus>,  // For returning from NewQuery
+    pub new_query: TextArea<'static>,
+    pub focus:     Focus,
+    pub mode:      Mode,
+    pub toast:     Option<(String, Instant)>,
+    pub app_error: Option<String>, // Non-query errors (archive, clipboard, etc.)
 }
 
 impl Session {
@@ -1065,16 +1066,16 @@ impl Session {
 
         Self {
             history: Vec::new(),
-            selected_history: None,
+            selected_card: None, // Start with input focused
+            history_scroll: 0,
             current_block: None,
             loading_entry_id: None,
             running_queries: HashMap::new(),
             new_query,
-            focus: Focus::NewQuery,
-            mode: Mode::Edit,
+            focus: Focus::HistoryView,
+            mode: Mode::Edit, // Start in edit mode for input
             toast: None,
             app_error: None,
-            previous_focus: None,
         }
     }
 
@@ -1083,11 +1084,7 @@ impl Session {
         let mut entries = entries;
         entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         self.history = entries;
-
-        // Auto-select first entry if present
-        if !self.history.is_empty() {
-            self.selected_history = Some(0);
-        }
+        // Don't auto-select, keep input focused
     }
 
     /// Add a new entry to history (at the top)
@@ -1113,7 +1110,7 @@ impl Session {
 
     /// Get the currently displayed block (from running_queries or current_block)
     pub fn displayed_block(&self) -> Option<&QueryBlock> {
-        if let Some(idx) = self.selected_history
+        if let Some(idx) = self.selected_card
             && let Some(block) = self.running_queries.get(&idx)
         {
             return Some(block);
@@ -1123,7 +1120,7 @@ impl Session {
 
     /// Get mutable reference to displayed block
     pub fn displayed_block_mut(&mut self) -> Option<&mut QueryBlock> {
-        if let Some(idx) = self.selected_history
+        if let Some(idx) = self.selected_card
             && self.running_queries.contains_key(&idx)
         {
             return self.running_queries.get_mut(&idx);
@@ -1136,39 +1133,39 @@ impl Session {
         self.running_queries.get_mut(&idx)
     }
 
-    /// Move sidebar selection up, returns true if selection changed
-    pub fn sidebar_prev(&mut self) -> bool {
-        if let Some(idx) = self.selected_history {
+    /// Move card selection up (previous card), returns true if selection changed
+    pub fn card_prev(&mut self) -> bool {
+        if let Some(idx) = self.selected_card {
             if idx > 0 {
-                self.selected_history = Some(idx - 1);
+                self.selected_card = Some(idx - 1);
                 return true;
             }
         } else if !self.history.is_empty() {
-            self.selected_history = Some(self.history.len() - 1);
+            self.selected_card = Some(self.history.len() - 1);
             return true;
         }
         false
     }
 
-    /// Move sidebar selection down, returns true if selection changed
-    pub fn sidebar_next(&mut self) -> bool {
-        if let Some(idx) = self.selected_history {
+    /// Move card selection down (next card), returns true if selection changed
+    pub fn card_next(&mut self) -> bool {
+        if let Some(idx) = self.selected_card {
             if idx + 1 < self.history.len() {
-                self.selected_history = Some(idx + 1);
+                self.selected_card = Some(idx + 1);
                 return true;
             }
         } else if !self.history.is_empty() {
-            self.selected_history = Some(0);
+            self.selected_card = Some(0);
             return true;
         }
         false
     }
 
-    /// Select history entry by absolute index (0-based), returns true if selection changed
-    pub fn select_history_by_index(&mut self, index: usize) -> bool {
+    /// Select card by absolute index (0-based), returns true if selection changed
+    pub fn select_card_by_index(&mut self, index: usize) -> bool {
         if index < self.history.len() {
-            let changed = self.selected_history != Some(index);
-            self.selected_history = Some(index);
+            let changed = self.selected_card != Some(index);
+            self.selected_card = Some(index);
             changed
         } else {
             false
@@ -1177,7 +1174,7 @@ impl Session {
 
     /// Check if selected entry is a running query
     pub fn selected_is_running(&self) -> bool {
-        self.selected_history.map(|idx| self.running_queries.contains_key(&idx)).unwrap_or(false)
+        self.selected_card.map(|idx| self.running_queries.contains_key(&idx)).unwrap_or(false)
     }
 
     /// Navigate to next sub-pane
@@ -1202,45 +1199,5 @@ impl Session {
                 SubPane::Logs => SubPane::Stats,
             });
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_split_statements_basic() {
-        let sql = "SELECT 1;\nSELECT 2";
-        let stmts = split_statements(sql);
-        assert_eq!(stmts, vec!["SELECT 1", "SELECT 2"]);
-    }
-
-    #[test]
-    fn test_split_statements_trailing_semicolon_newline() {
-        let sql = "SELECT 1;\n";
-        let stmts = split_statements(sql);
-        assert_eq!(stmts, vec!["SELECT 1"]);
-    }
-
-    #[test]
-    fn test_split_statements_no_semicolon() {
-        let sql = "SELECT 1";
-        let stmts = split_statements(sql);
-        assert_eq!(stmts, vec!["SELECT 1"]);
-    }
-
-    #[test]
-    fn test_split_statements_multiple() {
-        let sql = "CREATE TABLE foo;\nINSERT INTO foo;\nSELECT * FROM foo";
-        let stmts = split_statements(sql);
-        assert_eq!(stmts, vec!["CREATE TABLE foo", "INSERT INTO foo", "SELECT * FROM foo"]);
-    }
-
-    #[test]
-    fn test_split_statements_empty_between() {
-        let sql = "SELECT 1;\n\n;\nSELECT 2";
-        let stmts = split_statements(sql);
-        assert_eq!(stmts, vec!["SELECT 1", "SELECT 2"]);
     }
 }

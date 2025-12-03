@@ -72,7 +72,8 @@ fn render_session(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
-    let sidebar_focused = matches!(app.session.focus, Focus::Sidebar);
+    let sidebar_focused =
+        matches!(app.session.focus, Focus::HistoryView) && app.session.selected_card.is_some();
     let border_style = if sidebar_focused {
         Style::default().fg(Color::Yellow)
     } else {
@@ -94,7 +95,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
 
     // Unified history list
     for (idx, entry) in app.session.history.iter().enumerate() {
-        let is_selected = app.session.selected_history == Some(idx);
+        let is_selected = app.session.selected_card == Some(idx);
         let is_running = app.session.running_queries.contains_key(&idx);
         let running_block = app.session.running_queries.get(&idx);
 
@@ -164,8 +165,8 @@ fn format_relative_time(timestamp: u64) -> String {
 }
 
 fn render_main_content(f: &mut Frame, area: Rect, app: &mut App) {
-    // Full-screen editor when Focus::NewQuery
-    if matches!(app.session.focus, Focus::NewQuery) {
+    // Full-screen editor when in HistoryView with input focused
+    if matches!(app.session.focus, Focus::HistoryView) && app.session.selected_card.is_none() {
         render_new_query_fullscreen(f, area, app);
         return;
     }
@@ -196,7 +197,7 @@ fn render_main_content(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     // Display current block (from running_queries or current_block)
-    let hist_idx = app.session.selected_history.unwrap_or(0);
+    let hist_idx = app.session.selected_card.unwrap_or(0);
     let focus = app.session.focus.clone();
     let mode = app.session.mode;
 
@@ -1406,8 +1407,13 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let focus_str = match &app.session.focus {
-        Focus::NewQuery => "New Query".to_string(),
-        Focus::Sidebar => "Sidebar".to_string(),
+        Focus::HistoryView => {
+            if app.session.selected_card.is_none() {
+                "New Query".to_string()
+            } else {
+                "History".to_string()
+            }
+        }
         Focus::SubPane(pane) => {
             let pane_name = match pane {
                 SubPane::Sql => "SQL",
@@ -1417,7 +1423,7 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
             };
             let query_str = app
                 .session
-                .selected_history
+                .selected_card
                 .map(|id| format!("Q{}", id + 1))
                 .unwrap_or_else(|| "?".to_string());
             format!("{} > {}", query_str, pane_name)
@@ -1429,33 +1435,34 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
         if query_count > 0 { format!(" ({} queries)", query_count) } else { String::new() };
 
     // Context-sensitive hints
-    let hints = if matches!(app.session.focus, Focus::NewQuery) {
-        "Ctrl+Enter: run | Esc: cancel | Ctrl+P/N: history | ?: help".to_string()
-    } else {
-        let mut parts = vec!["j/k: navigate", "l: enter", "h: back", "n: new query"];
+    let hints =
+        if matches!(app.session.focus, Focus::HistoryView) && app.session.selected_card.is_none() {
+            "Ctrl+Enter: run | Esc: cancel | Ctrl+P/N: history | ?: help".to_string()
+        } else {
+            let mut parts = vec!["j/k: navigate", "l: enter", "h: back", "n: new query"];
 
-        // Cancel hint when query is running
-        if app.session.selected_is_running()
-            && app
-                .session
-                .displayed_block()
-                .filter(|block| block.running && !block.cancel_requested)
-                .is_some()
-        {
-            parts.push("C: cancel");
-        }
+            // Cancel hint when query is running
+            if app.session.selected_is_running()
+                && app
+                    .session
+                    .displayed_block()
+                    .filter(|block| block.running && !block.cancel_requested)
+                    .is_some()
+            {
+                parts.push("C: cancel");
+            }
 
-        // Copy hint when in Results pane + Edit mode
-        if matches!(
-            (&app.session.focus, &app.session.mode),
-            (Focus::SubPane(SubPane::Results), Mode::Edit)
-        ) {
-            parts.push("y: copy");
-        }
+            // Copy hint when in Results pane + Edit mode
+            if matches!(
+                (&app.session.focus, &app.session.mode),
+                (Focus::SubPane(SubPane::Results), Mode::Edit)
+            ) {
+                parts.push("y: copy");
+            }
 
-        parts.push("?: help");
-        parts.join(" | ")
-    };
+            parts.push("?: help");
+            parts.join(" | ")
+        };
 
     let status = format!(" [{}] {}{} | {}", mode_str, focus_str, query_info, hints);
 
@@ -1648,7 +1655,7 @@ fn render_categorical_column_viz(f: &mut Frame, area: Rect, unique_sample: &Uniq
 fn render_column_stats_modal_overlay(f: &mut Frame, area: Rect, app: &App) {
     let session = &app.session;
 
-    let block = if let Some(idx) = session.selected_history {
+    let block = if let Some(idx) = session.selected_card {
         // Check running query first, then current block
         session.running_queries.get(&idx).or(session.current_block.as_ref())
     } else {
