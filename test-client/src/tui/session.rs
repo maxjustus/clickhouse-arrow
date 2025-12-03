@@ -1134,13 +1134,17 @@ impl Session {
     }
 
     /// Move card selection up (previous card), returns true if selection changed
+    /// Layout: [Card 0 (newest)] [Card 1] ... [Card N (oldest)] [Input]
+    /// Up from Input → last card, Up from Card 0 → stays (top of list)
     pub fn card_prev(&mut self) -> bool {
         if let Some(idx) = self.selected_card {
             if idx > 0 {
                 self.selected_card = Some(idx - 1);
                 return true;
             }
+            // At card 0 (top), don't move
         } else if !self.history.is_empty() {
+            // From input, go to last card (closest visually)
             self.selected_card = Some(self.history.len() - 1);
             return true;
         }
@@ -1148,16 +1152,20 @@ impl Session {
     }
 
     /// Move card selection down (next card), returns true if selection changed
+    /// Layout: [Card 0 (newest)] [Card 1] ... [Card N (oldest)] [Input]
+    /// Down from last card → Input, Down from Input → stays (bottom)
     pub fn card_next(&mut self) -> bool {
         if let Some(idx) = self.selected_card {
             if idx + 1 < self.history.len() {
                 self.selected_card = Some(idx + 1);
                 return true;
+            } else {
+                // From last card, go to input (at bottom)
+                self.selected_card = None;
+                return true;
             }
-        } else if !self.history.is_empty() {
-            self.selected_card = Some(0);
-            return true;
         }
+        // Already at input, don't move
         false
     }
 
