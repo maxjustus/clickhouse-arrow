@@ -1,3 +1,4 @@
+use std::cell::Cell as StdCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -372,6 +373,9 @@ pub struct SortableTable {
     pub value_scroll:   usize,
     pub visible_height: usize,
 
+    // Detail panel visible height (set during render, used for scroll calculations)
+    detail_visible_height: StdCell<usize>,
+
     // Detail panel focus (for single-row view in Table mode)
     pub detail_focused: bool,
 
@@ -403,6 +407,7 @@ impl SortableTable {
             selected_field: 0,
             value_scroll: 0,
             visible_height: 20,
+            detail_visible_height: StdCell::new(20),
             detail_focused: false,
             header_focused: false,
             focused_col: 0,
@@ -417,6 +422,12 @@ impl SortableTable {
     pub fn set_visible_height(&mut self, height: u16) {
         // Account for borders (2) and header row (1)
         self.visible_height = height.saturating_sub(3) as usize;
+    }
+
+    /// Update detail panel visible height. Uses Cell for interior mutability during render.
+    pub fn set_detail_visible_height(&self, height: u16) {
+        // Account for borders (2 lines)
+        self.detail_visible_height.set(height.saturating_sub(2) as usize);
     }
 
     /// Update visible columns based on render width
@@ -629,17 +640,24 @@ impl SortableTable {
     /// If field content is taller than viewport, show header at top.
     fn scroll_to_selected_field(&mut self) {
         let positions = self.compute_field_line_positions();
-        if let Some(&(field_start, _field_end)) = positions.get(self.selected_field) {
-            // If field header is above visible area, scroll up to show it
+        let visible = self.detail_visible_height.get();
+
+        if let Some(&(field_start, _)) = positions.get(self.selected_field) {
+            // If field header is above visible area, scroll up to show it at top
             if field_start < self.value_scroll {
                 self.value_scroll = field_start;
             }
-            // If field header is below visible area, scroll down
-            else if field_start >= self.value_scroll + self.visible_height {
+            // If field header is below visible area, scroll down to show it at top
+            else if field_start >= self.value_scroll + visible {
                 self.value_scroll = field_start;
             }
             // Otherwise, current scroll is fine - header is visible
         }
+
+        // Clamp scroll to valid range (don't scroll past content)
+        let total_lines = positions.last().map(|(_, end)| *end).unwrap_or(0);
+        let max_scroll = total_lines.saturating_sub(visible);
+        self.value_scroll = self.value_scroll.min(max_scroll);
     }
 
     /// Navigate down in current view mode

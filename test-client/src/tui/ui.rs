@@ -557,6 +557,8 @@ fn render_results_pane(
                     let table_widget = table.render(&title, chunks[0].width, table_style);
                     f.render_widget(table_widget, chunks[0]);
 
+                    // Tell the table how tall the detail panel is for scroll calculations
+                    table.set_detail_visible_height(chunks[1].height);
                     let detail_widget =
                         table.render_selected_row_detail(&title, chunks[1].width, detail_style);
                     f.render_widget(detail_widget, chunks[1]);
@@ -591,11 +593,6 @@ fn render_results_pane(
                         table.get_path_stats(field, &path),
                         style,
                     );
-                }
-                ResultsViewMode::Exploded { .. } => {
-                    // Exploded view: full-width single row expanded
-                    let exploded_widget = table.render(&title, area.width, style);
-                    f.render_widget(exploded_widget, area);
                 }
             }
         } else if block.running {
