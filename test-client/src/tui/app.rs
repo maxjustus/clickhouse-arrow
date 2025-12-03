@@ -525,16 +525,16 @@ impl App {
                     error: None,
                 };
 
-                // Insert entry at top of history
-                self.session.add_history_entry(entry);
+                // Insert entry at end of history (newest last)
+                let hist_idx = self.session.add_history_entry(entry);
 
                 // Create QueryBlock for execution
                 let mut block = QueryBlock::new(sql.clone());
                 block.running = true;
-                self.session.running_queries.insert(0, block);
+                self.session.running_queries.insert(hist_idx, block);
 
                 // Select this new entry and show it
-                self.session.selected_card = Some(0);
+                self.session.selected_card = Some(hist_idx);
                 self.session.focus = Focus::SubPane(SubPane::Results);
                 self.session.mode = Mode::Navigation;
 
@@ -547,13 +547,7 @@ impl App {
                 // Send execute command
                 let query_id = self.next_query_id;
                 self.next_query_id += 1;
-
-                // Shift existing query_map indices before adding new entry
-                // (add_history_entry shifts running_queries indices, so we must match)
-                for hist_idx in self.query_map.values_mut() {
-                    *hist_idx += 1;
-                }
-                self.query_map.insert(query_id, 0); // Maps to history index 0
+                self.query_map.insert(query_id, hist_idx);
 
                 let cmd = QueryCommand::Execute { query_id, sql };
                 let _ = self.cmd_tx.send(cmd).await;
@@ -735,6 +729,16 @@ impl App {
                             (KeyCode::Char(']') | KeyCode::Char('J'), _) => table.next_detail_row(),
                             (KeyCode::Char('{'), _) => table.prev_detail_row_jump(ROW_JUMP_COUNT),
                             (KeyCode::Char('}'), _) => table.next_detail_row_jump(ROW_JUMP_COUNT),
+                            // Tab: toggle between Table and Exploded view
+                            (KeyCode::Tab, _) => {
+                                table.view_mode = match &table.view_mode {
+                                    ResultsViewMode::Table => {
+                                        ResultsViewMode::Exploded { scroll_offset: 0 }
+                                    }
+                                    ResultsViewMode::Exploded { .. } => ResultsViewMode::Table,
+                                    _ => table.view_mode.clone(), // Stay in FieldValue
+                                };
+                            }
                             _ => {}
                         }
                     }

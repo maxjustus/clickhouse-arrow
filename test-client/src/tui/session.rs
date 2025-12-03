@@ -1080,18 +1080,16 @@ impl Session {
     /// Load history from index at startup
     pub fn load_history(&mut self, entries: Vec<QueryStoreEntry>) {
         let mut entries = entries;
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         self.history = entries;
         // Don't auto-select, keep input focused
     }
 
-    /// Add a new entry to history (at the top)
-    pub fn add_history_entry(&mut self, entry: QueryStoreEntry) {
-        self.history.insert(0, entry);
-        // Shift running_queries indices
-        let shifted: HashMap<usize, QueryBlock> =
-            self.running_queries.drain().map(|(k, v)| (k + 1, v)).collect();
-        self.running_queries = shifted;
+    /// Add a new entry to history (at the bottom, newest last)
+    pub fn add_history_entry(&mut self, entry: QueryStoreEntry) -> usize {
+        let idx = self.history.len();
+        self.history.push(entry);
+        idx // Return the index of the new entry
     }
 
     pub fn show_toast(&mut self, msg: impl Into<String>) {
