@@ -513,7 +513,7 @@ impl App {
                     .unwrap_or(0);
                 let hash = QueryStore::hash_sql(&sql);
                 let id = format!("{}-{}", timestamp, hash);
-                let sql_preview: String = sql.chars().take(80).collect();
+                let sql_preview: String = sql.chars().take(500).collect();
 
                 let entry = QueryStoreEntry {
                     id: id.clone(),

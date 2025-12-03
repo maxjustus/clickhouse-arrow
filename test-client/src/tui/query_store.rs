@@ -251,7 +251,7 @@ impl QueryCacheWriter {
         })
         .await??;
 
-        let sql_preview: String = self.sql.chars().take(80).collect::<String>().replace('\n', " ");
+        let sql_preview: String = self.sql.chars().take(500).collect::<String>().replace('\n', " ");
         let timestamp = self.id.split('-').next().and_then(|s| s.parse().ok()).unwrap_or(0);
 
         Ok(QueryStoreEntry {
