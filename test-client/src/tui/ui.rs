@@ -77,14 +77,10 @@ fn render_history_view(f: &mut Frame, area: Rect, app: &mut App) {
     // Check if we're focused on input (no card selected)
     let input_focused = app.session.selected_card.is_none();
 
-    // If input is focused in edit mode, show full-screen editor
-    if input_focused && app.session.mode == Mode::Edit {
-        render_new_query_fullscreen(f, area, app);
-        return;
-    }
+    // Calculate dynamic input height based on textarea lines
+    let line_count = app.session.new_query.lines().len().max(1);
+    let input_height: u16 = (line_count as u16 + 2).clamp(3, area.height / 2);
 
-    // Calculate layout: cards take most space, input at bottom
-    let input_height: u16 = if input_focused { 6 } else { 3 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(input_height)])
@@ -206,59 +202,64 @@ fn render_query_card(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Card content
-    let mut lines: Vec<Line> = Vec::new();
-
-    // SQL preview (truncated to 2 lines)
-    let sql_preview: String = entry.sql_preview.replace('\n', " ");
-    let max_sql_chars = (inner.width as usize * 2).min(160);
-    let truncated_sql: String = sql_preview.chars().take(max_sql_chars).collect();
+    // Card content - use full available height
     let sql_style = if is_selected {
         Style::default().fg(Color::White)
     } else {
         Style::default().fg(Color::Gray)
     };
-    lines.push(Line::from(Span::styled(truncated_sql, sql_style)));
 
-    // Error message or row count
-    if let Some(ref error) = entry.error {
-        let error_preview: String = error.chars().take(inner.width as usize - 2).collect();
-        lines.push(Line::from(Span::styled(error_preview, Style::default().fg(Color::Red))));
+    // Reserve last line for row count/error footer
+    let sql_height = inner.height.saturating_sub(1);
+    let sql_area = Rect { height: sql_height, ..inner };
+    let footer_area = Rect { y: inner.y + sql_height, height: 1.min(inner.height), ..inner };
+
+    // SQL preview with wrapping to fill available space
+    let sql_text = entry.sql_preview.replace('\n', " ");
+    let sql_para = Paragraph::new(sql_text).style(sql_style).wrap(Wrap { trim: true });
+    f.render_widget(sql_para, sql_area);
+
+    // Footer: error message or row count
+    let footer = if let Some(ref error) = entry.error {
+        let error_preview: String = error.chars().take(inner.width as usize).collect();
+        Span::styled(error_preview, Style::default().fg(Color::Red))
     } else {
-        // Row count
         let row_count = running_block.map(|b| b.result_count()).unwrap_or(entry.row_count as usize);
-        let row_str = format!("{} rows", row_count);
-        lines.push(Line::from(Span::styled(row_str, Style::default().fg(Color::DarkGray))));
-    }
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, inner);
+        Span::styled(format!("{} rows", row_count), Style::default().fg(Color::DarkGray))
+    };
+    let footer_para = Paragraph::new(Line::from(footer));
+    f.render_widget(footer_para, footer_area);
 }
 
 /// Render the input card at the bottom
-fn render_input_card(f: &mut Frame, area: Rect, app: &App, is_focused: bool) {
+fn render_input_card(f: &mut Frame, area: Rect, app: &mut App, is_focused: bool) {
     let border_style = if is_focused {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::DarkGray)
     };
 
-    let title = if is_focused { "New Query (Enter to edit)" } else { "New Query" };
-    let block = Block::default().borders(Borders::ALL).title(title).border_style(border_style);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    // Show placeholder or current input
-    let text = app.session.new_query.lines().join("\n");
-    if text.is_empty() {
-        let placeholder = Paragraph::new("Press 'n' or Enter to write a query...")
-            .style(Style::default().fg(Color::DarkGray));
-        f.render_widget(placeholder, inner);
+    let title = if is_focused && app.session.mode == Mode::Edit {
+        "New Query (Ctrl+Enter to run)"
+    } else if is_focused {
+        "New Query (Enter to edit)"
     } else {
-        let preview: String = text.chars().take(inner.width as usize * 2).collect();
-        let para = Paragraph::new(preview).style(Style::default().fg(Color::White));
-        f.render_widget(para, inner);
+        "New Query"
+    };
+
+    // Set textarea block styling
+    let block = Block::default().borders(Borders::ALL).title(title).border_style(border_style);
+    app.session.new_query.set_block(block);
+
+    // Style the textarea cursor based on focus
+    if is_focused && app.session.mode == Mode::Edit {
+        app.session.new_query.set_cursor_style(Style::default().bg(Color::White).fg(Color::Black));
+    } else {
+        app.session.new_query.set_cursor_style(Style::default());
     }
+
+    // Render the actual TextArea widget
+    f.render_widget(&app.session.new_query, area);
 }
 
 /// Render full-screen results view (when viewing a specific query)
@@ -590,6 +591,11 @@ fn render_results_pane(
                         table.get_path_stats(field, &path),
                         style,
                     );
+                }
+                ResultsViewMode::Exploded { .. } => {
+                    // Exploded view: full-width single row expanded
+                    let exploded_widget = table.render(&title, area.width, style);
+                    f.render_widget(exploded_widget, area);
                 }
             }
         } else if block.running {
@@ -1477,30 +1483,6 @@ fn render_log_entry_detail(
         let para = Paragraph::new("Entry not found").style(Style::default().fg(Color::Red));
         f.render_widget(para, area);
     }
-}
-
-fn render_new_query_fullscreen(f: &mut Frame, area: Rect, app: &App) {
-    let style = Style::default().fg(Color::Cyan);
-
-    let title: String = if app.history.is_searching() {
-        let pattern = app.history.search_pattern();
-        let pos = app.history.search_match_position();
-        let count = app.history.search_match_count();
-        format!(
-            "Search: '{}' ({}/{}) - Ctrl+P/N: navigate, Enter: accept, Esc: cancel",
-            pattern, pos, count
-        )
-    } else if app.session.mode == Mode::Edit {
-        "New Query [EDIT] (Ctrl+Enter: run, Ctrl+R: search, Ctrl+P/N: history)".to_string()
-    } else {
-        "New Query (press Enter to edit, Escape to cancel)".to_string()
-    };
-
-    let block = Block::default().borders(Borders::ALL).title(title).border_style(style);
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    f.render_widget(&app.session.new_query, inner);
 }
 
 fn pane_style(focused: bool, mode: Mode) -> Style {
