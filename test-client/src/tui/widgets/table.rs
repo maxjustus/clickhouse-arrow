@@ -653,11 +653,23 @@ impl SortableTable {
             }
             // Otherwise, current scroll is fine - header is visible
         }
+        // No max_scroll clamp - let ratatui's Paragraph handle bounds naturally
+    }
 
-        // Clamp scroll to valid range (don't scroll past content)
-        let total_lines = positions.last().map(|(_, end)| *end).unwrap_or(0);
-        let max_scroll = total_lines.saturating_sub(visible);
-        self.value_scroll = self.value_scroll.min(max_scroll);
+    /// Update selected_field based on current scroll position.
+    /// Finds the field whose content is currently at the top of the viewport.
+    fn update_selected_field_from_scroll(&mut self) {
+        let positions = self.compute_field_line_positions();
+        for (i, &(start, end)) in positions.iter().enumerate() {
+            if self.value_scroll >= start && self.value_scroll < end {
+                self.selected_field = i;
+                return;
+            }
+        }
+        // If past all fields, select last one
+        if !positions.is_empty() {
+            self.selected_field = positions.len() - 1;
+        }
     }
 
     /// Navigate down in current view mode
@@ -665,11 +677,9 @@ impl SortableTable {
         match &mut self.view_mode {
             ResultsViewMode::Table => {
                 if self.detail_focused {
-                    // Navigate fields in detail panel
-                    if self.selected_field < self.columns.len().saturating_sub(1) {
-                        self.selected_field += 1;
-                        self.scroll_to_selected_field();
-                    }
+                    // Free scroll in detail panel, update selected field based on position
+                    self.value_scroll += 3;
+                    self.update_selected_field_from_scroll();
                 } else {
                     self.next_row();
                 }
@@ -703,11 +713,9 @@ impl SortableTable {
         match &mut self.view_mode {
             ResultsViewMode::Table => {
                 if self.detail_focused {
-                    // Navigate fields in detail panel
-                    if self.selected_field > 0 {
-                        self.selected_field -= 1;
-                        self.scroll_to_selected_field();
-                    }
+                    // Free scroll in detail panel, update selected field based on position
+                    self.value_scroll = self.value_scroll.saturating_sub(3);
+                    self.update_selected_field_from_scroll();
                 } else {
                     self.prev_row();
                 }
