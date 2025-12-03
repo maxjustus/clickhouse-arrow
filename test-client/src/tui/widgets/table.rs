@@ -657,19 +657,32 @@ impl SortableTable {
     }
 
     /// Update selected_field based on current scroll position.
-    /// Finds the field whose content is currently at the top of the viewport.
+    /// Selects the field whose header is at or above scroll - you stay on a field
+    /// until the NEXT field's header reaches the top.
     fn update_selected_field_from_scroll(&mut self) {
         let positions = self.compute_field_line_positions();
-        for (i, &(start, end)) in positions.iter().enumerate() {
-            if self.value_scroll >= start && self.value_scroll < end {
+        // Find the last field whose header is at or above scroll position
+        for (i, &(start, _)) in positions.iter().enumerate().rev() {
+            if start <= self.value_scroll {
                 self.selected_field = i;
                 return;
             }
         }
-        // If past all fields, select last one
-        if !positions.is_empty() {
-            self.selected_field = positions.len() - 1;
-        }
+        self.selected_field = 0;
+    }
+
+    /// Page down in detail view
+    pub fn page_down_detail(&mut self) {
+        let jump = self.detail_visible_height.get().max(1);
+        self.value_scroll += jump;
+        self.update_selected_field_from_scroll();
+    }
+
+    /// Page up in detail view
+    pub fn page_up_detail(&mut self) {
+        let jump = self.detail_visible_height.get().max(1);
+        self.value_scroll = self.value_scroll.saturating_sub(jump);
+        self.update_selected_field_from_scroll();
     }
 
     /// Navigate down in current view mode

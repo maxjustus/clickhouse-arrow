@@ -691,9 +691,11 @@ impl App {
                             // Tree navigation
                             (KeyCode::Down | KeyCode::Char('j'), false) => table.nav_down(),
                             (KeyCode::Up | KeyCode::Char('k'), false) => {
-                                // Check if at row 0 in Table mode - focus header
+                                // Check if at row 0 in Table mode (not in detail pane) - focus
+                                // header
                                 if matches!(table.view_mode, ResultsViewMode::Table)
                                     && table.selected_row == 0
+                                    && !table.detail_focused
                                 {
                                     table.focus_header();
                                 } else {
@@ -717,8 +719,20 @@ impl App {
                                 table.scroll_cols_left();
                             }
                             // Other navigation
-                            (KeyCode::PageDown, _) => table.page_down(),
-                            (KeyCode::PageUp, _) => table.page_up(),
+                            (KeyCode::PageDown, _) => {
+                                if table.detail_focused {
+                                    table.page_down_detail();
+                                } else {
+                                    table.page_down();
+                                }
+                            }
+                            (KeyCode::PageUp, _) => {
+                                if table.detail_focused {
+                                    table.page_up_detail();
+                                } else {
+                                    table.page_up();
+                                }
+                            }
                             (KeyCode::Char('s') | KeyCode::Char('S'), false) => {
                                 if !table.columns.is_empty() {
                                     table.sort_by_column(0);
@@ -729,16 +743,6 @@ impl App {
                             (KeyCode::Char(']') | KeyCode::Char('J'), _) => table.next_detail_row(),
                             (KeyCode::Char('{'), _) => table.prev_detail_row_jump(ROW_JUMP_COUNT),
                             (KeyCode::Char('}'), _) => table.next_detail_row_jump(ROW_JUMP_COUNT),
-                            // Tab: toggle between Table and Exploded view
-                            (KeyCode::Tab, _) => {
-                                table.view_mode = match &table.view_mode {
-                                    ResultsViewMode::Table => {
-                                        ResultsViewMode::Exploded { scroll_offset: 0 }
-                                    }
-                                    ResultsViewMode::Exploded { .. } => ResultsViewMode::Table,
-                                    _ => table.view_mode.clone(), // Stay in FieldValue
-                                };
-                            }
                             _ => {}
                         }
                     }
