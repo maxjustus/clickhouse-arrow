@@ -656,28 +656,24 @@ impl SortableTable {
         // No max_scroll clamp - let ratatui's Paragraph handle bounds naturally
     }
 
-    /// Update selected_field based on which field occupies the most visible space.
+    /// Update selected_field using scroll-spy pattern: select field whose header
+    /// is at or just above the "reading line" (40% down the viewport).
     fn update_selected_field_from_scroll(&mut self) {
         let positions = self.compute_field_line_positions();
         let visible = self.detail_visible_height.get();
-        let viewport_end = self.value_scroll + visible;
+        // Reading line at 40% down viewport - "what am I looking at?"
+        let reading_line = self.value_scroll + (visible * 2 / 5);
 
-        let mut best_field = 0;
-        let mut best_overlap = 0;
-
-        for (i, &(start, end)) in positions.iter().enumerate() {
-            // Calculate overlap with viewport [value_scroll, viewport_end)
-            let overlap_start = start.max(self.value_scroll);
-            let overlap_end = end.min(viewport_end);
-            let overlap = overlap_end.saturating_sub(overlap_start);
-
-            if overlap > best_overlap {
-                best_overlap = overlap;
-                best_field = i;
+        // Select field whose header is at or just above reading line
+        let mut selected = 0;
+        for (i, &(start, _)) in positions.iter().enumerate() {
+            if start <= reading_line {
+                selected = i;
+            } else {
+                break;
             }
         }
-
-        self.selected_field = best_field;
+        self.selected_field = selected;
     }
 
     /// Page down in detail view
