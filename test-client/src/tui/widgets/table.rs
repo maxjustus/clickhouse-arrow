@@ -598,6 +598,50 @@ impl SortableTable {
         self.rows.get(row)?.get(field)
     }
 
+    /// Returns Vec of (start_line, end_line) for each field based on current row
+    fn compute_field_line_positions(&self) -> Vec<(usize, usize)> {
+        let row_data = match self.rows.get(self.selected_row) {
+            Some(r) => r,
+            None => return vec![],
+        };
+
+        let mut positions = Vec::new();
+        let mut line = 0;
+
+        for value in row_data.iter() {
+            let start = line;
+            line += 1; // field name line
+
+            // Count value lines (JSON pretty-printed)
+            let display =
+                serde_json::to_string_pretty(value).unwrap_or_else(|_| format!("{:?}", value));
+            let value_lines = display.lines().count();
+            line += value_lines; // each value line is indented
+            line += 1; // empty line between fields
+
+            positions.push((start, line));
+        }
+
+        positions
+    }
+
+    /// Scroll to ensure selected field header is visible.
+    /// If field content is taller than viewport, show header at top.
+    fn scroll_to_selected_field(&mut self) {
+        let positions = self.compute_field_line_positions();
+        if let Some(&(field_start, _field_end)) = positions.get(self.selected_field) {
+            // If field header is above visible area, scroll up to show it
+            if field_start < self.value_scroll {
+                self.value_scroll = field_start;
+            }
+            // If field header is below visible area, scroll down
+            else if field_start >= self.value_scroll + self.visible_height {
+                self.value_scroll = field_start;
+            }
+            // Otherwise, current scroll is fine - header is visible
+        }
+    }
+
     /// Navigate down in current view mode
     pub fn nav_down(&mut self) {
         match &mut self.view_mode {
@@ -606,8 +650,7 @@ impl SortableTable {
                     // Navigate fields in detail panel
                     if self.selected_field < self.columns.len().saturating_sub(1) {
                         self.selected_field += 1;
-                        // Scroll down to follow field
-                        self.value_scroll = self.value_scroll.saturating_add(5);
+                        self.scroll_to_selected_field();
                     }
                 } else {
                     self.next_row();
@@ -645,8 +688,7 @@ impl SortableTable {
                     // Navigate fields in detail panel
                     if self.selected_field > 0 {
                         self.selected_field -= 1;
-                        // Scroll up to follow field
-                        self.value_scroll = self.value_scroll.saturating_sub(5);
+                        self.scroll_to_selected_field();
                     }
                 } else {
                     self.prev_row();
@@ -1431,11 +1473,11 @@ impl SortableTable {
     }
 
     /// Render full detail view for the currently selected row (used in Table mode split view)
-    /// Shows every column's complete value with line wrapping instead of truncation.
+    /// Shows every column's complete value with recursive rendering for nested data.
     pub fn render_selected_row_detail<'a>(
         &'a self,
         title: &'a str,
-        _available_width: u16,
+        available_width: u16,
         border_style: Style,
     ) -> Paragraph<'a> {
         let row_data = self.rows.get(self.selected_row);
@@ -1455,15 +1497,9 @@ impl SortableTable {
             // Field name line
             lines.push(Line::from(Span::styled(format!("{}:", col_name), name_style)));
 
-            // Full value - all values pretty-printed as JSON
-            let display = match value {
-                Some(v) => serde_json::to_string_pretty(v).unwrap_or_else(|_| format!("{:?}", v)),
-                None => String::new(),
-            };
-
-            // Add value lines (indented)
-            for line in display.lines() {
-                lines.push(Line::from(format!("  {}", line)));
+            // Render value using recursive helper with type coloring and mini-tables
+            if let Some(v) = value {
+                render_value_exploded(&mut lines, "", v, 1, available_width as usize);
             }
 
             // Empty line between fields
@@ -1540,4 +1576,216 @@ fn format_relative_time(s: &str) -> Option<String> {
     };
 
     Some(relative)
+}
+
+// === Detail Pane Rendering Helpers ===
+
+/// Recursively render a value for exploded view with proper indentation
+fn render_value_exploded<'a>(
+    lines: &mut Vec<Line<'a>>,
+    label: &str,
+    value: &Value,
+    indent: usize,
+    available_width: usize,
+) {
+    let prefix = "  ".repeat(indent);
+    let label_style = Style::default().fg(Color::Yellow);
+    let value_style = Style::default().fg(Color::White);
+    let dim_style = Style::default().fg(Color::DarkGray);
+
+    match value {
+        Value::Array(arr) if arr.is_empty() => {
+            lines.push(Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(format!("{}: ", label), label_style),
+                Span::styled("[]", dim_style),
+            ]));
+        }
+        Value::Array(arr) => {
+            // Check if homogeneous object array (render as mini-table)
+            if let Some(keys) = is_homogeneous_object_array(arr) {
+                lines.push(Line::from(vec![
+                    Span::raw(prefix.clone()),
+                    Span::styled(format!("{}: ", label), label_style),
+                    Span::styled(format!("[{} items]", arr.len()), dim_style),
+                ]));
+                render_object_array_table(lines, arr, &keys, indent + 1, available_width);
+            } else {
+                // Regular array - render items individually
+                lines.push(Line::from(vec![
+                    Span::raw(prefix.clone()),
+                    Span::styled(format!("{}: ", label), label_style),
+                    Span::styled(format!("[{} items]", arr.len()), dim_style),
+                ]));
+                for (i, item) in arr.iter().enumerate() {
+                    render_value_exploded(
+                        lines,
+                        &format!("[{}]", i),
+                        item,
+                        indent + 1,
+                        available_width,
+                    );
+                }
+            }
+        }
+        Value::Object(obj) if obj.is_empty() => {
+            lines.push(Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(format!("{}: ", label), label_style),
+                Span::styled("{}", dim_style),
+            ]));
+        }
+        Value::Object(obj) => {
+            lines.push(Line::from(vec![
+                Span::raw(prefix.clone()),
+                Span::styled(format!("{}:", label), label_style),
+            ]));
+            for (key, val) in obj {
+                render_value_exploded(lines, key, val, indent + 1, available_width);
+            }
+        }
+        Value::Null => {
+            lines.push(Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(format!("{}: ", label), label_style),
+                Span::styled("null", dim_style),
+            ]));
+        }
+        Value::String(s) => {
+            lines.push(Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(format!("{}: ", label), label_style),
+                Span::styled(format!("\"{}\"", s), value_style),
+            ]));
+        }
+        Value::Number(n) => {
+            lines.push(Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(format!("{}: ", label), label_style),
+                Span::styled(n.to_string(), Style::default().fg(Color::Cyan)),
+            ]));
+        }
+        Value::Bool(b) => {
+            lines.push(Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(format!("{}: ", label), label_style),
+                Span::styled(b.to_string(), Style::default().fg(Color::Magenta)),
+            ]));
+        }
+    }
+}
+
+/// Check if array is homogeneous objects (all items are objects with same keys)
+fn is_homogeneous_object_array(arr: &[Value]) -> Option<Vec<String>> {
+    if arr.len() < 2 {
+        return None; // Not worth tabulating single item
+    }
+
+    let first = arr.first()?.as_object()?;
+    let keys: Vec<String> = first.keys().cloned().collect();
+
+    if keys.is_empty() {
+        return None;
+    }
+
+    // Check all items have same keys
+    for item in arr.iter().skip(1) {
+        let obj = item.as_object()?;
+        if obj.len() != keys.len() {
+            return None;
+        }
+        for key in &keys {
+            if !obj.contains_key(key) {
+                return None;
+            }
+        }
+    }
+
+    Some(keys)
+}
+
+/// Render homogeneous object array as aligned table
+fn render_object_array_table<'a>(
+    lines: &mut Vec<Line<'a>>,
+    arr: &[Value],
+    keys: &[String],
+    indent: usize,
+    available_width: usize,
+) {
+    let prefix = "  ".repeat(indent);
+    let header_style = Style::default().fg(Color::Yellow);
+    let value_style = Style::default().fg(Color::White);
+    let dim_style = Style::default().fg(Color::DarkGray);
+
+    // Calculate column widths
+    let mut col_widths: Vec<usize> = keys.iter().map(|k| k.len()).collect();
+    for item in arr {
+        if let Some(obj) = item.as_object() {
+            for (i, key) in keys.iter().enumerate() {
+                if let Some(val) = obj.get(key) {
+                    let val_str = format_value_compact(val);
+                    col_widths[i] = col_widths[i].max(val_str.len());
+                }
+            }
+        }
+    }
+
+    // Cap column widths to fit available space
+    let total_width: usize = col_widths.iter().sum::<usize>() + (keys.len() * 3); // " | " separators
+    let content_width = available_width.saturating_sub(prefix.len() + 4);
+    if total_width > content_width && content_width > 0 {
+        let scale = content_width as f64 / total_width as f64;
+        for w in &mut col_widths {
+            *w = ((*w as f64 * scale) as usize).max(3);
+        }
+    }
+
+    // Header row
+    let header_parts: Vec<String> =
+        keys.iter().zip(&col_widths).map(|(k, &w)| format!("{:width$}", k, width = w)).collect();
+    lines.push(Line::from(vec![
+        Span::raw(prefix.clone()),
+        Span::styled(header_parts.join(" │ "), header_style),
+    ]));
+
+    // Separator
+    let sep_parts: Vec<String> = col_widths.iter().map(|&w| "─".repeat(w)).collect();
+    lines.push(Line::from(vec![
+        Span::raw(prefix.clone()),
+        Span::styled(sep_parts.join("─┼─"), dim_style),
+    ]));
+
+    // Data rows
+    for item in arr {
+        if let Some(obj) = item.as_object() {
+            let row_parts: Vec<String> = keys
+                .iter()
+                .zip(&col_widths)
+                .map(|(k, &w)| {
+                    let val = obj.get(k).map(format_value_compact).unwrap_or_default();
+                    if val.len() > w {
+                        format!("{}…", &val[..w.saturating_sub(1)])
+                    } else {
+                        format!("{:width$}", val, width = w)
+                    }
+                })
+                .collect();
+            lines.push(Line::from(vec![
+                Span::raw(prefix.clone()),
+                Span::styled(row_parts.join(" │ "), value_style),
+            ]));
+        }
+    }
+}
+
+/// Format a value compactly for table cells
+fn format_value_compact(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Array(arr) => format!("[{}]", arr.len()),
+        Value::Object(obj) => format!("{{{}}}", obj.len()),
+    }
 }
