@@ -656,19 +656,28 @@ impl SortableTable {
         // No max_scroll clamp - let ratatui's Paragraph handle bounds naturally
     }
 
-    /// Update selected_field based on current scroll position.
-    /// Selects the field whose header is at or above scroll - you stay on a field
-    /// until the NEXT field's header reaches the top.
+    /// Update selected_field based on which field occupies the most visible space.
     fn update_selected_field_from_scroll(&mut self) {
         let positions = self.compute_field_line_positions();
-        // Find the last field whose header is at or above scroll position
-        for (i, &(start, _)) in positions.iter().enumerate().rev() {
-            if start <= self.value_scroll {
-                self.selected_field = i;
-                return;
+        let visible = self.detail_visible_height.get();
+        let viewport_end = self.value_scroll + visible;
+
+        let mut best_field = 0;
+        let mut best_overlap = 0;
+
+        for (i, &(start, end)) in positions.iter().enumerate() {
+            // Calculate overlap with viewport [value_scroll, viewport_end)
+            let overlap_start = start.max(self.value_scroll);
+            let overlap_end = end.min(viewport_end);
+            let overlap = overlap_end.saturating_sub(overlap_start);
+
+            if overlap > best_overlap {
+                best_overlap = overlap;
+                best_field = i;
             }
         }
-        self.selected_field = 0;
+
+        self.selected_field = best_field;
     }
 
     /// Page down in detail view
