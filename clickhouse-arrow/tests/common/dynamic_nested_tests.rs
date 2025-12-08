@@ -33,10 +33,11 @@ pub fn generate_nested_dynamic_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
         column_types: vec![("nested_dynamic".to_string(), Type::Dynamic { max_types: None })],
-        column_data:  rows,
+        column_data: rows,
+        ..Default::default()
     }
 }
 
@@ -82,12 +83,13 @@ pub fn generate_heterogeneous_dynamic_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
         column_types: vec![("heterogeneous_dynamic".to_string(), Type::Dynamic {
             max_types: None,
         })],
-        column_data:  rows,
+        column_data: rows,
+        ..Default::default()
     }
 }
 
@@ -109,10 +111,11 @@ pub fn generate_max_types_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
         column_types: vec![("limited_dynamic".to_string(), Type::Dynamic { max_types: Some(5) })],
-        column_data:  rows,
+        column_data: rows,
+        ..Default::default()
     }
 }
 

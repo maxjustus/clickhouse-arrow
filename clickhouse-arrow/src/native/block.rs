@@ -28,6 +28,10 @@ pub struct Block {
     /// The data of each column by name, in order. All `Value` should correspond to the associated
     /// type in `column_types`.
     pub column_data:  Vec<Value>,
+    /// Optional JSON/Dynamic serialization version override (for testing)
+    /// When set, forces the specified version instead of auto-detecting.
+    /// Values: 0 = V1, 2 = V2, 3 = V3/FLATTENED
+    pub json_version: Option<u64>,
 }
 
 // Iterator type for `take_iter_rows`
@@ -154,6 +158,7 @@ impl Block {
             rows: row_len as u64,
             column_types: schema,
             column_data,
+            json_version: None,
         })
     }
 }
@@ -216,6 +221,7 @@ mod tests {
             rows,
             column_types: column_types.clone(),
             column_data,
+            ..Default::default()
         };
 
         // Write compressed
@@ -314,10 +320,15 @@ impl ProtocolData<Self, ()> for Block {
                 }
 
                 // For Dynamic/JSON types, analyze values before writing prefix
+                // Use json_version override if set (for testing V1/V2 serialization)
                 state.type_specific = if matches!(col_type, Type::Dynamic { .. }) {
-                    DynamicSerializer::analyze_values(&values)
+                    DynamicSerializer::analyze_values_with_version(&values, self.json_version)
                 } else if matches!(col_type, Type::JSON { .. }) {
-                    JsonSerializer::analyze_values(&values, &col_type)?
+                    JsonSerializer::analyze_values_with_version(
+                        &values,
+                        &col_type,
+                        self.json_version,
+                    )?
                 } else {
                     TypeSpecificState::None
                 };
@@ -347,6 +358,7 @@ impl ProtocolData<Self, ()> for Block {
             rows,
             column_types: Vec::with_capacity(columns),
             column_data: Vec::with_capacity(columns),
+            json_version: None,
         };
 
         for i in 0..columns {

@@ -404,6 +404,7 @@ pub fn generate_test_block() -> Block {
         rows,
         column_types: schema.into_iter().map(|(name, typ, _)| (name, typ)).collect(),
         column_data,
+        ..Default::default()
     }
 }
 
@@ -511,6 +512,7 @@ pub fn generate_variant_test_block() -> Block {
         rows,
         column_types: schema.into_iter().map(|(name, typ, _)| (name, typ)).collect(),
         column_data,
+        ..Default::default()
     }
 }
 
@@ -523,10 +525,11 @@ pub fn generate_dynamic_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
         column_types: vec![("dynamic_col".to_string(), Type::Dynamic { max_types: None })],
-        column_data:  rows,
+        column_data: rows,
+        ..Default::default()
     }
 }
 
@@ -539,8 +542,8 @@ pub fn generate_json_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
         column_types: vec![("json_col".to_string(), Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
@@ -548,7 +551,8 @@ pub fn generate_json_test_block() -> Block {
             skip_exact:        vec![],
             skip_regex:        vec![],
         })],
-        column_data:  rows,
+        column_data: rows,
+        ..Default::default()
     }
 }
 
@@ -567,8 +571,8 @@ pub fn generate_json_array_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
         column_types: vec![("json_col".to_string(), Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
@@ -576,7 +580,8 @@ pub fn generate_json_array_test_block() -> Block {
             skip_exact:        vec![],
             skip_regex:        vec![],
         })],
-        column_data:  rows,
+        column_data: rows,
+        ..Default::default()
     }
 }
 
@@ -592,8 +597,8 @@ pub fn generate_json_typed_paths_variant_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
         column_types: vec![("json_col".to_string(), Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
@@ -604,7 +609,8 @@ pub fn generate_json_typed_paths_variant_test_block() -> Block {
             skip_exact:        vec![],
             skip_regex:        vec![],
         })],
-        column_data:  rows,
+        column_data: rows,
+        ..Default::default()
     }
 }
 
@@ -628,8 +634,8 @@ pub fn generate_mixed_dynamic_json_test_block() -> Block {
     mixed_data.extend(json_data.clone()); // All JSON column values
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         dynamic_data.len() as u64, // Number of rows
+        info: BlockInfo::default(),
+        rows: dynamic_data.len() as u64, // Number of rows
         column_types: vec![
             ("dynamic_col".to_string(), Type::Dynamic { max_types: None }),
             ("json_col".to_string(), Type::JSON {
@@ -640,7 +646,8 @@ pub fn generate_mixed_dynamic_json_test_block() -> Block {
                 skip_regex:        vec![],
             }),
         ],
-        column_data:  mixed_data,
+        column_data: mixed_data,
+        ..Default::default()
     }
 }
 
@@ -694,8 +701,8 @@ pub fn generate_evil_heterogeneous_json_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
         column_types: vec![("evil_json_col".to_string(), Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
@@ -703,7 +710,8 @@ pub fn generate_evil_heterogeneous_json_test_block() -> Block {
             skip_exact:        vec![],
             skip_regex:        vec![],
         })],
-        column_data:  rows,
+        column_data: rows,
+        ..Default::default()
     }
 }
 
@@ -751,12 +759,13 @@ pub fn generate_evil_heterogeneous_dynamic_test_block() -> Block {
     ];
 
     Block {
-        info:         BlockInfo::default(),
-        rows:         rows.len() as u64,
+        info: BlockInfo::default(),
+        rows: rows.len() as u64,
         column_types: vec![("evil_heterogeneous_dynamic".to_string(), Type::Dynamic {
             max_types: None,
         })],
-        column_data:  rows,
+        column_data: rows,
+        ..Default::default()
     }
 }
 
@@ -924,10 +933,11 @@ impl<'a> NativeRoundtripTestHarness<'a> {
         }
 
         let result_block = Block {
-            info:         BlockInfo::default(),
-            rows:         total_rows,
+            info: BlockInfo::default(),
+            rows: total_rows,
             column_types: combined_types,
-            column_data:  combined_data,
+            column_data: combined_data,
+            ..Default::default()
         };
 
         // Verify the data matches expectations

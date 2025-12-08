@@ -322,10 +322,10 @@ mod tests {
         // Prepare two simple blocks: (id Int32, name String)
         let schema = vec![("id".to_string(), Type::Int32), ("name".to_string(), Type::String)];
         let blk1 = Block {
-            info:         Default::default(),
-            rows:         2,
+            info: Default::default(),
+            rows: 2,
             column_types: schema.clone(),
-            column_data:  vec![
+            column_data: vec![
                 // id column (2 rows)
                 crate::native::values::Value::Int32(10),
                 crate::native::values::Value::Int32(20),
@@ -333,16 +333,18 @@ mod tests {
                 crate::native::values::Value::String(b"alice".to_vec()),
                 crate::native::values::Value::String(b"bob".to_vec()),
             ],
+            ..Default::default()
         };
         let blk2 = Block {
-            info:         Default::default(),
-            rows:         1,
+            info: Default::default(),
+            rows: 1,
             column_types: schema.clone(),
-            column_data:  vec![
+            column_data: vec![
                 crate::native::values::Value::Int32(-1),
                 // single row in id, then single row in name
                 crate::native::values::Value::String(b"z".to_vec()),
             ],
+            ..Default::default()
         };
 
         let mut buf = Cursor::new(Vec::<u8>::new());
@@ -376,15 +378,16 @@ mod tests {
     async fn native_std_stream_round_trip() {
         let schema = vec![("id".to_string(), Type::Int32), ("name".to_string(), Type::String)];
         let block = Block {
-            info:         Default::default(),
-            rows:         2,
+            info: Default::default(),
+            rows: 2,
             column_types: schema.clone(),
-            column_data:  vec![
+            column_data: vec![
                 crate::native::values::Value::Int32(1),
                 crate::native::values::Value::Int32(2),
                 crate::native::values::Value::String(b"foo".to_vec()),
                 crate::native::values::Value::String(b"bar".to_vec()),
             ],
+            ..Default::default()
         };
 
         let (writer_stream, reader_stream) = duplex(64 * 1024);

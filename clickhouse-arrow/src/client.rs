@@ -1825,6 +1825,7 @@ impl InsertInto<'_> {
                     rows: rows_len as u64,
                     column_types,
                     column_data,
+                    json_version: None,
                 })
             })
             .await?;

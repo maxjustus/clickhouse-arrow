@@ -527,6 +527,7 @@ impl JsonDeserializer {
             typed_paths,
             dynamic_path_columns: None,
             typed_path_columns: None,
+            shared_path_columns: None,
             rows: None,
             dynamic_data: None,  // V1/V2 don't use this field
             path_dynamic_states, // Use the states we just created
@@ -653,6 +654,7 @@ impl Deserializer for JsonDeserializer {
             typed_paths,
             dynamic_path_columns: None,
             typed_path_columns: None,
+            shared_path_columns: None,
             rows: None,
             dynamic_data: Some(dynamic_data),
             path_dynamic_states: BTreeMap::new(),

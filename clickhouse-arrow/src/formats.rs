@@ -171,6 +171,8 @@ pub struct JsonState {
     pub dynamic_path_columns:     Option<BTreeMap<String, Vec<Value>>>,
     /// Column data for typed paths (path -> values)
     pub typed_path_columns:       Option<BTreeMap<String, Vec<Value>>>,
+    /// Shared/overflow paths (V1/V2 only) - paths exceeding max_dynamic_paths limit
+    pub shared_path_columns:      Option<BTreeMap<String, Vec<Value>>>,
     pub rows:                     Option<usize>,
     pub dynamic_data:             Option<DynamicTypeData>,
     /// Dynamic states for each dynamic path (filled during `write_prefix`)

@@ -8,8 +8,11 @@ use crate::io::ClickHouseRead;
 use crate::native::types::deserialize::{ClickHouseNativeDeserializer, read_discriminator};
 use crate::native::types::{Type, Value};
 
-// Dynamic serialization versions
-const DYNAMIC_VERSION_V1: u64 = 0;
+// Dynamic serialization versions (wire format)
+// ClickHouse sends versions 1, 2, 3 on the wire
+// Version 0 was used in earlier implementations but is deprecated
+const DYNAMIC_VERSION_V1: u64 = 1;
+const DYNAMIC_VERSION_V1_LEGACY: u64 = 0; // For backward compatibility when reading
 const DYNAMIC_VERSION_V2: u64 = 2;
 const DYNAMIC_VERSION_FLATTENED: u64 = 3;
 
@@ -97,7 +100,7 @@ impl DynamicDeserializer {
             DYNAMIC_VERSION_FLATTENED => {
                 Self::read_data_flattened(reader, rows, state, total_types, &types).await
             }
-            DYNAMIC_VERSION_V1 | DYNAMIC_VERSION_V2 => {
+            DYNAMIC_VERSION_V1 | DYNAMIC_VERSION_V1_LEGACY | DYNAMIC_VERSION_V2 => {
                 Self::read_data_v1_v2(reader, rows, state, &types).await
             }
             _ => Err(crate::Error::DeserializeError(format!(
@@ -209,7 +212,7 @@ impl DynamicDeserializer {
 
         match version {
             DYNAMIC_VERSION_FLATTENED => Self::read_prefix_flattened(reader, state).await,
-            DYNAMIC_VERSION_V1 | DYNAMIC_VERSION_V2 => {
+            DYNAMIC_VERSION_V1 | DYNAMIC_VERSION_V1_LEGACY | DYNAMIC_VERSION_V2 => {
                 Self::read_prefix_v1_v2(version, reader, state).await
             }
             _ => Err(crate::Error::DeserializeError(format!(
@@ -260,8 +263,8 @@ impl DynamicDeserializer {
         reader: &mut R,
         state: &mut DeserializerState,
     ) -> Result<()> {
-        // V1 has an extra max_dynamic_types parameter that we skip
-        if version == DYNAMIC_VERSION_V1 {
+        // V1 (both legacy version 0 and modern version 1) has max_dynamic_types parameter
+        if version == DYNAMIC_VERSION_V1 || version == DYNAMIC_VERSION_V1_LEGACY {
             let _max_dynamic_types = reader.read_var_uint().await?;
         }
 

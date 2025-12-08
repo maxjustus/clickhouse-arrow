@@ -1,3 +1,5 @@
+- for v1/v2 JSON serialization would it make any sense to hold the count of dynamic paths in memory over the course of multiple insert blocks?
+
 - question:
   - when inserting into a JSON column that has predefined types for specific paths do we need to properly handle that on the client?
     if yes - do we already?

@@ -12,8 +12,28 @@ use crate::{Error, Result, Value};
 pub(crate) struct JsonSerializer;
 
 // JSON serialization versions from ClickHouse
-// Using FLATTENED format (version 3) for client compatibility
+const JSON_OBJECT_VERSION_V1: u64 = 0; // Legacy with max_dynamic_paths field
+const JSON_OBJECT_VERSION_V2: u64 = 2; // Modern with shared data
 const JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED: u64 = 3;
+
+// Dynamic serialization versions (same as JSON versions for V1/V2/V3)
+// For compatibility with pre-25.6 ClickHouse: V1=0, V2=2, V3=3
+const DYNAMIC_VERSION_V1: u64 = 0;
+const DYNAMIC_VERSION_V2: u64 = 2;
+const DYNAMIC_VERSION_V3: u64 = 3;
+
+/// Map JSON serialization version to Dynamic serialization version
+/// Currently JSON and Dynamic versions align (V1=0, V2=2, V3=3)
+#[inline]
+fn json_version_to_dynamic_version(json_version: Option<u64>) -> Option<u64> {
+    json_version.map(|v| match v {
+        JSON_OBJECT_VERSION_V1 => DYNAMIC_VERSION_V1, // JSON V1 (0) → Dynamic V1 (0)
+        JSON_OBJECT_VERSION_V2 => DYNAMIC_VERSION_V2, // JSON V2 (2) → Dynamic V2 (2)
+        JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED => DYNAMIC_VERSION_V3, /* JSON V3 (3) →
+                                                                             * Dynamic V3 (3) */
+        _ => v, // Unknown version, pass through
+    })
+}
 
 // JSON v3 object serialization is now supported via thread-local caching
 // The implementation follows the same pattern as Dynamic type serialization:
@@ -29,6 +49,8 @@ struct JsonData {
     dynamic_path_columns: BTreeMap<String, Vec<Value>>,
     /// Map from path to values for typed paths
     typed_path_columns:   BTreeMap<String, Vec<Value>>,
+    /// Path frequency: how many rows contain each dynamic path (non-null count)
+    path_frequency:       BTreeMap<String, usize>,
     /// Number of rows
     rows:                 usize,
 }
@@ -155,7 +177,16 @@ impl JsonData {
             }
         }
 
-        Ok(JsonData { dynamic_path_columns, typed_path_columns, rows })
+        // Calculate path frequency: count non-null values per dynamic path
+        let path_frequency: BTreeMap<String, usize> = dynamic_path_columns
+            .iter()
+            .map(|(path, column)| {
+                let non_null_count = column.iter().filter(|v| !matches!(v, Value::Null)).count();
+                (path.clone(), non_null_count)
+            })
+            .collect();
+
+        Ok(JsonData { dynamic_path_columns, typed_path_columns, path_frequency, rows })
     }
 
     /// Recursively extract paths from JSON value
@@ -294,13 +325,16 @@ impl JsonData {
 
 impl JsonSerializer {
     /// Check if server supports JSON v3
-    fn check_server_version(state: &SerializerState) -> Result<()> {
-        if let Some((major, minor, _)) = state.server_version
-            && (major < 25 || (major == 25 && minor < 6))
-        {
-            return Err(Error::SerializeError(format!(
-                "JSON type requires ClickHouse server version >= 25.6, got {major}.{minor}"
-            )));
+    fn check_server_version(state: &SerializerState, version: u64) -> Result<()> {
+        // V1/V2 supported on older servers, V3 requires >= 25.6
+        if version == JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED {
+            if let Some((major, minor, _)) = state.server_version
+                && (major < 25 || (major == 25 && minor < 6))
+            {
+                return Err(Error::SerializeError(format!(
+                    "JSON V3 requires ClickHouse server version >= 25.6, got {major}.{minor}"
+                )));
+            }
         }
         Ok(())
     }
@@ -309,8 +343,16 @@ impl JsonSerializer {
 impl JsonSerializer {
     /// Analyze JSON values and return metadata for use in `write_prefix`
     pub(crate) fn analyze_values(values: &[Value], type_: &Type) -> Result<TypeSpecificState> {
+        Self::analyze_values_with_version(values, type_, None)
+    }
+
+    pub(crate) fn analyze_values_with_version(
+        values: &[Value],
+        type_: &Type,
+        version: Option<u64>,
+    ) -> Result<TypeSpecificState> {
         // Extract typed_paths and SKIP rules from the Type
-        let (typed_paths, skip_exact, skip_regex, _max_dyn_paths, _max_dyn_types) = match type_ {
+        let (typed_paths, skip_exact, skip_regex, max_dyn_paths, _max_dyn_types) = match type_ {
             Type::JSON {
                 typed_paths,
                 skip_exact,
@@ -337,13 +379,47 @@ impl JsonSerializer {
         let json_data =
             JsonData::from_values(values.to_vec(), &typed_paths, &skip_exact, &skip_regex)?;
 
-        // Build the metadata
-        let mut dynamic_paths: Vec<String> =
-            json_data.dynamic_path_columns.keys().cloned().collect();
-        dynamic_paths.sort(); // Ensure consistent ordering
+        // Determine if we need to enforce max_dynamic_paths (V1/V2 only)
+        let is_v1_v2 =
+            version == Some(JSON_OBJECT_VERSION_V1) || version == Some(JSON_OBJECT_VERSION_V2);
+        let max_paths = max_dyn_paths.unwrap_or(1024); // Default: 1024 for V1/V2
 
-        // Do NOT enforce max_dynamic_paths client-side in flattened v3.
-        // Send all discovered paths; server will select which become dynamic vs shared.
+        // Build path list sorted by frequency (descending), then alphabetically for ties
+        let mut all_paths: Vec<String> = json_data.dynamic_path_columns.keys().cloned().collect();
+        all_paths.sort_by(|a, b| {
+            let freq_a = json_data.path_frequency.get(a).copied().unwrap_or(0);
+            let freq_b = json_data.path_frequency.get(b).copied().unwrap_or(0);
+            // Higher frequency first, then alphabetically for ties
+            freq_b.cmp(&freq_a).then_with(|| a.cmp(b))
+        });
+
+        // Split paths: V3 sends all paths, V1/V2 enforces limit
+        let (dynamic_paths, shared_paths): (Vec<String>, Vec<String>) = if is_v1_v2 {
+            let limit = all_paths.len().min(max_paths as usize);
+            let (dynamic, shared) = all_paths.split_at(limit);
+            // Re-sort dynamic paths alphabetically for wire format consistency
+            let mut dynamic_sorted = dynamic.to_vec();
+            dynamic_sorted.sort();
+            (dynamic_sorted, shared.to_vec())
+        } else {
+            // V3: all paths are dynamic, none shared
+            all_paths.sort(); // Alphabetical for V3
+            (all_paths, vec![])
+        };
+
+        // Split column data between dynamic and shared
+        let mut dynamic_path_columns = json_data.dynamic_path_columns;
+        let shared_path_columns: Option<BTreeMap<String, Vec<Value>>> = if shared_paths.is_empty() {
+            None
+        } else {
+            let mut shared_cols = BTreeMap::new();
+            for path in &shared_paths {
+                if let Some(col) = dynamic_path_columns.remove(path) {
+                    drop(shared_cols.insert(path.clone(), col));
+                }
+            }
+            Some(shared_cols)
+        };
 
         // Build states for typed paths
         // This is crucial for types like LowCardinality that need to build dictionaries
@@ -353,7 +429,7 @@ impl JsonSerializer {
             let _column_values = json_data
                 .typed_path_columns
                 .get(path)
-                .map(|v| v.clone())
+                .cloned()
                 .unwrap_or_else(|| vec![Value::Null; json_data.rows]);
 
             // For now, we'll handle this in the write method where we can properly
@@ -361,11 +437,11 @@ impl JsonSerializer {
             drop(typed_path_states.insert(path.clone(), SerializerState::default()));
         }
 
-        // Precompute Dynamic states per dynamic path. Do NOT error on max_dynamic_types in v3; let
-        // server decide.
+        // Precompute Dynamic states per dynamic path only (not shared paths).
+        // Shared paths are binary-encoded, not via Dynamic serialization.
         let mut path_dynamic_states = BTreeMap::new();
         for path in &dynamic_paths {
-            if let Some(col) = json_data.dynamic_path_columns.get(path) {
+            if let Some(col) = dynamic_path_columns.get(path) {
                 let analyzed = DynamicSerializer::analyze_values(col);
                 if let TypeSpecificState::Dynamic(dyn_state) = analyzed.clone() {
                     drop(path_dynamic_states.insert(path.clone(), dyn_state));
@@ -373,12 +449,22 @@ impl JsonSerializer {
             }
         }
 
+        // For V1/V2, also set version on Dynamic states
+        // Note: JSON version differs from Dynamic version (JSON V1=0 → Dynamic V1=1)
+        if is_v1_v2 {
+            let dynamic_version = json_version_to_dynamic_version(version);
+            for dyn_state in path_dynamic_states.values_mut() {
+                dyn_state.version = dynamic_version;
+            }
+        }
+
         let state = JsonState {
-            version: None, // Will be set properly in write_prefix
+            version, // Will be used in write_prefix if set, otherwise defaults to V3
             dynamic_paths: dynamic_paths.clone(),
             typed_paths: typed_paths.clone(),
-            dynamic_path_columns: Some(json_data.dynamic_path_columns),
+            dynamic_path_columns: Some(dynamic_path_columns),
             typed_path_columns: Some(json_data.typed_path_columns),
+            shared_path_columns,
             rows: Some(json_data.rows),
             dynamic_data: None,
             path_dynamic_states, // Pre-built per-path Dynamic states
@@ -395,8 +481,12 @@ impl JsonSerializer {
     }
 
     /// Get serialization version based on server support
-    fn get_serialization_version(_state: &SerializerState) -> u64 {
-        JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED
+    fn get_serialization_version(state: &SerializerState) -> u64 {
+        if let TypeSpecificState::Json(json_state) = &state.type_specific {
+            json_state.version.unwrap_or(JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED)
+        } else {
+            JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED
+        }
     }
 
     /// Write paths header based on version (async)
@@ -428,10 +518,12 @@ impl Serializer for JsonSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // Check server version support
-        Self::check_server_version(state)?;
-
         let version = Self::get_serialization_version(state);
+
+        // Check server version support
+        Self::check_server_version(state, version)?;
+
+        // Write version
         writer.write_u64_le(version).await?;
 
         // Update the version in state
@@ -441,73 +533,45 @@ impl Serializer for JsonSerializer {
 
         // Retrieve metadata from state
         if let TypeSpecificState::Json(json_state) = &state.type_specific {
-            // In FLATTENED (v3) format, the structure header includes ONLY the
-            // flattened dynamic paths. Typed paths are not listed here because
-            // they have custom serializations and their own prefixes.
-
-            let _typed_paths: Vec<String> =
-                json_state.typed_paths.iter().map(|(name, _)| name.clone()).collect();
+            let typed_paths = json_state.typed_paths.clone();
             let dynamic_paths = json_state.dynamic_paths.clone();
             let dynamic_columns = json_state.dynamic_path_columns.clone();
+            let path_dynamic_states = json_state.path_dynamic_states.clone();
 
-            // Write only dynamic (flattened) paths to the structure header
-            Self::write_paths_header_async(&dynamic_paths, version, writer).await?;
-
-            // Write typed path prefixes using their nested serializers
-            // Sort typed paths by name to match ClickHouse's deterministic order
-            let mut typed_entries: Vec<(&String, &Type)> =
-                json_state.typed_paths.iter().map(|(n, t)| (n, t)).collect();
-            typed_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-            for (_path_name, path_type) in typed_entries {
-                // Call each typed-path's nested serializer with a fresh SerializerState
-                // (only server_version copied). This mirrors ClickHouse prefix calls per
-                // substream and avoids carrying per-path TypeSpecificState across prefixes.
-                let mut typed_prefix_state = SerializerState::default();
-                if let Some(version) = state.server_version {
-                    typed_prefix_state = typed_prefix_state.with_server_version(version);
+            match version {
+                JSON_OBJECT_VERSION_V1 | JSON_OBJECT_VERSION_V2 => {
+                    Self::write_prefix_v1_v2_async(
+                        writer,
+                        state,
+                        version,
+                        &typed_paths,
+                        &dynamic_paths,
+                        &path_dynamic_states,
+                    )
+                    .await
                 }
-
-                // Always write the native prefix for typed paths to match ClickHouse behavior.
-                path_type.serialize_prefix_async(writer, &mut typed_prefix_state).await?;
-            }
-
-            // Write Dynamic column headers for each dynamic path using precomputed states
-            if let Some(dynamic_columns) = dynamic_columns {
-                let path_dynamic_states =
-                    if let TypeSpecificState::Json(json_state_ref) = &state.type_specific {
-                        json_state_ref.path_dynamic_states.clone()
-                    } else {
-                        Default::default()
-                    };
-
-                for path in dynamic_paths {
-                    if dynamic_columns.get(&path).is_some() {
-                        if let Some(dyn_state) = path_dynamic_states.get(&path) {
-                            let original = std::mem::replace(
-                                &mut state.type_specific,
-                                TypeSpecificState::Dynamic(dyn_state.clone()),
-                            );
-                            DynamicSerializer::write_prefix(
-                                &Type::Dynamic { max_types: None },
-                                writer,
-                                state,
-                            )
-                            .await?;
-                            state.type_specific = original;
-                        }
-                    }
+                JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED => {
+                    Self::write_prefix_v3_async(
+                        writer,
+                        state,
+                        &typed_paths,
+                        &dynamic_paths,
+                        &dynamic_columns,
+                        &path_dynamic_states,
+                    )
+                    .await
                 }
+                _ => Err(Error::SerializeError(format!(
+                    "Unsupported JSON version for write: {version}"
+                ))),
             }
         } else {
-            return Err(Error::SerializeError(
+            Err(Error::SerializeError(
                 "JSON serialization state not found. `analyze_values` must be called before \
                  `write_prefix`."
                     .to_string(),
-            ));
+            ))
         }
-
-        Ok(())
     }
 
     async fn write<W: ClickHouseWrite>(
@@ -516,40 +580,48 @@ impl Serializer for JsonSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // Always use v3 now (server version already checked in write_prefix)
-        let use_v3 = true;
-
         // Get metadata from state
-        let (typed_paths, typed_columns, dynamic_paths, dynamic_columns, rows) =
-            if let TypeSpecificState::Json(json_state) = &state.type_specific {
-                let rows = json_state.rows.ok_or_else(|| {
-                    Error::SerializeError("JSON rows count not found in state".to_string())
-                })?;
+        let (
+            version,
+            typed_paths,
+            typed_columns,
+            dynamic_paths,
+            dynamic_columns,
+            shared_columns,
+            rows,
+        ) = if let TypeSpecificState::Json(json_state) = &state.type_specific {
+            let rows = json_state.rows.ok_or_else(|| {
+                Error::SerializeError("JSON rows count not found in state".to_string())
+            })?;
 
-                let typed_columns = json_state.typed_path_columns.clone().unwrap_or_default();
-                let dynamic_columns = json_state.dynamic_path_columns.clone().unwrap_or_default();
+            let typed_columns = json_state.typed_path_columns.clone().unwrap_or_default();
+            let dynamic_columns = json_state.dynamic_path_columns.clone().unwrap_or_default();
+            let shared_columns = json_state.shared_path_columns.clone();
+            let version = json_state.version.unwrap_or(JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED);
 
-                (
-                    json_state.typed_paths.clone(),
-                    typed_columns,
-                    json_state.dynamic_paths.clone(),
-                    dynamic_columns,
-                    rows,
-                )
-            } else {
-                return Err(Error::SerializeError(
-                    "JSON serialization state not found. `analyze_values` must be called before \
-                     `write`."
-                        .to_string(),
-                ));
-            };
+            (
+                version,
+                json_state.typed_paths.clone(),
+                typed_columns,
+                json_state.dynamic_paths.clone(),
+                dynamic_columns,
+                shared_columns,
+                rows,
+            )
+        } else {
+            return Err(Error::SerializeError(
+                "JSON serialization state not found. `analyze_values` must be called before \
+                 `write`."
+                    .to_string(),
+            ));
+        };
 
-        // First write typed path columns (part of FLATTENED format)
+        // First write typed path columns (same for all versions)
         for (path, type_) in &typed_paths {
             // Use a clean state for typed columns but preserve server version
             let mut typed_state = SerializerState::default();
-            if let Some(version) = state.server_version {
-                typed_state = typed_state.with_server_version(version);
+            if let Some(server_version) = state.server_version {
+                typed_state = typed_state.with_server_version(server_version);
             }
 
             // Get the column values or use nulls
@@ -559,12 +631,10 @@ impl Serializer for JsonSerializer {
                 vec![Value::Null; rows]
             };
 
-            // LowCardinality no longer needs a JSON-context flag; behavior is type-driven.
-
             type_.serialize_column(column_values, writer, &mut typed_state).await?;
         }
 
-        // Then write dynamic path columns
+        // Get dynamic states
         let path_dynamic_states = if let TypeSpecificState::Json(json_state) = &state.type_specific
         {
             json_state.path_dynamic_states.clone()
@@ -572,15 +642,31 @@ impl Serializer for JsonSerializer {
             Default::default()
         };
 
-        for path in &dynamic_paths {
+        // Write dynamic path columns
+        // For V1/V2, paths must be sorted alphabetically
+        let sorted_paths: Vec<String> =
+            if version == JSON_OBJECT_VERSION_V1 || version == JSON_OBJECT_VERSION_V2 {
+                let mut paths = dynamic_paths.clone();
+                paths.sort();
+                paths
+            } else {
+                dynamic_paths.clone()
+            };
+
+        for path in &sorted_paths {
             if let Some(column_values) = dynamic_columns.get(path) {
                 if let Some(dynamic_state) = path_dynamic_states.get(path) {
-                    // Use the stored Dynamic state for this path
+                    // For V1/V2, set the Dynamic version (mapped from JSON version)
+                    let mut dyn_state = dynamic_state.clone();
+                    if version == JSON_OBJECT_VERSION_V1 || version == JSON_OBJECT_VERSION_V2 {
+                        dyn_state.version = json_version_to_dynamic_version(Some(version));
+                    }
+
                     DynamicSerializer::write_dynamic_data_async(
                         column_values,
                         writer,
                         state,
-                        TypeSpecificState::Dynamic(dynamic_state.clone()),
+                        TypeSpecificState::Dynamic(dyn_state),
                     )
                     .await?;
                 } else {
@@ -591,11 +677,187 @@ impl Serializer for JsonSerializer {
             }
         }
 
-        // V0 format needs SharedData (empty) per row
-        if !use_v3 {
+        // V1/V2 format needs shared data Map(String, String)
+        if version == JSON_OBJECT_VERSION_V1 || version == JSON_OBJECT_VERSION_V2 {
+            Self::write_shared_data_map(writer, &shared_columns, rows).await?;
+        }
+
+        Ok(())
+    }
+}
+
+// Helper methods for JSON serialization
+impl JsonSerializer {
+    /// Write V3/FLATTENED format prefix
+    async fn write_prefix_v3_async<W: ClickHouseWrite>(
+        writer: &mut W,
+        state: &mut SerializerState,
+        typed_paths: &[(String, Type)],
+        dynamic_paths: &[String],
+        dynamic_columns: &Option<BTreeMap<String, Vec<Value>>>,
+        path_dynamic_states: &BTreeMap<String, crate::formats::DynamicState>,
+    ) -> Result<()> {
+        // V3 format: total_types, then type names, then nested prefixes
+        writer.write_var_uint(dynamic_paths.len() as u64).await?;
+
+        // Write path names
+        for path in dynamic_paths {
+            writer.write_string(path.as_bytes().to_vec()).await?;
+        }
+
+        // Write typed path prefixes using their nested serializers
+        // Sort typed paths by name to match ClickHouse's deterministic order
+        let mut typed_entries: Vec<(&String, &Type)> =
+            typed_paths.iter().map(|(n, t)| (n, t)).collect();
+        typed_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        for (_path_name, path_type) in typed_entries {
+            let mut typed_prefix_state = SerializerState::default();
+            if let Some(version) = state.server_version {
+                typed_prefix_state = typed_prefix_state.with_server_version(version);
+            }
+            path_type.serialize_prefix_async(writer, &mut typed_prefix_state).await?;
+        }
+
+        // Write Dynamic column headers for each dynamic path using precomputed states
+        if let Some(dynamic_columns) = dynamic_columns {
+            for path in dynamic_paths {
+                if dynamic_columns.get(path).is_some() {
+                    if let Some(dyn_state) = path_dynamic_states.get(path) {
+                        let original = std::mem::replace(
+                            &mut state.type_specific,
+                            TypeSpecificState::Dynamic(dyn_state.clone()),
+                        );
+                        DynamicSerializer::write_prefix(
+                            &Type::Dynamic { max_types: None },
+                            writer,
+                            state,
+                        )
+                        .await?;
+                        state.type_specific = original;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write V1/V2 format prefix (shared data format)
+    async fn write_prefix_v1_v2_async<W: ClickHouseWrite>(
+        writer: &mut W,
+        state: &mut SerializerState,
+        version: u64,
+        typed_paths: &[(String, Type)],
+        dynamic_paths: &[String],
+        path_dynamic_states: &BTreeMap<String, crate::formats::DynamicState>,
+    ) -> Result<()> {
+        // V1 has extra max_dynamic_paths parameter
+        if version == JSON_OBJECT_VERSION_V1 {
+            // Default max_dynamic_paths to 1024
+            writer.write_var_uint(1024).await?;
+        }
+
+        // Write num_dynamic_paths
+        writer.write_var_uint(dynamic_paths.len() as u64).await?;
+
+        // Write dynamic path names (sorted)
+        let mut sorted_paths: Vec<&String> = dynamic_paths.iter().collect();
+        sorted_paths.sort();
+        for path in &sorted_paths {
+            writer.write_string(path.as_bytes().to_vec()).await?;
+        }
+
+        // Write typed path prefixes (alphabetically sorted)
+        let mut typed_entries: Vec<(&String, &Type)> =
+            typed_paths.iter().map(|(n, t)| (n, t)).collect();
+        typed_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        for (_path_name, path_type) in &typed_entries {
+            let mut typed_prefix_state = SerializerState::default();
+            if let Some(server_version) = state.server_version {
+                typed_prefix_state = typed_prefix_state.with_server_version(server_version);
+            }
+            path_type.serialize_prefix_async(writer, &mut typed_prefix_state).await?;
+        }
+
+        // Write Dynamic V1/V2 prefix for each dynamic path
+        for path in &sorted_paths {
+            if let Some(dyn_state) = path_dynamic_states.get(*path) {
+                // Set version (mapped from JSON version)
+                let mut dyn_state_v1v2 = dyn_state.clone();
+                dyn_state_v1v2.version = json_version_to_dynamic_version(Some(version));
+
+                let original = std::mem::replace(
+                    &mut state.type_specific,
+                    TypeSpecificState::Dynamic(dyn_state_v1v2),
+                );
+                DynamicSerializer::write_prefix(&Type::Dynamic { max_types: None }, writer, state)
+                    .await?;
+                state.type_specific = original;
+            }
+        }
+
+        // Write Map(String, String) prefix for shared data
+        let map_type = Type::Map(Box::new(Type::String), Box::new(Type::String));
+        map_type.serialize_prefix_async(writer, state).await?;
+
+        Ok(())
+    }
+
+    /// Write Map(String, String) for shared data (V1/V2)
+    /// Map is serialized as: offsets (u64 per row), keys column, values column
+    async fn write_shared_data_map<W: ClickHouseWrite>(
+        writer: &mut W,
+        shared_columns: &Option<BTreeMap<String, Vec<Value>>>,
+        rows: usize,
+    ) -> Result<()> {
+        use crate::native::types::serialize::binary_value::serialize_binary_value;
+
+        // If no shared columns, write empty map
+        let Some(shared_cols) = shared_columns else {
             for _ in 0..rows {
                 writer.write_u64_le(0).await?;
             }
+            return Ok(());
+        };
+
+        // Build per-row entries: Vec<(path, binary_value_bytes)>
+        let mut all_entries: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut offsets: Vec<u64> = Vec::with_capacity(rows);
+        let mut cumulative_offset: u64 = 0;
+
+        for row_idx in 0..rows {
+            for (path, column) in shared_cols {
+                if let Some(value) = column.get(row_idx) {
+                    // Skip null values - they don't need to be in shared data
+                    if matches!(value, Value::Null) {
+                        continue;
+                    }
+
+                    // Binary encode the value
+                    let mut binary_bytes = Vec::new();
+                    serialize_binary_value(&mut binary_bytes, value)?;
+                    all_entries.push((path.clone(), binary_bytes));
+                    cumulative_offset += 1;
+                }
+            }
+            offsets.push(cumulative_offset);
+        }
+
+        // Stream 1: ArraySizes (cumulative offsets)
+        for offset in &offsets {
+            writer.write_u64_le(*offset).await?;
+        }
+
+        // Stream 2: Keys (path names as strings)
+        for (path, _) in &all_entries {
+            writer.write_string(path.as_bytes().to_vec()).await?;
+        }
+
+        // Stream 3: Values (binary-encoded values as strings/bytes)
+        for (_, binary_bytes) in &all_entries {
+            writer.write_string(binary_bytes.clone()).await?;
         }
 
         Ok(())
@@ -2198,6 +2460,328 @@ mod tests {
         if let TypeSpecificState::Json(json_state) = &state {
             // Should have dynamic paths for nested structure
             assert!(json_state.dynamic_paths.len() > 0);
+        }
+
+        Ok(())
+    }
+
+    // V1/V2 write format tests
+    #[tokio::test]
+    async fn test_json_v2_roundtrip() -> Result<()> {
+        let values = vec![
+            Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
+            Value::String(b"{\"name\": \"Bob\", \"score\": 95.5}".to_vec()),
+        ];
+        let values_len = values.len();
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        };
+
+        // Serialize with V2 format
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+        state.type_specific = JsonSerializer::analyze_values_with_version(
+            &values,
+            &type_,
+            Some(JSON_OBJECT_VERSION_V2),
+        )?;
+
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
+
+        // Deserialize it back (should auto-detect V2)
+        let mut input = Cursor::new(output);
+        let mut deser_state = DeserializerState::default();
+
+        type_.deserialize_prefix_async(&mut input, &mut deser_state).await?;
+        let deserialized =
+            type_.deserialize_column(&mut input, values_len, &mut deser_state).await?;
+
+        assert_eq!(deserialized.len(), values_len);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v2_prefix_format() -> Result<()> {
+        use bytes::Buf;
+
+        let values = vec![Value::String(b"{\"name\": \"test\"}".to_vec())];
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        };
+
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+        state.type_specific = JsonSerializer::analyze_values_with_version(
+            &values,
+            &type_,
+            Some(JSON_OBJECT_VERSION_V2),
+        )?;
+
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+
+        // Verify V2 prefix format - first 8 bytes are version
+        let mut reader = &output[..];
+        let version = reader.get_u64_le();
+        assert_eq!(version, JSON_OBJECT_VERSION_V2, "Version should be V2 (2)");
+
+        // V2 has no max_dynamic_paths, just num_dynamic_paths (varuint)
+        // num_paths=1 is encoded as single byte 0x01
+        assert_eq!(reader[0], 1, "num_dynamic_paths should be 1");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v1_prefix_has_max_paths() -> Result<()> {
+        use bytes::Buf;
+
+        let values = vec![Value::String(b"{\"x\": 1}".to_vec())];
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        };
+
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+        state.type_specific = JsonSerializer::analyze_values_with_version(
+            &values,
+            &type_,
+            Some(JSON_OBJECT_VERSION_V1),
+        )?;
+
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+
+        // Verify V1 prefix format - first 8 bytes are version
+        let mut reader = &output[..];
+        let version = reader.get_u64_le();
+        assert_eq!(version, JSON_OBJECT_VERSION_V1, "Version should be V1 (0)");
+
+        // V1 has max_dynamic_paths first (varuint)
+        // 1024 in varuint is: 0x80 0x08 (continuation bit set)
+        assert_eq!(reader[0], 0x80, "max_dynamic_paths first byte");
+        assert_eq!(reader[1], 0x08, "max_dynamic_paths second byte (1024)");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v1_roundtrip() -> Result<()> {
+        let values = vec![
+            Value::String(b"{\"a\": 1, \"b\": \"hello\"}".to_vec()),
+            Value::String(b"{\"a\": 2, \"c\": true}".to_vec()),
+        ];
+        let values_len = values.len();
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        };
+
+        // Serialize with V1 format
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+        state.type_specific = JsonSerializer::analyze_values_with_version(
+            &values,
+            &type_,
+            Some(JSON_OBJECT_VERSION_V1),
+        )?;
+
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
+
+        // Deserialize it back (should auto-detect V1)
+        let mut input = Cursor::new(output);
+        let mut deser_state = DeserializerState::default();
+
+        type_.deserialize_prefix_async(&mut input, &mut deser_state).await?;
+        let deserialized =
+            type_.deserialize_column(&mut input, values_len, &mut deser_state).await?;
+
+        assert_eq!(deserialized.len(), values_len);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v2_path_frequency_selection() -> Result<()> {
+        // Test that V2 selects most frequent paths for dynamic, rest go to shared
+        // Create 3 rows with varying path presence:
+        // - "frequent" appears in all 3 rows (frequency 3)
+        // - "common" appears in 2 rows (frequency 2)
+        // - "rare1", "rare2", "rare3" each appear in 1 row (frequency 1)
+        let values = vec![
+            Value::String(b"{\"frequent\": 1, \"common\": 10, \"rare1\": 100}".to_vec()),
+            Value::String(b"{\"frequent\": 2, \"common\": 20, \"rare2\": 200}".to_vec()),
+            Value::String(b"{\"frequent\": 3, \"rare3\": 300}".to_vec()),
+        ];
+
+        // Set max_dynamic_paths=2 so only "frequent" and "common" become dynamic
+        let type_ = Type::JSON {
+            max_dynamic_paths: Some(2),
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        };
+
+        let mut state: SerializerState<()> = SerializerState::default();
+        state.type_specific = JsonSerializer::analyze_values_with_version(
+            &values,
+            &type_,
+            Some(JSON_OBJECT_VERSION_V2),
+        )?;
+
+        // Verify path selection
+        if let TypeSpecificState::Json(json_state) = &state.type_specific {
+            // Dynamic paths should be the 2 most frequent (sorted alphabetically)
+            assert_eq!(json_state.dynamic_paths.len(), 2, "Should have 2 dynamic paths");
+            assert!(json_state.dynamic_paths.contains(&"common".to_string()));
+            assert!(json_state.dynamic_paths.contains(&"frequent".to_string()));
+
+            // Shared paths should have the 3 rare paths
+            let shared =
+                json_state.shared_path_columns.as_ref().expect("shared_path_columns should be set");
+            assert_eq!(shared.len(), 3, "Should have 3 shared paths");
+            assert!(shared.contains_key("rare1"));
+            assert!(shared.contains_key("rare2"));
+            assert!(shared.contains_key("rare3"));
+        } else {
+            panic!("Expected Json state");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v2_shared_data_roundtrip() -> Result<()> {
+        // Test V2 roundtrip with actual shared data overflow
+        // 3 rows, max_dynamic_paths=1, so only most frequent path is dynamic
+        let values = vec![
+            Value::String(b"{\"main\": 1, \"overflow\": 100}".to_vec()),
+            Value::String(b"{\"main\": 2, \"overflow\": 200}".to_vec()),
+            Value::String(b"{\"main\": 3}".to_vec()), // "main" appears 3 times, "overflow" 2 times
+        ];
+        let values_len = values.len();
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: Some(1), // Only "main" becomes dynamic
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        };
+
+        // Serialize with V2 format
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+        state.type_specific = JsonSerializer::analyze_values_with_version(
+            &values,
+            &type_,
+            Some(JSON_OBJECT_VERSION_V2),
+        )?;
+
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
+
+        // Deserialize it back
+        let mut input = Cursor::new(output);
+        let mut deser_state = DeserializerState::default();
+
+        type_.deserialize_prefix_async(&mut input, &mut deser_state).await?;
+        let deserialized =
+            type_.deserialize_column(&mut input, values_len, &mut deser_state).await?;
+
+        assert_eq!(deserialized.len(), values_len);
+
+        // Verify values came back - just check we got valid JSON-like values
+        // The exact format depends on deserialization mode (Object vs String vs Dynamic vs Json)
+        for (_i, val) in deserialized.iter().enumerate() {
+            // Just verify it's some form of JSON-serialized data
+            match val {
+                Value::Object(_) | Value::String(_) | Value::Dynamic(_, _) => {
+                    // These are all valid JSON result types
+                }
+                #[cfg(feature = "serde")]
+                Value::Json(_) => {
+                    // Also valid - structured JSON representation
+                }
+                other => panic!("Unexpected value type: {:?}", other),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v2_no_overflow_when_under_limit() -> Result<()> {
+        // When paths fit within limit, shared_path_columns should be None
+        let values = vec![Value::String(b"{\"a\": 1, \"b\": 2}".to_vec())];
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: Some(10), // Limit is higher than path count
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        };
+
+        let mut state: SerializerState<()> = SerializerState::default();
+        state.type_specific = JsonSerializer::analyze_values_with_version(
+            &values,
+            &type_,
+            Some(JSON_OBJECT_VERSION_V2),
+        )?;
+
+        if let TypeSpecificState::Json(json_state) = &state.type_specific {
+            assert_eq!(json_state.dynamic_paths.len(), 2);
+            assert!(json_state.shared_path_columns.is_none(), "No overflow expected");
+        } else {
+            panic!("Expected Json state");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_v3_ignores_max_dynamic_paths() -> Result<()> {
+        // V3 should send all paths regardless of max_dynamic_paths
+        let values =
+            vec![Value::String(b"{\"a\": 1, \"b\": 2, \"c\": 3, \"d\": 4, \"e\": 5}".to_vec())];
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: Some(2), // Would limit V1/V2, but not V3
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        };
+
+        // V3 (default - None version)
+        let mut state: SerializerState<()> = SerializerState::default();
+        state.type_specific = JsonSerializer::analyze_values_with_version(&values, &type_, None)?;
+
+        if let TypeSpecificState::Json(json_state) = &state.type_specific {
+            assert_eq!(json_state.dynamic_paths.len(), 5, "V3 should have all 5 paths");
+            assert!(json_state.shared_path_columns.is_none(), "V3 should have no shared columns");
+        } else {
+            panic!("Expected Json state");
         }
 
         Ok(())
