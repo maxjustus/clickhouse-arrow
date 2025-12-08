@@ -167,6 +167,10 @@ struct Args {
     #[arg(long)]
     native_output: Option<PathBuf>,
 
+    /// JSON object serialization version: v1, legacy, v2, v3, flattened
+    #[arg(long)]
+    json_version: Option<String>,
+
     /// Use JSONL session mode instead of TUI
     #[arg(long, group = "mode")]
     json: bool,
@@ -599,6 +603,20 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Validate json_version if provided
+    if let Some(ref version) = args.json_version {
+        match version.as_str() {
+            "v1" | "legacy" | "v2" | "v3" | "flattened" => {}
+            _ => {
+                output_json(&JsonOutput::error(format!(
+                    "Invalid --json-version: {}. Supported: v1, legacy, v2, v3, flattened",
+                    version
+                )));
+                std::process::exit(1);
+            }
+        }
+    }
+
     if args.native_output.is_some() && args.query.is_none() {
         output_json(&JsonOutput::error(
             "--native-output currently requires --query mode".to_string(),
@@ -643,6 +661,7 @@ async fn main() -> Result<()> {
             &query,
             args.params,
             args.settings,
+            args.json_version.as_deref(),
             &args.format,
             &args.compression,
             args.native_output,
@@ -675,6 +694,7 @@ async fn execute_query(
     query: &str,
     params: Option<String>,
     settings: Option<String>,
+    json_version: Option<&str>,
     format: &str,
     compression: &str,
     native_output: Option<PathBuf>,
@@ -687,13 +707,40 @@ async fn execute_query(
         None
     };
 
-    let settings = if let Some(settings_str) = settings {
+    let mut settings = if let Some(settings_str) = settings {
         let map: HashMap<String, Value> = serde_json::from_str(&settings_str)
             .context("Failed to parse query settings as JSON")?;
         map_to_settings(&map)?
     } else {
         None
     };
+
+    // Add client_protocol_version and flattened flag based on json_version
+    if let Some(version) = json_version {
+        let mut settings_obj = settings.unwrap_or_default();
+
+        match version {
+            "v1" | "legacy" => {
+                // V1: < 54473 triggers V1 format
+                settings_obj = settings_obj.with_setting("client_protocol_version", 54472u64);
+            }
+            "v2" => {
+                // V2: >= 54473 triggers V2 format
+                settings_obj = settings_obj.with_setting("client_protocol_version", 54473u64);
+            }
+            "v3" | "flattened" => {
+                // V3: Requires both modern protocol version AND flattened flag
+                settings_obj =
+                    settings_obj.with_setting("client_protocol_version", 54473u64).with_setting(
+                        "output_format_native_use_flattened_dynamic_and_json_serialization",
+                        1u64,
+                    );
+            }
+            _ => unreachable!("Validation should catch invalid versions"),
+        }
+
+        settings = Some(settings_obj);
+    }
 
     // Split query into statements (basic approach) - should def be more robust
     let statements = split_statements(query);
