@@ -212,7 +212,8 @@ impl ClickHouseArrowDeserializer for Type {
         rbuffer: &mut Vec<u8>,
     ) -> Result<ArrayRef> {
         Ok(match self {
-            Type::Int8
+            Type::Bool
+            | Type::Int8
             | Type::Int16
             | Type::Int32
             | Type::Int64
@@ -231,6 +232,11 @@ impl ClickHouseArrowDeserializer for Type {
             | Type::Decimal128(_)
             | Type::Decimal256(_) => {
                 primitive::deserialize_async(self, builder, reader, rows, nulls, rbuffer).await?
+            }
+            Type::Nothing => {
+                // Nothing type represents all-null column
+                // Return null array of appropriate size
+                NullArray::new(rows).into()
             }
             Type::String
             | Type::FixedSizedString(_)

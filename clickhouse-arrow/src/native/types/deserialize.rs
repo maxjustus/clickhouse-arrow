@@ -3,6 +3,7 @@
 //! type-specific deserializers.
 
 pub(crate) mod array;
+pub(crate) mod binary_value;
 pub(crate) mod dynamic;
 pub(crate) mod geo;
 pub(crate) mod json;
@@ -52,7 +53,11 @@ impl ClickHouseNativeDeserializer for Type {
         use deserialize::*;
         async move {
             match self {
-                Type::Int8
+                Type::Nothing => {
+                    // Nothing type has no prefix - all values are null
+                }
+                Type::Bool
+                | Type::Int8
                 | Type::Int16
                 | Type::Int32
                 | Type::Int64

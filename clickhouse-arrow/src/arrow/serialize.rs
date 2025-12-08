@@ -105,7 +105,8 @@ impl ClickHouseArrowSerializer for Type {
 
         match base_type {
             // Primitives
-            Type::Int8
+            Type::Bool
+            | Type::Int8
             | Type::Int16
             | Type::Int32
             | Type::Int64
@@ -131,6 +132,11 @@ impl ClickHouseArrowSerializer for Type {
             | Type::Ipv6
             | Type::Uuid => {
                 primitive::serialize_async(self, writer, column, data_type).await?;
+            }
+            // Nothing type - represents NULL values
+            Type::Nothing => {
+                // Nothing type should always be nullable
+                // The null data was already written above
             }
             // Strings/Binary
             Type::String

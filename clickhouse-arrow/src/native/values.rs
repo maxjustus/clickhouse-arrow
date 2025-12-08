@@ -78,6 +78,7 @@ pub enum Value {
     // inherent to the value
     Tuple(Vec<Value>),
 
+    Bool(bool),
     Null,
 
     Map(Vec<Value>, Vec<Value>),

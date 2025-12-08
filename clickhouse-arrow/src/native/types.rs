@@ -5,6 +5,7 @@ pub mod map;
 pub mod serialize;
 #[cfg(test)]
 mod tests;
+pub(crate) mod type_encoding;
 
 use std::fmt::Display;
 use std::str::FromStr;
@@ -32,6 +33,9 @@ use crate::{Date32, Error, Result};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub enum Type {
+    Nothing,
+    Bool,
+
     Int8,
     Int16,
     Int32,
