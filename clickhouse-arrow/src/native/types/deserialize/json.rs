@@ -289,6 +289,7 @@ impl JsonDeserializer {
         use crate::native::types::deserialize::binary_value::deserialize_binary_value;
 
         let typed_paths = &json_state.typed_paths;
+        let dynamic_path_names = &json_state.dynamic_paths;
         let path_segments = &json_state.path_segments;
 
         // 1. Read typed path columns
@@ -299,12 +300,86 @@ impl JsonDeserializer {
             typed_values.push(values);
         }
 
-        // 2. Read shared data Map(String, String)
-        // In V1/V2, ALL dynamic paths are stored in a single shared data Map
-        // (not separate columns like in V3)
-        let shared_data = Self::read_shared_data_map(reader, rows).await?;
+        // 2. Read dynamic path columns (V1/V2 has separate Dynamic columns for listed paths)
+        // Each dynamic path from ObjectStructure is serialized as a Dynamic column
+        // NOTE: If num_dynamic_paths=0, there are no Dynamic columns - all data goes to shared data
+        let mut dynamic_values = Vec::with_capacity(dynamic_path_names.len());
+        for _ in 0..dynamic_path_names.len() {
+            // Read Dynamic column: version + types + prefixes + data
+            let dynamic_version = reader.read_u64_le().await?;
+            if dynamic_version > 3 {
+                return Err(Error::DeserializeError(format!(
+                    "Unsupported Dynamic version in V1/V2 format: {dynamic_version}"
+                )));
+            }
 
-        // 3. Reconstruct JSON objects by merging typed paths and shared data
+            // Read types
+            let total_types = reader.read_var_uint().await?;
+            let mut type_list = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
+            for _ in 0..total_types {
+                type_list.push(Self::parse_type_entry(reader.read_string().await?)?);
+            }
+
+            // Read prefixes
+            let mut dummy_state = DeserializerState::default();
+            for (_, typ) in &type_list {
+                typ.deserialize_prefix_async(reader, &mut dummy_state).await?;
+            }
+
+            // Read discriminators
+            let mut discriminators = Vec::with_capacity(rows);
+            for _ in 0..rows {
+                discriminators.push(read_discriminator!(async reader, total_types));
+            }
+
+            // Prepare offset bookkeeping
+            let total_types_usize = total_types.try_into().map_err(|_| {
+                Error::DeserializeError("Too many dynamic types in V1/V2 path".to_string())
+            })?;
+            let (offsets, row_count_by_type) =
+                Self::build_offsets(&discriminators, total_types, total_types_usize);
+
+            // Read column data
+            let mut columns = vec![Vec::new(); total_types_usize];
+            for (idx, (_type_name, typ)) in type_list.iter().enumerate() {
+                if let Some(&count) = row_count_by_type.get(idx)
+                    && count > 0
+                {
+                    let values = typ.deserialize_column(reader, count, &mut dummy_state).await?;
+                    columns[idx] = values;
+                }
+            }
+
+            // Reconstruct values for this dynamic path
+            let values = Self::reconstruct_path_values(
+                &discriminators,
+                &offsets,
+                &columns,
+                total_types,
+                rows,
+            );
+            dynamic_values.push(values);
+        }
+
+        // 3. Read shared data Map(String, String) if there are dynamic paths
+        // When num_dynamic_paths==0, ClickHouse may not serialize the Map column at all
+        let shared_data = if !dynamic_path_names.is_empty() {
+            // Map(String, String) internally uses Array(Tuple(String, String))
+            // The Array prefix MUST be read before attempting to read the data
+            let map_type = Type::Map(Box::new(Type::String), Box::new(Type::String));
+
+            // CRITICAL: Read Map prefix first (consumes Array(Tuple) prefix bytes from stream)
+            let mut map_prefix_state = DeserializerState::default();
+            map_type.deserialize_prefix_async(reader, &mut map_prefix_state).await?;
+
+            // Now read the actual Map data (offsets, keys, values)
+            Self::read_shared_data_map(reader, rows).await?
+        } else {
+            // No dynamic paths means no shared data Map
+            vec![std::collections::HashMap::new(); rows]
+        };
+
+        // 4. Reconstruct JSON objects by merging typed paths, dynamic paths, and shared data
         let mut result = Vec::with_capacity(rows);
         for row_idx in 0..rows {
             let mut json_obj = serde_json::Map::new();
@@ -317,7 +392,22 @@ impl JsonDeserializer {
                 }
             }
 
-            // Add shared data values (all dynamic paths)
+            // Add dynamic path values
+            for (idx, path_name) in dynamic_path_names.iter().enumerate() {
+                let value = &dynamic_values[idx][row_idx];
+                if !matches!(value, Value::Null) {
+                    if let Some(segments) = path_segments.get(path_name) {
+                        Self::set_nested_value_segments(&mut json_obj, segments, value)?;
+                    } else {
+                        // Path not in segments map, split it
+                        let segments: Vec<String> =
+                            path_name.split('.').map(|s| s.to_string()).collect();
+                        Self::set_nested_value_segments(&mut json_obj, &segments, value)?;
+                    }
+                }
+            }
+
+            // Add shared data values (remaining paths not in typed or dynamic)
             if let Some(row_shared_data) = shared_data.get(row_idx) {
                 for (path_name, binary_value_bytes) in row_shared_data {
                     // Deserialize the binary value
