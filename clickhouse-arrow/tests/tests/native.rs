@@ -498,9 +498,10 @@ pub async fn test_json_direct_dynamic(ch: Arc<ClickHouseContainer>) {
         seen.push(r.expect("row"));
     }
     assert_eq!(seen.len(), 2);
-    assert_eq!(seen[0].data["a"].as_u64(), Some(42));
+    // ORDER BY toString(data) sorts {"a":0} before {"a":42} (alphabetically "0" < "4")
     // Missing typed path defaults to 0
-    assert_eq!(seen[1].data["a"].as_u64(), Some(0));
+    assert_eq!(seen[0].data["a"].as_u64(), Some(0));
+    assert_eq!(seen[1].data["a"].as_u64(), Some(42));
 
     client.execute("DROP TABLE e2e_json_direct_dyn", None).await.expect("drop");
 }
