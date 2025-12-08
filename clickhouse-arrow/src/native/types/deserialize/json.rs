@@ -321,15 +321,20 @@ impl JsonDeserializer {
             if let Some(row_shared_data) = shared_data.get(row_idx) {
                 for (path_name, binary_value_bytes) in row_shared_data {
                     // Deserialize the binary value
-                    let value = deserialize_binary_value(binary_value_bytes)
-                        .map_err(|e| Error::DeserializeError(format!("Failed to deserialize shared data value for path {}: {}", path_name, e)))?;
+                    let value = deserialize_binary_value(binary_value_bytes).map_err(|e| {
+                        Error::DeserializeError(format!(
+                            "Failed to deserialize shared data value for path {}: {}",
+                            path_name, e
+                        ))
+                    })?;
 
                     // Set it in the JSON object
                     if let Some(segments) = path_segments.get(path_name) {
                         Self::set_nested_value_segments(&mut json_obj, segments, &value)?;
                     } else {
                         // Path not in segments map, split it
-                        let segments: Vec<String> = path_name.split('.').map(|s| s.to_string()).collect();
+                        let segments: Vec<String> =
+                            path_name.split('.').map(|s| s.to_string()).collect();
                         Self::set_nested_value_segments(&mut json_obj, &segments, &value)?;
                     }
                 }
@@ -362,8 +367,9 @@ impl JsonDeserializer {
         let mut keys = Vec::with_capacity(total_entries);
         for _ in 0..total_entries {
             let key_bytes = reader.read_string().await?;
-            let key = String::from_utf8(key_bytes)
-                .map_err(|e| Error::DeserializeError(format!("Invalid UTF-8 in shared data key: {e}")))?;
+            let key = String::from_utf8(key_bytes).map_err(|e| {
+                Error::DeserializeError(format!("Invalid UTF-8 in shared data key: {e}"))
+            })?;
             keys.push(key);
         }
 
@@ -406,7 +412,8 @@ impl JsonDeserializer {
         let num_dynamic_paths = reader.read_var_uint().await?;
 
         // Read dynamic path names
-        let mut dynamic_path_names = Vec::with_capacity(num_dynamic_paths.try_into().unwrap_or(usize::MAX));
+        let mut dynamic_path_names =
+            Vec::with_capacity(num_dynamic_paths.try_into().unwrap_or(usize::MAX));
         for _ in 0..num_dynamic_paths {
             let path_bytes = reader.read_string().await?;
             let path_name = String::from_utf8(path_bytes)
@@ -845,4 +852,159 @@ mod tests {
 
     // Note: JSON sync roundtrip testing is handled by the integration test
     // in src/native/types/tests.rs (roundtrip_complex_types_sync)
+
+    // V1/V2 Shared Data Map Tests
+
+    #[tokio::test]
+    async fn test_read_shared_data_map_empty() {
+        // Test with 3 rows, all with 0 entries
+        let mut payload = Vec::new();
+
+        // Stream 1: ArraySizes (cumulative offsets, all 0)
+        payload.extend_from_slice(&0u64.to_le_bytes()); // row 0: 0 entries
+        payload.extend_from_slice(&0u64.to_le_bytes()); // row 1: 0 entries
+        payload.extend_from_slice(&0u64.to_le_bytes()); // row 2: 0 entries
+
+        // Stream 2: Keys (empty, 0 total entries)
+        // Stream 3: Values (empty, 0 total entries)
+
+        let mut reader = Cursor::new(payload);
+        let result = JsonDeserializer::read_shared_data_map(&mut reader, 3).await.unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert!(result[0].is_empty());
+        assert!(result[1].is_empty());
+        assert!(result[2].is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_read_shared_data_map_single_entry_per_row() {
+        // Test with 2 rows, each with 1 entry
+        let mut payload = Vec::new();
+
+        // Stream 1: ArraySizes (cumulative offsets)
+        payload.extend_from_slice(&1u64.to_le_bytes()); // row 0: 1 entry (cumulative: 1)
+        payload.extend_from_slice(&2u64.to_le_bytes()); // row 1: 1 entry (cumulative: 2)
+
+        // Stream 2: Keys (2 total keys)
+        // Key 0: "path.a" (6 bytes)
+        payload.push(6); // VarUInt length
+        payload.extend_from_slice(b"path.a");
+        // Key 1: "path.b" (6 bytes)
+        payload.push(6); // VarUInt length
+        payload.extend_from_slice(b"path.b");
+
+        // Stream 3: Values (2 total values, binary encoded)
+        // Value 0: type_byte=0x0a (Int64) + 42 as i64
+        let mut value0 = vec![0x0a]; // Int64 type byte
+        value0.extend_from_slice(&42i64.to_le_bytes());
+        payload.push(value0.len() as u8); // VarUInt length
+        payload.extend_from_slice(&value0);
+
+        // Value 1: type_byte=0x15 (String) + "hello" (5 bytes)
+        let mut value1 = vec![0x15]; // String type byte
+        value1.push(5); // String length VarUInt
+        value1.extend_from_slice(b"hello");
+        payload.push(value1.len() as u8); // VarUInt length
+        payload.extend_from_slice(&value1);
+
+        let mut reader = Cursor::new(payload);
+        let result = JsonDeserializer::read_shared_data_map(&mut reader, 2).await.unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].len(), 1);
+        assert_eq!(result[1].len(), 1);
+
+        assert!(result[0].contains_key("path.a"));
+        assert!(result[1].contains_key("path.b"));
+
+        // Verify binary value bytes
+        let expected_value0: Vec<u8> = {
+            let mut v = vec![0x0a];
+            v.extend_from_slice(&42i64.to_le_bytes());
+            v
+        };
+        assert_eq!(result[0].get("path.a").unwrap(), &expected_value0);
+    }
+
+    #[tokio::test]
+    async fn test_read_shared_data_map_multiple_entries_per_row() {
+        // Test with 2 rows: first has 2 entries, second has 3 entries
+        let mut payload = Vec::new();
+
+        // Stream 1: ArraySizes (cumulative offsets)
+        payload.extend_from_slice(&2u64.to_le_bytes()); // row 0: 2 entries (cumulative: 2)
+        payload.extend_from_slice(&5u64.to_le_bytes()); // row 1: 3 entries (cumulative: 5)
+
+        // Stream 2: Keys (5 total keys)
+        let keys = vec!["a", "b", "c", "d", "e"];
+        for key in &keys {
+            payload.push(key.len() as u8);
+            payload.extend_from_slice(key.as_bytes());
+        }
+
+        // Stream 3: Values (5 total values, all Int64 for simplicity)
+        for i in 0..5 {
+            let mut value = vec![0x0a]; // Int64 type byte
+            value.extend_from_slice(&(i as i64).to_le_bytes());
+            payload.push(value.len() as u8);
+            payload.extend_from_slice(&value);
+        }
+
+        let mut reader = Cursor::new(payload);
+        let result = JsonDeserializer::read_shared_data_map(&mut reader, 2).await.unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].len(), 2); // First row: 2 entries
+        assert_eq!(result[1].len(), 3); // Second row: 3 entries
+
+        // Verify row 0 has keys "a" and "b"
+        assert!(result[0].contains_key("a"));
+        assert!(result[0].contains_key("b"));
+
+        // Verify row 1 has keys "c", "d", and "e"
+        assert!(result[1].contains_key("c"));
+        assert!(result[1].contains_key("d"));
+        assert!(result[1].contains_key("e"));
+    }
+
+    #[tokio::test]
+    async fn test_read_shared_data_map_mixed_empty_and_data() {
+        // Test with 4 rows: empty, data, empty, data
+        let mut payload = Vec::new();
+
+        // Stream 1: ArraySizes (cumulative offsets)
+        payload.extend_from_slice(&0u64.to_le_bytes()); // row 0: 0 entries
+        payload.extend_from_slice(&1u64.to_le_bytes()); // row 1: 1 entry (cumulative: 1)
+        payload.extend_from_slice(&1u64.to_le_bytes()); // row 2: 0 entries
+        payload.extend_from_slice(&3u64.to_le_bytes()); // row 3: 2 entries (cumulative: 3)
+
+        // Stream 2: Keys (3 total)
+        let keys = vec!["x", "y", "z"];
+        for key in &keys {
+            payload.push(key.len() as u8);
+            payload.extend_from_slice(key.as_bytes());
+        }
+
+        // Stream 3: Values (3 total)
+        for i in 0..3 {
+            let mut value = vec![0x0a]; // Int64
+            value.extend_from_slice(&(i as i64).to_le_bytes());
+            payload.push(value.len() as u8);
+            payload.extend_from_slice(&value);
+        }
+
+        let mut reader = Cursor::new(payload);
+        let result = JsonDeserializer::read_shared_data_map(&mut reader, 4).await.unwrap();
+
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].len(), 0); // row 0: empty
+        assert_eq!(result[1].len(), 1); // row 1: 1 entry
+        assert_eq!(result[2].len(), 0); // row 2: empty
+        assert_eq!(result[3].len(), 2); // row 3: 2 entries
+
+        assert!(result[1].contains_key("x"));
+        assert!(result[3].contains_key("y"));
+        assert!(result[3].contains_key("z"));
+    }
 }
