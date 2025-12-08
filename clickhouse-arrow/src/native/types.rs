@@ -281,6 +281,8 @@ impl Type {
 
     pub fn default_value(&self) -> Value {
         match self {
+            Type::Nothing => Value::Null,
+            Type::Bool => Value::Bool(false),
             Type::Int8 => Value::Int8(0),
             Type::Int16 => Value::Int16(0),
             Type::Int32 => Value::Int32(0),
@@ -386,6 +388,8 @@ fn format_json_params(
 impl Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Type::Nothing => write!(f, "Nothing"),
+            Type::Bool => write!(f, "Bool"),
             Type::Int8 => write!(f, "Int8"),
             Type::Int16 => write!(f, "Int16"),
             Type::Int32 => write!(f, "Int32"),
@@ -488,8 +492,13 @@ impl Type {
             }
 
             Ok(match self {
+                // Nothing type - all null values
+                Type::Nothing => {
+                    vec![Value::Null; rows]
+                }
                 // Sized primitives
-                Type::Int8
+                Type::Bool
+                | Type::Int8
                 | Type::Int16
                 | Type::Int32
                 | Type::Int64
@@ -601,7 +610,11 @@ impl Type {
         use serialize::*;
         async move {
             match self {
-                Type::Int8
+                Type::Nothing => {
+                    // Nothing type has no data - all values are null
+                }
+                Type::Bool
+                | Type::Int8
                 | Type::Int16
                 | Type::Int32
                 | Type::Int64
@@ -844,7 +857,9 @@ impl Type {
             | Type::Point
             | Type::Ring
             | Type::Polygon
-            | Type::MultiPolygon => {}
+            | Type::MultiPolygon
+            | Type::Nothing
+            | Type::Bool => {}
         }
         Ok(())
     }

@@ -370,6 +370,8 @@ pub fn ch_to_arrow_type(ch_type: &Type, options: Option<ArrowOptions>) -> Result
     // Don't use wildcards here to ensure all types are handled explicitly.
     let arrow_type = match inner_type {
         // Primitives
+        Type::Nothing => DataType::Null,
+        Type::Bool => DataType::Boolean,
         Type::Int8 => DataType::Int8,
         Type::Int16 => DataType::Int16,
         Type::Int32 => DataType::Int32,
