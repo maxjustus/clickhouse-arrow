@@ -153,6 +153,7 @@ impl Hash for Value {
         Hash::hash(&core::mem::discriminant(self), state);
         #[expect(clippy::match_same_arms)]
         match self {
+            Value::Bool(x) => ::core::hash::Hash::hash(x, state),
             Value::Int8(x) => ::core::hash::Hash::hash(x, state),
             Value::Int16(x) => ::core::hash::Hash::hash(x, state),
             Value::Int32(x) => ::core::hash::Hash::hash(x, state),
@@ -352,6 +353,7 @@ impl Value {
     /// Guesses a [`Type`] from the value, may not correspond to actual column type in `ClickHouse`
     pub fn guess_type(&self) -> Type {
         match self {
+            Value::Bool(_) => Type::Bool,
             Value::Int8(_) => Type::Int8,
             Value::Int16(_) => Type::Int16,
             Value::Int32(_) => Type::Int32,
@@ -523,6 +525,7 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         #[expect(clippy::match_same_arms)]
         match self {
+            Value::Bool(x) => write!(f, "{x}"),
             Value::Int8(x) => write!(f, "{x}"),
             Value::Int16(x) => write!(f, "{x}"),
             Value::Int32(x) => write!(f, "{x}"),
