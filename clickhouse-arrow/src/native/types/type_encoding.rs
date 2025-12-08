@@ -6,9 +6,68 @@
 
 use std::io::{Read, Write};
 
-use crate::io::{ClickHouseRead, ClickHouseWrite};
 use crate::native::types::Type;
 use crate::{Error, Result};
+
+/// Synchronous reader extension trait
+trait SyncReadExt: Read {
+    fn read_u8(&mut self) -> Result<u8> {
+        let mut buf = [0u8; 1];
+        self.read_exact(&mut buf)?;
+        Ok(buf[0])
+    }
+
+    fn read_varuint(&mut self) -> Result<u64> {
+        let mut result = 0u64;
+        let mut shift = 0;
+
+        loop {
+            let byte = self.read_u8()?;
+            result |= ((byte & 0x7F) as u64) << shift;
+
+            if byte & 0x80 == 0 {
+                break;
+            }
+
+            shift += 7;
+            if shift >= 64 {
+                return Err(Error::DeserializeError("VarUInt overflow".to_string()));
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+impl<R: Read> SyncReadExt for R {}
+
+/// Synchronous writer extension trait
+trait SyncWriteExt: Write {
+    fn write_u8(&mut self, value: u8) -> Result<()> {
+        self.write_all(&[value])?;
+        Ok(())
+    }
+
+    fn write_varuint(&mut self, mut value: u64) -> Result<()> {
+        loop {
+            let mut byte = (value & 0x7F) as u8;
+            value >>= 7;
+
+            if value != 0 {
+                byte |= 0x80;
+            }
+
+            self.write_u8(byte)?;
+
+            if value == 0 {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write> SyncWriteExt for W {}
 
 // Type encoding constants from DataTypesBinaryEncoding.h
 const TYPE_NOTHING: u8 = 0x00;
@@ -42,7 +101,7 @@ const TYPE_MAP: u8 = 0x27;
 const TYPE_BOOL: u8 = 0x2D;
 
 /// Decode a type from its binary encoding
-pub fn decode_type<R: Read + ClickHouseRead>(reader: &mut R) -> Result<Type> {
+pub fn decode_type<R: Read>(reader: &mut R) -> Result<Type> {
     let type_byte = reader.read_u8()?;
 
     match type_byte {
@@ -103,12 +162,12 @@ pub fn decode_type<R: Read + ClickHouseRead>(reader: &mut R) -> Result<Type> {
             Ok(Type::Map(Box::new(key_type), Box::new(value_type)))
         }
         TYPE_BOOL => Ok(Type::Bool),
-        _ => Err(Error::Decode(format!("Unknown type byte: 0x{:02x}", type_byte))),
+        _ => Err(Error::DeserializeError(format!("Unknown type byte: 0x{:02x}", type_byte))),
     }
 }
 
 /// Encode a type to its binary encoding
-pub fn encode_type<W: Write + ClickHouseWrite>(writer: &mut W, ty: &Type) -> Result<()> {
+pub fn encode_type<W: Write>(writer: &mut W, ty: &Type) -> Result<()> {
     match ty {
         Type::Nothing => writer.write_u8(TYPE_NOTHING)?,
         Type::UInt8 => writer.write_u8(TYPE_UINT8)?,
@@ -164,7 +223,12 @@ pub fn encode_type<W: Write + ClickHouseWrite>(writer: &mut W, ty: &Type) -> Res
             encode_type(writer, value_type)?;
         }
         Type::Bool => writer.write_u8(TYPE_BOOL)?,
-        _ => return Err(Error::Encode(format!("Unsupported type for binary encoding: {:?}", ty))),
+        _ => {
+            return Err(Error::SerializeError(format!(
+                "Unsupported type for binary encoding: {:?}",
+                ty
+            )));
+        }
     }
     Ok(())
 }
@@ -186,7 +250,7 @@ mod tests {
             Type::Float32,
             Type::Float64,
             Type::String,
-            Type::UUID,
+            Type::Uuid,
             Type::Date,
         ];
 

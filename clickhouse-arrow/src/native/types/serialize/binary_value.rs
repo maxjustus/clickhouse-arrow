@@ -6,19 +6,95 @@
 
 use std::io::Write;
 
-use crate::io::ClickHouseWrite;
 use crate::native::types::Type;
 use crate::native::types::type_encoding::encode_type;
 use crate::native::values::Value;
 use crate::{Error, Result};
 
+/// Synchronous writer extension trait for binary value serialization
+trait SyncWriteExt: Write {
+    fn write_u8(&mut self, value: u8) -> Result<()> {
+        self.write_all(&[value])?;
+        Ok(())
+    }
+
+    fn write_i8(&mut self, value: i8) -> Result<()> { self.write_u8(value as u8) }
+
+    fn write_u16_le(&mut self, value: u16) -> Result<()> {
+        self.write_all(&value.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn write_i16_le(&mut self, value: i16) -> Result<()> {
+        self.write_all(&value.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn write_u32_le(&mut self, value: u32) -> Result<()> {
+        self.write_all(&value.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn write_i32_le(&mut self, value: i32) -> Result<()> {
+        self.write_all(&value.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn write_u64_le(&mut self, value: u64) -> Result<()> {
+        self.write_all(&value.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn write_i64_le(&mut self, value: i64) -> Result<()> {
+        self.write_all(&value.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn write_u128_le(&mut self, value: u128) -> Result<()> {
+        self.write_all(&value.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn write_i128_le(&mut self, value: i128) -> Result<()> {
+        self.write_all(&value.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn write_f32_le(&mut self, value: f32) -> Result<()> {
+        self.write_all(&value.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn write_f64_le(&mut self, value: f64) -> Result<()> {
+        self.write_all(&value.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn write_varuint(&mut self, mut value: u64) -> Result<()> {
+        loop {
+            let mut byte = (value & 0x7F) as u8;
+            value >>= 7;
+
+            if value != 0 {
+                byte |= 0x80;
+            }
+
+            self.write_u8(byte)?;
+
+            if value == 0 {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write> SyncWriteExt for W {}
+
 /// Serialize a value to binary format with type byte prefix
 ///
 /// The output format is: [type_byte][value_data]
-pub fn serialize_binary_value<W: Write + ClickHouseWrite>(
-    writer: &mut W,
-    value: &Value,
-) -> Result<()> {
+pub fn serialize_binary_value<W: Write>(writer: &mut W, value: &Value) -> Result<()> {
     let ty = infer_type(value)?;
     encode_type(writer, &ty)?;
     serialize_value_data(writer, value, &ty)
@@ -46,11 +122,11 @@ fn infer_type(value: &Value) -> Result<Type> {
         Value::Date(_) => Ok(Type::Date),
         Value::Date32(_) => Ok(Type::Date32),
         Value::DateTime(_) => Ok(Type::DateTime(chrono_tz::UTC)),
-        Value::DateTime64(precision, _) => Ok(Type::DateTime64(*precision, chrono_tz::UTC)),
+        Value::DateTime64(dt64) => Ok(Type::DateTime64(dt64.2, dt64.0)),
         Value::String(_) => Ok(Type::String),
-        Value::UUID(_) => Ok(Type::Uuid),
-        Value::IPv4(_) => Ok(Type::Ipv4),
-        Value::IPv6(_) => Ok(Type::Ipv6),
+        Value::Uuid(_) => Ok(Type::Uuid),
+        Value::Ipv4(_) => Ok(Type::Ipv4),
+        Value::Ipv6(_) => Ok(Type::Ipv6),
         Value::Array(elements) => {
             if elements.is_empty() {
                 // Default to Array(Nothing) for empty arrays
@@ -73,18 +149,14 @@ fn infer_type(value: &Value) -> Result<Type> {
                 Ok(Type::Map(Box::new(key_type), Box::new(value_type)))
             }
         }
-        _ => Err(Error::Encode(format!("Cannot infer type for value: {:?}", value))),
+        _ => Err(Error::SerializeError(format!("Cannot infer type for value: {:?}", value))),
     }
 }
 
 /// Serialize the value data (without type byte prefix)
-fn serialize_value_data<W: Write + ClickHouseWrite>(
-    writer: &mut W,
-    value: &Value,
-    ty: &Type,
-) -> Result<()> {
+fn serialize_value_data<W: Write>(writer: &mut W, value: &Value, ty: &Type) -> Result<()> {
     match (value, ty) {
-        (Value::Null, Type::Nothing) => Ok(()),
+        (Value::Null, Type::Nothing) => {}
 
         (Value::Bool(b), Type::Bool) => writer.write_u8(if *b { 1 } else { 0 })?,
 
@@ -93,34 +165,32 @@ fn serialize_value_data<W: Write + ClickHouseWrite>(
         (Value::UInt32(v), Type::UInt32) => writer.write_u32_le(*v)?,
         (Value::UInt64(v), Type::UInt64) => writer.write_u64_le(*v)?,
         (Value::UInt128(v), Type::UInt128) => writer.write_u128_le(*v)?,
-        (Value::UInt256(v), Type::UInt256) => writer.write_all(&v.to_le_bytes())?,
+        (Value::UInt256(v), Type::UInt256) => writer.write_all(&v.0)?,
 
         (Value::Int8(v), Type::Int8) => writer.write_i8(*v)?,
         (Value::Int16(v), Type::Int16) => writer.write_i16_le(*v)?,
         (Value::Int32(v), Type::Int32) => writer.write_i32_le(*v)?,
         (Value::Int64(v), Type::Int64) => writer.write_i64_le(*v)?,
         (Value::Int128(v), Type::Int128) => writer.write_i128_le(*v)?,
-        (Value::Int256(v), Type::Int256) => writer.write_all(&v.to_le_bytes())?,
+        (Value::Int256(v), Type::Int256) => writer.write_all(&v.0)?,
 
         (Value::Float32(v), Type::Float32) => writer.write_f32_le(*v)?,
         (Value::Float64(v), Type::Float64) => writer.write_f64_le(*v)?,
 
-        (Value::Date(d), Type::Date) => writer.write_u16_le(d.days_since_epoch())?,
+        (Value::Date(d), Type::Date) => writer.write_u16_le(d.0)?,
 
         (Value::Date32(d), Type::Date32) => writer.write_i32_le(d.0)?,
 
-        (Value::DateTime(dt), Type::DateTime(_)) => writer.write_u32_le(dt.timestamp())?,
+        (Value::DateTime(dt), Type::DateTime(_)) => writer.write_u32_le(dt.1)?,
 
-        (Value::DateTime64(_precision, ticks), Type::DateTime64(_, _)) => {
-            writer.write_i64_le(*ticks)?
-        }
+        (Value::DateTime64(dt64), Type::DateTime64(_, _)) => writer.write_i64_le(dt64.1 as i64)?,
 
         (Value::String(s), Type::String) | (Value::String(s), Type::FixedSizedString(_)) => {
             writer.write_varuint(s.len() as u64)?;
             writer.write_all(s)?;
         }
 
-        (Value::UUID(uuid), Type::Uuid) => {
+        (Value::Uuid(uuid), Type::Uuid) => {
             let bytes = uuid.as_bytes();
             // Write as two UInt64 LE (high, low)
             let high = u64::from_be_bytes([
@@ -134,9 +204,9 @@ fn serialize_value_data<W: Write + ClickHouseWrite>(
             writer.write_u64_le(high)?;
         }
 
-        (Value::IPv4(ip), Type::Ipv4) => writer.write_u32_le(u32::from(*ip))?,
+        (Value::Ipv4(ip), Type::Ipv4) => writer.write_u32_le(u32::from(ip.0))?,
 
-        (Value::IPv6(ip), Type::Ipv6) => writer.write_all(&<[u8; 16]>::from(*ip))?,
+        (Value::Ipv6(ip), Type::Ipv6) => writer.write_all(&ip.0.octets())?,
 
         (Value::Array(elements), Type::Array(element_type)) => {
             writer.write_varuint(elements.len() as u64)?;
@@ -147,7 +217,7 @@ fn serialize_value_data<W: Write + ClickHouseWrite>(
 
         (Value::Tuple(elements), Type::Tuple(element_types)) => {
             if elements.len() != element_types.len() {
-                return Err(Error::Encode("Tuple element count mismatch".to_string()));
+                return Err(Error::SerializeError("Tuple element count mismatch".to_string()));
             }
             for (element, element_type) in elements.iter().zip(element_types.iter()) {
                 serialize_value_data(writer, element, element_type)?;
@@ -172,7 +242,7 @@ fn serialize_value_data<W: Write + ClickHouseWrite>(
         }
 
         _ => {
-            return Err(Error::Encode(format!(
+            return Err(Error::SerializeError(format!(
                 "Type mismatch: value {:?} does not match type {:?}",
                 value, ty
             )));
@@ -184,7 +254,6 @@ fn serialize_value_data<W: Write + ClickHouseWrite>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::values::Date;
 
     #[test]
     fn test_serialize_bool() {

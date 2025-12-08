@@ -5,12 +5,106 @@
 //! Strings have NO null terminators in this format.
 
 use std::io::Read;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
-use crate::io::ClickHouseRead;
 use crate::native::types::Type;
 use crate::native::types::type_encoding::decode_type;
-use crate::native::values::{Date, DateTime, Ipv4, Ipv6, Value, i256, u256};
-use crate::{Date32, Error, Result};
+use crate::native::values::{DateTime, DynDateTime64, Ipv4, Ipv6, Value, i256, u256};
+use crate::{Date, Date32, Error, Result};
+
+/// Synchronous reader extension trait for binary value deserialization
+trait SyncReadExt: Read {
+    fn read_u8(&mut self) -> Result<u8> {
+        let mut buf = [0u8; 1];
+        self.read_exact(&mut buf)?;
+        Ok(buf[0])
+    }
+
+    fn read_i8(&mut self) -> Result<i8> { Ok(self.read_u8()? as i8) }
+
+    fn read_u16_le(&mut self) -> Result<u16> {
+        let mut buf = [0u8; 2];
+        self.read_exact(&mut buf)?;
+        Ok(u16::from_le_bytes(buf))
+    }
+
+    fn read_i16_le(&mut self) -> Result<i16> {
+        let mut buf = [0u8; 2];
+        self.read_exact(&mut buf)?;
+        Ok(i16::from_le_bytes(buf))
+    }
+
+    fn read_u32_le(&mut self) -> Result<u32> {
+        let mut buf = [0u8; 4];
+        self.read_exact(&mut buf)?;
+        Ok(u32::from_le_bytes(buf))
+    }
+
+    fn read_i32_le(&mut self) -> Result<i32> {
+        let mut buf = [0u8; 4];
+        self.read_exact(&mut buf)?;
+        Ok(i32::from_le_bytes(buf))
+    }
+
+    fn read_u64_le(&mut self) -> Result<u64> {
+        let mut buf = [0u8; 8];
+        self.read_exact(&mut buf)?;
+        Ok(u64::from_le_bytes(buf))
+    }
+
+    fn read_i64_le(&mut self) -> Result<i64> {
+        let mut buf = [0u8; 8];
+        self.read_exact(&mut buf)?;
+        Ok(i64::from_le_bytes(buf))
+    }
+
+    fn read_u128_le(&mut self) -> Result<u128> {
+        let mut buf = [0u8; 16];
+        self.read_exact(&mut buf)?;
+        Ok(u128::from_le_bytes(buf))
+    }
+
+    fn read_i128_le(&mut self) -> Result<i128> {
+        let mut buf = [0u8; 16];
+        self.read_exact(&mut buf)?;
+        Ok(i128::from_le_bytes(buf))
+    }
+
+    fn read_f32_le(&mut self) -> Result<f32> {
+        let mut buf = [0u8; 4];
+        self.read_exact(&mut buf)?;
+        Ok(f32::from_le_bytes(buf))
+    }
+
+    fn read_f64_le(&mut self) -> Result<f64> {
+        let mut buf = [0u8; 8];
+        self.read_exact(&mut buf)?;
+        Ok(f64::from_le_bytes(buf))
+    }
+
+    fn read_varuint(&mut self) -> Result<u64> {
+        let mut result = 0u64;
+        let mut shift = 0;
+
+        loop {
+            let byte = self.read_u8()?;
+            result |= ((byte & 0x7F) as u64) << shift;
+
+            if byte & 0x80 == 0 {
+                break;
+            }
+
+            shift += 7;
+            if shift >= 64 {
+                return Err(Error::DeserializeError("VarUInt overflow".to_string()));
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+impl<R: Read> SyncReadExt for R {}
 
 /// Deserialize a binary-encoded value from a byte slice
 ///
@@ -22,18 +116,13 @@ pub fn deserialize_binary_value(data: &[u8]) -> Result<Value> {
 }
 
 /// Deserialize a binary-encoded value from a reader
-pub fn deserialize_binary_value_from_reader<R: Read + ClickHouseRead>(
-    reader: &mut R,
-) -> Result<Value> {
+pub fn deserialize_binary_value_from_reader<R: Read>(reader: &mut R) -> Result<Value> {
     let ty = decode_type(reader)?;
     deserialize_value_with_type(reader, &ty)
 }
 
 /// Deserialize a value given its type
-fn deserialize_value_with_type<R: Read + ClickHouseRead>(
-    reader: &mut R,
-    ty: &Type,
-) -> Result<Value> {
+fn deserialize_value_with_type<R: Read>(reader: &mut R, ty: &Type) -> Result<Value> {
     match ty {
         Type::Nothing => Ok(Value::Null),
 
@@ -50,7 +139,7 @@ fn deserialize_value_with_type<R: Read + ClickHouseRead>(
         Type::UInt256 => {
             let mut bytes = [0u8; 32];
             reader.read_exact(&mut bytes)?;
-            Ok(Value::UInt256(u256::from_le_bytes(bytes)))
+            Ok(Value::UInt256(u256(bytes)))
         }
 
         Type::Int8 => Ok(Value::Int8(reader.read_i8()?)),
@@ -61,7 +150,7 @@ fn deserialize_value_with_type<R: Read + ClickHouseRead>(
         Type::Int256 => {
             let mut bytes = [0u8; 32];
             reader.read_exact(&mut bytes)?;
-            Ok(Value::Int256(i256::from_le_bytes(bytes)))
+            Ok(Value::Int256(i256(bytes)))
         }
 
         Type::Float32 => Ok(Value::Float32(reader.read_f32_le()?)),
@@ -69,7 +158,7 @@ fn deserialize_value_with_type<R: Read + ClickHouseRead>(
 
         Type::Date => {
             let days = reader.read_u16_le()?;
-            Ok(Value::Date(Date::from_days_since_epoch(days)))
+            Ok(Value::Date(Date::from_days(days as i32)))
         }
 
         Type::Date32 => {
@@ -77,14 +166,14 @@ fn deserialize_value_with_type<R: Read + ClickHouseRead>(
             Ok(Value::Date32(Date32(days)))
         }
 
-        Type::DateTime(_) => {
+        Type::DateTime(tz) => {
             let timestamp = reader.read_u32_le()?;
-            Ok(Value::DateTime(DateTime::from_timestamp(timestamp)))
+            Ok(Value::DateTime(DateTime(*tz, timestamp)))
         }
 
-        Type::DateTime64(precision, _) => {
+        Type::DateTime64(precision, tz) => {
             let ticks = reader.read_i64_le()?;
-            Ok(Value::DateTime64(*precision, ticks))
+            Ok(Value::DateTime64(DynDateTime64(*tz, ticks as u64, *precision)))
         }
 
         Type::String => {
@@ -121,18 +210,18 @@ fn deserialize_value_with_type<R: Read + ClickHouseRead>(
                 (low >> 8) as u8,
                 low as u8,
             ];
-            Ok(Value::UUID(uuid::Uuid::from_bytes(uuid_bytes)))
+            Ok(Value::Uuid(uuid::Uuid::from_bytes(uuid_bytes)))
         }
 
         Type::Ipv4 => {
             let value = reader.read_u32_le()?;
-            Ok(Value::IPv4(Ipv4::from(value)))
+            Ok(Value::Ipv4(Ipv4(Ipv4Addr::from(value))))
         }
 
         Type::Ipv6 => {
             let mut bytes = [0u8; 16];
             reader.read_exact(&mut bytes)?;
-            Ok(Value::IPv6(Ipv6::from(bytes)))
+            Ok(Value::Ipv6(Ipv6(Ipv6Addr::from(bytes))))
         }
 
         Type::Array(element_type) => {
@@ -176,7 +265,7 @@ fn deserialize_value_with_type<R: Read + ClickHouseRead>(
             Ok(Value::Map(keys, values))
         }
 
-        _ => Err(Error::Decode(format!(
+        _ => Err(Error::DeserializeError(format!(
             "Unsupported type for binary value deserialization: {:?}",
             ty
         ))),

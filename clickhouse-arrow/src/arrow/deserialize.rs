@@ -19,6 +19,8 @@ mod null;
 mod primitive;
 mod tuple;
 
+use std::sync::Arc;
+
 use arrow::array::*;
 use arrow::datatypes::*;
 
@@ -236,7 +238,7 @@ impl ClickHouseArrowDeserializer for Type {
             Type::Nothing => {
                 // Nothing type represents all-null column
                 // Return null array of appropriate size
-                NullArray::new(rows).into()
+                Arc::new(NullArray::new(rows))
             }
             Type::String
             | Type::FixedSizedString(_)
