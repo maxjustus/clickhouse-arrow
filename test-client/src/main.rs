@@ -740,6 +740,15 @@ async fn execute_query(
         }
 
         settings = Some(settings_obj);
+
+        // Display which JSON format is active
+        let format_desc = match version {
+            "v1" | "legacy" => "V1 (legacy with max_dynamic_paths)",
+            "v2" => "V2 (modern with shared data Map)",
+            "v3" | "flattened" => "V3 (FLATTENED with discriminator columns)",
+            _ => unreachable!(),
+        };
+        eprintln!("# Using JSON format: {}", format_desc);
     }
 
     // Split query into statements (basic approach) - should def be more robust
