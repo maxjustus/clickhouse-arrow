@@ -278,8 +278,11 @@ impl DynamicDeserializer {
         // ColumnDynamic::getSharedVariantDataType() returns String
         types.push(("String".to_string(), Type::String));
 
-        // V1/V2 Dynamic uses Variant serialization internally but WITHOUT a Variant version prefix.
-        // The Variant data follows directly. We need to read prefixes for each nested type.
+        // V1/V2 Dynamic uses Variant serialization internally.
+        // The Variant prefix includes a version u64, then nested prefixes.
+        let _variant_version = reader.read_u64_le().await?;
+
+        // Read prefixes for each nested type (including SharedVariant String)
         for (_, typ) in &types {
             typ.deserialize_prefix_async(reader, state).await?;
         }
