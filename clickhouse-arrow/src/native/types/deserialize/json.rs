@@ -1007,4 +1007,183 @@ mod tests {
         assert!(result[3].contains_key("y"));
         assert!(result[3].contains_key("z"));
     }
+
+    // V1/V2 End-to-end Deserialization Tests
+
+    #[tokio::test]
+    async fn test_json_v2_deserialization_simple() {
+        // Test V2 format with 1 typed path and shared data
+        // JSON structure: {"id": <int>, "name": <string in shared data>}
+        let mut payload = Vec::new();
+
+        // ObjectStructure:
+        // - version = 2
+        payload.extend_from_slice(&2u64.to_le_bytes());
+        // - num_dynamic_paths = 0 (no dynamic paths declared in structure)
+        payload.push(0);
+        // - typed paths are implicit (alphabetically sorted)
+
+        // Data for 2 rows:
+        // Row 0: {"id": 1, "name": "Alice"}
+        // Row 1: {"id": 2, "name": "Bob"}
+
+        // Typed path "id" column (Int64):
+        // No prefix needed for Int64
+        // Values: [1, 2]
+        payload.extend_from_slice(&1i64.to_le_bytes());
+        payload.extend_from_slice(&2i64.to_le_bytes());
+
+        // Shared data Map:
+        // Stream 1: ArraySizes (cumulative offsets)
+        payload.extend_from_slice(&1u64.to_le_bytes()); // row 0: 1 entry
+        payload.extend_from_slice(&2u64.to_le_bytes()); // row 1: 1 entry
+
+        // Stream 2: Keys
+        payload.push(4); // "name" length
+        payload.extend_from_slice(b"name");
+        payload.push(4); // "name" length
+        payload.extend_from_slice(b"name");
+
+        // Stream 3: Values (binary encoded strings)
+        // Row 0: String "Alice"
+        let mut alice_value = vec![0x15]; // String type byte
+        alice_value.push(5); // length
+        alice_value.extend_from_slice(b"Alice");
+        payload.push(alice_value.len() as u8);
+        payload.extend_from_slice(&alice_value);
+
+        // Row 1: String "Bob"
+        let mut bob_value = vec![0x15]; // String type byte
+        bob_value.push(3); // length
+        bob_value.extend_from_slice(b"Bob");
+        payload.push(bob_value.len() as u8);
+        payload.extend_from_slice(&bob_value);
+
+        let mut reader = Cursor::new(payload);
+        let mut state = DeserializerState::default();
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![("id".to_string(), Box::new(Type::Int64))],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        };
+
+        JsonDeserializer::read_prefix(&type_, &mut reader, &mut state).await.unwrap();
+        let values = JsonDeserializer::read(&type_, &mut reader, 2, &mut state).await.unwrap();
+
+        assert_eq!(values.len(), 2);
+
+        // Verify row 0
+        if let Value::Json(json0) = &values[0] {
+            assert_eq!(json0.get("id").unwrap(), &serde_json::json!(1));
+            assert_eq!(json0.get("name").unwrap(), &serde_json::json!("Alice"));
+        } else {
+            panic!("Expected JSON value");
+        }
+
+        // Verify row 1
+        if let Value::Json(json1) = &values[1] {
+            assert_eq!(json1.get("id").unwrap(), &serde_json::json!(2));
+            assert_eq!(json1.get("name").unwrap(), &serde_json::json!("Bob"));
+        } else {
+            panic!("Expected JSON value");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_json_v1_deserialization_with_max_dynamic_paths() {
+        // Test V1 format which has extra max_dynamic_paths field
+        let mut payload = Vec::new();
+
+        // ObjectStructure:
+        // - version = 0 (V1)
+        payload.extend_from_slice(&0u64.to_le_bytes());
+        // - max_dynamic_paths = 100 (this field is skipped)
+        payload.push(100);
+        // - num_dynamic_paths = 0
+        payload.push(0);
+
+        // Data for 1 row: {"value": 42}
+        // Typed path "value" column (Int64):
+        payload.extend_from_slice(&42i64.to_le_bytes());
+
+        // Shared data Map (empty):
+        // Stream 1: ArraySizes
+        payload.extend_from_slice(&0u64.to_le_bytes()); // row 0: 0 entries
+
+        let mut reader = Cursor::new(payload);
+        let mut state = DeserializerState::default();
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![("value".to_string(), Box::new(Type::Int64))],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        };
+
+        JsonDeserializer::read_prefix(&type_, &mut reader, &mut state).await.unwrap();
+        let values = JsonDeserializer::read(&type_, &mut reader, 1, &mut state).await.unwrap();
+
+        assert_eq!(values.len(), 1);
+
+        if let Value::Json(json) = &values[0] {
+            assert_eq!(json.get("value").unwrap(), &serde_json::json!(42));
+        } else {
+            panic!("Expected JSON value");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_json_v2_nested_paths_in_shared_data() {
+        // Test V2 with nested paths like "user.profile.age" in shared data
+        let mut payload = Vec::new();
+
+        // ObjectStructure V2:
+        payload.extend_from_slice(&2u64.to_le_bytes());
+        payload.push(0); // no dynamic paths
+
+        // Data for 1 row: {"user": {"profile": {"age": 30}}}
+        // Shared data Map:
+        // Stream 1: ArraySizes
+        payload.extend_from_slice(&1u64.to_le_bytes()); // 1 entry
+
+        // Stream 2: Keys
+        let key = "user.profile.age";
+        payload.push(key.len() as u8);
+        payload.extend_from_slice(key.as_bytes());
+
+        // Stream 3: Values (Int64 30)
+        let mut value = vec![0x0a]; // Int64 type byte
+        value.extend_from_slice(&30i64.to_le_bytes());
+        payload.push(value.len() as u8);
+        payload.extend_from_slice(&value);
+
+        let mut reader = Cursor::new(payload);
+        let mut state = DeserializerState::default();
+
+        let type_ = Type::JSON {
+            max_dynamic_paths: None,
+            max_dynamic_types: None,
+            typed_paths:       vec![],
+            skip_exact:        vec![],
+            skip_regex:        vec![],
+        };
+
+        JsonDeserializer::read_prefix(&type_, &mut reader, &mut state).await.unwrap();
+        let values = JsonDeserializer::read(&type_, &mut reader, 1, &mut state).await.unwrap();
+
+        assert_eq!(values.len(), 1);
+
+        if let Value::Json(json) = &values[0] {
+            // Should reconstruct nested structure
+            let user = json.get("user").unwrap().as_object().unwrap();
+            let profile = user.get("profile").unwrap().as_object().unwrap();
+            assert_eq!(profile.get("age").unwrap(), &serde_json::json!(30));
+        } else {
+            panic!("Expected JSON value");
+        }
+    }
 }
