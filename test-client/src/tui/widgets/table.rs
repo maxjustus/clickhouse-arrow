@@ -1,4 +1,4 @@
-use std::cell::Cell as StdCell;
+use std::cell::{Cell as StdCell, RefCell};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -376,8 +376,17 @@ pub struct SortableTable {
     // Detail panel visible height (set during render, used for scroll calculations)
     detail_visible_height: StdCell<usize>,
 
+    // Detail panel field positions (start line of each field, set during render)
+    detail_field_positions: RefCell<Vec<usize>>,
+
+    // Detail panel total content height (for scroll clamping)
+    detail_total_height: StdCell<usize>,
+
     // Detail panel focus (for single-row view in Table mode)
     pub detail_focused: bool,
+
+    // Index into visible headers vector (for detail panel navigation)
+    selected_visible_index: usize,
 
     // Header focus for column sorting
     pub header_focused: bool,
@@ -388,6 +397,11 @@ pub struct SortableTable {
     stats_cache:           HashMap<(usize, ValuePath), PathStats>,
     stats_pending:         Option<(usize, ValuePath, oneshot::Receiver<PathStats>)>,
     stats_cache_row_count: usize,
+
+    // Saved scroll state for restoring after FieldValue zoom
+    saved_value_scroll:           Option<usize>,
+    saved_selected_field:         Option<usize>,
+    saved_selected_visible_index: Option<usize>,
 }
 
 impl SortableTable {
@@ -408,13 +422,19 @@ impl SortableTable {
             value_scroll: 0,
             visible_height: 20,
             detail_visible_height: StdCell::new(20),
+            detail_field_positions: RefCell::new(Vec::new()),
+            detail_total_height: StdCell::new(0),
             detail_focused: false,
+            selected_visible_index: 0,
             header_focused: false,
             focused_col: 0,
             visible_cols: 10,
             stats_cache: HashMap::new(),
             stats_pending: None,
             stats_cache_row_count: 0,
+            saved_value_scroll: None,
+            saved_selected_field: None,
+            saved_selected_visible_index: None,
         }
     }
 
@@ -609,85 +629,78 @@ impl SortableTable {
         self.rows.get(row)?.get(field)
     }
 
-    /// Returns Vec of (start_line, end_line) for each field based on current row
-    fn compute_field_line_positions(&self) -> Vec<(usize, usize)> {
-        let row_data = match self.rows.get(self.selected_row) {
-            Some(r) => r,
-            None => return vec![],
-        };
-
-        let mut positions = Vec::new();
-        let mut line = 0;
-
-        for value in row_data.iter() {
-            let start = line;
-            line += 1; // field name line
-
-            // Count value lines (JSON pretty-printed)
-            let display =
-                serde_json::to_string_pretty(value).unwrap_or_else(|_| format!("{:?}", value));
-            let value_lines = display.lines().count();
-            line += value_lines; // each value line is indented
-            line += 1; // empty line between fields
-
-            positions.push((start, line));
+    /// Compute which field headers are currently visible in the viewport.
+    /// Returns indices of fields whose headers are within [scroll_top, scroll_bottom).
+    /// Fallback: if no headers visible (deep in long field), returns the owning field.
+    fn compute_visible_headers(&self) -> Vec<usize> {
+        let positions = self.detail_field_positions.borrow();
+        if positions.is_empty() {
+            return vec![];
         }
 
-        positions
+        let scroll_top = self.value_scroll;
+        let scroll_bottom = scroll_top + self.detail_visible_height.get();
+
+        let mut visible = Vec::new();
+
+        // Find headers within viewport
+        for (field_idx, &line_pos) in positions.iter().enumerate() {
+            if line_pos >= scroll_top && line_pos < scroll_bottom {
+                visible.push(field_idx);
+            }
+        }
+
+        // Fallback: if no headers visible, find owning field
+        if visible.is_empty() {
+            for (field_idx, &line_pos) in positions.iter().enumerate().rev() {
+                if line_pos <= scroll_top {
+                    visible.push(field_idx);
+                    break;
+                }
+            }
+            // Edge case: scrolled above first field
+            if visible.is_empty() {
+                visible.push(0);
+            }
+        }
+
+        visible
     }
 
-    /// Scroll to ensure selected field header is visible.
-    /// If field content is taller than viewport, show header at top.
-    fn scroll_to_selected_field(&mut self) {
-        let positions = self.compute_field_line_positions();
-        let visible = self.detail_visible_height.get();
-
-        if let Some(&(field_start, _)) = positions.get(self.selected_field) {
-            // If field header is above visible area, scroll up to show it at top
-            if field_start < self.value_scroll {
-                self.value_scroll = field_start;
-            }
-            // If field header is below visible area, scroll down to show it at top
-            else if field_start >= self.value_scroll + visible {
-                self.value_scroll = field_start;
-            }
-            // Otherwise, current scroll is fine - header is visible
-        }
-        // No max_scroll clamp - let ratatui's Paragraph handle bounds naturally
+    /// Update selected_field based on visible headers and selected_visible_index.
+    fn sync_selected_field(&mut self) {
+        let visible = self.compute_visible_headers();
+        self.selected_field = visible.get(self.selected_visible_index).copied().unwrap_or(0);
     }
 
-    /// Update selected_field using scroll-spy pattern: select field whose header
-    /// is at or just above the "reading line" (40% down the viewport).
-    fn update_selected_field_from_scroll(&mut self) {
-        let positions = self.compute_field_line_positions();
-        let visible = self.detail_visible_height.get();
-        // Reading line at 40% down viewport - "what am I looking at?"
-        let reading_line = self.value_scroll + (visible * 2 / 5);
-
-        // Select field whose header is at or just above reading line
-        let mut selected = 0;
-        for (i, &(start, _)) in positions.iter().enumerate() {
-            if start <= reading_line {
-                selected = i;
-            } else {
-                break;
-            }
-        }
-        self.selected_field = selected;
+    /// Clamp value_scroll to valid range (prevent scrolling past content)
+    fn clamp_value_scroll(&mut self) {
+        let max_scroll =
+            self.detail_total_height.get().saturating_sub(self.detail_visible_height.get());
+        self.value_scroll = self.value_scroll.min(max_scroll);
     }
 
     /// Page down in detail view
     pub fn page_down_detail(&mut self) {
         let jump = self.detail_visible_height.get().max(1);
         self.value_scroll += jump;
-        self.update_selected_field_from_scroll();
+        self.clamp_value_scroll();
+        // Clamp selected_visible_index to new visible headers
+        let visible = self.compute_visible_headers();
+        self.selected_visible_index =
+            self.selected_visible_index.min(visible.len().saturating_sub(1));
+        self.sync_selected_field();
     }
 
     /// Page up in detail view
     pub fn page_up_detail(&mut self) {
         let jump = self.detail_visible_height.get().max(1);
         self.value_scroll = self.value_scroll.saturating_sub(jump);
-        self.update_selected_field_from_scroll();
+        // Clamp selected_visible_index to new visible headers
+        let visible = self.compute_visible_headers();
+        self.selected_visible_index =
+            self.selected_visible_index.min(visible.len().saturating_sub(1));
+        self.sync_selected_field();
     }
 
     /// Navigate down in current view mode
@@ -695,9 +708,22 @@ impl SortableTable {
         match &mut self.view_mode {
             ResultsViewMode::Table => {
                 if self.detail_focused {
-                    // Free scroll in detail panel, update selected field based on position
-                    self.value_scroll += 3;
-                    self.update_selected_field_from_scroll();
+                    // Navigate between visible headers, scroll at edges
+                    let visible = self.compute_visible_headers();
+                    if visible.is_empty() {
+                        return;
+                    }
+                    if self.selected_visible_index < visible.len().saturating_sub(1) {
+                        // Move within visible headers (no scroll)
+                        self.selected_visible_index += 1;
+                    } else {
+                        // At edge: scroll down 1 line, ride the edge
+                        self.value_scroll += 1;
+                        self.clamp_value_scroll();
+                        let new_visible = self.compute_visible_headers();
+                        self.selected_visible_index = new_visible.len().saturating_sub(1);
+                    }
+                    self.sync_selected_field();
                 } else {
                     self.next_row();
                 }
@@ -720,6 +746,7 @@ impl SortableTable {
                     } else {
                         // Scalar value - scroll text
                         self.value_scroll += 1;
+                        self.clamp_value_scroll();
                     }
                 }
             }
@@ -731,9 +758,19 @@ impl SortableTable {
         match &mut self.view_mode {
             ResultsViewMode::Table => {
                 if self.detail_focused {
-                    // Free scroll in detail panel, update selected field based on position
-                    self.value_scroll = self.value_scroll.saturating_sub(3);
-                    self.update_selected_field_from_scroll();
+                    // Navigate between visible headers, scroll at edges
+                    let visible = self.compute_visible_headers();
+                    if visible.is_empty() {
+                        return;
+                    }
+                    if self.selected_visible_index > 0 {
+                        // Move within visible headers (no scroll)
+                        self.selected_visible_index -= 1;
+                    } else {
+                        // At edge: scroll up 1 line, stay at index 0
+                        self.value_scroll = self.value_scroll.saturating_sub(1);
+                    }
+                    self.sync_selected_field();
                 } else {
                     self.prev_row();
                 }
@@ -858,6 +895,7 @@ impl SortableTable {
                     // Focus the detail panel
                     self.detail_focused = true;
                     self.selected_field = 0;
+                    self.selected_visible_index = 0;
                     self.value_scroll = 0;
                     true
                 } else {
@@ -872,6 +910,10 @@ impl SortableTable {
                         }
                     }
                     let field = self.selected_field;
+                    // Save scroll state for restoring when exiting FieldValue
+                    self.saved_value_scroll = Some(self.value_scroll);
+                    self.saved_selected_field = Some(self.selected_field);
+                    self.saved_selected_visible_index = Some(self.selected_visible_index);
                     self.view_mode = ResultsViewMode::FieldValue {
                         row,
                         field,
@@ -979,7 +1021,16 @@ impl SortableTable {
                     self.view_mode = ResultsViewMode::Table;
                     self.selected_row = row;
                     self.detail_focused = true;
-                    self.selected_field = field;
+                    // Restore saved scroll state
+                    if let Some(scroll) = self.saved_value_scroll.take() {
+                        self.value_scroll = scroll;
+                    }
+                    if let Some(field) = self.saved_selected_field.take() {
+                        self.selected_field = field;
+                    }
+                    if let Some(idx) = self.saved_selected_visible_index.take() {
+                        self.selected_visible_index = idx;
+                    }
                 } else {
                     // Pop path segment to go up one level
                     let mut new_path = path.clone();
@@ -1527,8 +1578,14 @@ impl SortableTable {
         let row_data = self.rows.get(self.selected_row);
 
         let mut lines: Vec<Line> = Vec::new();
+        let mut field_positions: Vec<usize> = Vec::new();
+        // Account for borders (2 chars) in content width for wrapping
+        let content_width = available_width.saturating_sub(2) as usize;
 
         for (i, col_name) in self.columns.iter().enumerate() {
+            // Record position - since we pre-wrap, lines.len() is accurate
+            field_positions.push(lines.len());
+
             let value = row_data.and_then(|r| r.get(i));
 
             // Highlight selected field name when detail is focused
@@ -1543,21 +1600,26 @@ impl SortableTable {
 
             // Render value using recursive helper with type coloring and mini-tables
             if let Some(v) = value {
-                render_value_exploded(&mut lines, "", v, 1, available_width as usize);
+                render_value_exploded(&mut lines, "", v, 1, content_width);
             }
 
             // Empty line between fields
             lines.push(Line::from(""));
         }
 
+        // Store field positions and total height for scroll-spy
+        *self.detail_field_positions.borrow_mut() = field_positions;
+        self.detail_total_height.set(lines.len());
+
+        // Show current field name in title
+        let field_name = self.columns.get(self.selected_field).map(|s| s.as_str()).unwrap_or("");
+        let title_text = format!("{} - Row {} ({})", title, self.selected_row + 1, field_name);
+
+        // Build paragraph - no .wrap() needed since content is pre-wrapped
         Paragraph::new(lines)
             .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("{} - Row {}", title, self.selected_row + 1))
-                    .border_style(border_style),
+                Block::default().borders(Borders::ALL).title(title_text).border_style(border_style),
             )
-            .wrap(Wrap { trim: false })
             .scroll((self.value_scroll as u16, 0))
     }
 }
@@ -1623,6 +1685,51 @@ fn format_relative_time(s: &str) -> Option<String> {
 }
 
 // === Detail Pane Rendering Helpers ===
+
+/// Wrap text to fit within width, breaking at word boundaries
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+
+    let mut result = Vec::new();
+    let mut current_line = String::new();
+
+    for word in text.split_whitespace() {
+        if current_line.is_empty() {
+            if word.chars().count() > width {
+                // Word too long, break it
+                let chars: Vec<char> = word.chars().collect();
+                for chunk in chars.chunks(width) {
+                    result.push(chunk.iter().collect());
+                }
+            } else {
+                current_line = word.to_string();
+            }
+        } else if current_line.chars().count() + 1 + word.chars().count() <= width {
+            current_line.push(' ');
+            current_line.push_str(word);
+        } else {
+            result.push(current_line);
+            if word.chars().count() > width {
+                let chars: Vec<char> = word.chars().collect();
+                for chunk in chars.chunks(width) {
+                    result.push(chunk.iter().collect());
+                }
+                current_line = String::new();
+            } else {
+                current_line = word.to_string();
+            }
+        }
+    }
+    if !current_line.is_empty() {
+        result.push(current_line);
+    }
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
+}
 
 /// Recursively render a value for exploded view with proper indentation
 fn render_value_exploded<'a>(
@@ -1696,11 +1803,54 @@ fn render_value_exploded<'a>(
             ]));
         }
         Value::String(s) => {
-            lines.push(Line::from(vec![
-                Span::raw(prefix),
-                Span::styled(format!("{}: ", label), label_style),
-                Span::styled(format!("\"{}\"", s), value_style),
-            ]));
+            // Wrap long strings to fit within available width
+            let label_prefix = format!("{}: \"", label);
+            let prefix_width = prefix.chars().count() + label_prefix.chars().count();
+            let content_width = available_width.saturating_sub(prefix_width);
+
+            if content_width > 10 && s.chars().count() > content_width {
+                // String needs wrapping
+                let wrapped = wrap_text(s, content_width);
+                for (i, line_text) in wrapped.iter().enumerate() {
+                    if i == 0 {
+                        // First line: prefix + label + opening quote + content
+                        lines.push(Line::from(vec![
+                            Span::raw(prefix.clone()),
+                            Span::styled(label_prefix.clone(), label_style),
+                            Span::styled(line_text.clone(), value_style),
+                        ]));
+                    } else if i == wrapped.len() - 1 {
+                        // Last line: continuation indent + content + closing quote
+                        let cont_prefix = " ".repeat(prefix_width);
+                        lines.push(Line::from(vec![
+                            Span::raw(cont_prefix),
+                            Span::styled(format!("{}\"", line_text), value_style),
+                        ]));
+                    } else {
+                        // Middle lines: continuation indent + content
+                        let cont_prefix = " ".repeat(prefix_width);
+                        lines.push(Line::from(vec![
+                            Span::raw(cont_prefix),
+                            Span::styled(line_text.clone(), value_style),
+                        ]));
+                    }
+                }
+                // Handle single wrapped line (needs closing quote)
+                if wrapped.len() == 1 {
+                    if let Some(last_line) = lines.last_mut() {
+                        if let Some(last_span) = last_line.spans.last_mut() {
+                            last_span.content = format!("{}\"", last_span.content).into();
+                        }
+                    }
+                }
+            } else {
+                // Short string, no wrapping needed
+                lines.push(Line::from(vec![
+                    Span::raw(prefix),
+                    Span::styled(format!("{}: ", label), label_style),
+                    Span::styled(format!("\"{}\"", s), value_style),
+                ]));
+            }
         }
         Value::Number(n) => {
             lines.push(Line::from(vec![

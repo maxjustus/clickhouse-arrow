@@ -62,96 +62,193 @@ pub fn render(f: &mut Frame, app: &mut App) {
 fn render_session(f: &mut Frame, area: Rect, app: &mut App) {
     match &app.session.focus {
         Focus::HistoryView => {
-            // Full-width history view with query cards
             render_history_view(f, area, app);
         }
         Focus::SubPane(_) => {
-            // Full-width results view
             render_results_fullscreen(f, area, app);
         }
     }
+
+    // Render query editor modal on top of any view
+    if app.query_editor_open {
+        render_query_editor_modal(f, area, app);
+    }
 }
 
-/// Render the full-width history view with query cards and input at bottom
+/// Render the full-width history view with query cards (no input - input is in modal)
 fn render_history_view(f: &mut Frame, area: Rect, app: &mut App) {
-    // Check if we're focused on input (no card selected)
-    let input_focused = app.session.selected_card.is_none();
-
-    // Calculate dynamic input height based on textarea lines
-    let line_count = app.session.new_query.lines().len().max(1);
-    let input_height: u16 = (line_count as u16 + 2).clamp(3, area.height / 2);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(input_height)])
-        .split(area);
-
-    // Render cards area
-    render_history_cards(f, chunks[0], app);
-
-    // Render input area at bottom
-    render_input_card(f, chunks[1], app, input_focused);
+    render_history_cards(f, area, app);
 }
 
-/// Render the scrollable list of query cards
-fn render_history_cards(f: &mut Frame, area: Rect, app: &App) {
+/// Render the query editor as a centered modal
+fn render_query_editor_modal(f: &mut Frame, area: Rect, app: &mut App) {
+    // Modal takes 80% width, 50% height, centered
+    let modal_area = centered_rect(80, 50, area);
+    f.render_widget(Clear, modal_area);
+
+    // Title changes based on search mode
+    let title = if app.history.is_searching() {
+        let pattern = app.history.search_pattern();
+        let match_pos = app.history.search_match_position();
+        let match_count = app.history.search_match_count();
+        format!("(reverse-i-search)`{}': {}/{}", pattern, match_pos, match_count)
+    } else {
+        "New Query (Cmd+Enter to run, Esc to close)".to_string()
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    app.session.new_query.set_block(block);
+    app.session.new_query.set_cursor_style(Style::default().bg(Color::White).fg(Color::Black));
+
+    f.render_widget(&app.session.new_query, modal_area);
+}
+
+/// Calculate card height based on SQL content and available width
+fn calc_card_height(sql: &str, width: u16) -> u16 {
+    // Inner width = total - 2 (borders)
+    let inner_width = width.saturating_sub(2).max(1) as usize;
+    // Count wrapped lines (character-based estimation)
+    let sql_text = sql.replace('\n', " ");
+    let char_count = sql_text.chars().count();
+    let wrapped_lines = (char_count / inner_width + 1).max(1);
+    // Height = 2 (borders) + sql_lines + 1 (footer)
+    // Minimum 4 lines, maximum 20 lines
+    (wrapped_lines as u16 + 3).clamp(4, 20)
+}
+
+/// Render the scrollable list of query cards with dynamic heights
+fn render_history_cards(f: &mut Frame, area: Rect, app: &mut App) {
     let border_style = Style::default().fg(Color::DarkGray);
-    let block = Block::default().borders(Borders::ALL).title("History").border_style(border_style);
-    let inner = block.inner(area);
+
+    // Build title with optional search indicator (yellow when active)
+    let title: Line = if app.session.history_search_active {
+        Line::from(vec![
+            Span::raw("History "),
+            Span::styled(
+                format!("/ {}_", app.session.history_search_pattern),
+                Style::default().fg(Color::Yellow),
+            ),
+        ])
+    } else if !app.session.history_search_pattern.is_empty() {
+        Line::from(vec![
+            Span::raw("History "),
+            Span::styled(
+                format!("[{}]", app.session.history_search_pattern),
+                Style::default().fg(Color::Yellow),
+            ),
+        ])
+    } else {
+        Line::from("History")
+    };
+
+    let block = Block::default().borders(Borders::ALL).title(title).border_style(border_style);
+    let cards_inner = block.inner(area);
     f.render_widget(block, area);
 
-    if app.session.history.is_empty() {
-        let empty = Paragraph::new("No queries yet. Press 'n' to write a new query.")
+    // Get filtered indices
+    let filtered_indices = app.session.filtered_history_indices();
+
+    if filtered_indices.is_empty() {
+        let msg = if app.session.history.is_empty() {
+            "No queries yet. Press 'n' to write a new query."
+        } else {
+            "No matching queries"
+        };
+        let empty = Paragraph::new(msg)
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
-        f.render_widget(empty, inner);
+        f.render_widget(empty, cards_inner);
         return;
     }
 
-    // Calculate card height (fixed at 8 lines for now: header, sql, divider, 3 preview rows,
-    // footer)
-    const CARD_HEIGHT: u16 = 8;
-    let visible_cards = (inner.height / CARD_HEIGHT).max(1) as usize;
-    let total_cards = app.session.history.len();
+    let total_cards = filtered_indices.len();
 
-    // Calculate scroll offset to keep selected card visible
-    // When input is focused (None), scroll to show last cards (near input)
-    let scroll_offset = if let Some(selected) = app.session.selected_card {
-        if selected >= visible_cards { selected - visible_cards + 1 } else { 0 }
-    } else {
-        // Input focused - scroll to show cards nearest to input (bottom of list)
-        total_cards.saturating_sub(visible_cards)
-    };
+    // Calculate heights for filtered cards
+    let card_heights: Vec<u16> = filtered_indices
+        .iter()
+        .map(|&i| calc_card_height(&app.session.history[i].sql_preview, cards_inner.width))
+        .collect();
 
-    // Render visible cards
-    let mut y_offset = 0;
-    for (idx, entry) in app.session.history.iter().enumerate().skip(scroll_offset) {
-        if y_offset + CARD_HEIGHT > inner.height {
-            break;
+    // Ensure scroll_offset is valid (within filtered list)
+    let scroll_offset = &mut app.session.history_scroll_offset;
+    *scroll_offset = (*scroll_offset).min(total_cards.saturating_sub(1));
+
+    // Find selected card's position in filtered list
+    let selected_filtered_pos =
+        app.session.selected_card.and_then(|sel| filtered_indices.iter().position(|&i| i == sel));
+
+    // Adjust scroll_offset to ensure selected card is visible
+    if let Some(selected_pos) = selected_filtered_pos {
+        // If selected is above viewport, scroll up
+        if selected_pos < *scroll_offset {
+            *scroll_offset = selected_pos;
         }
 
-        let card_area = Rect {
-            x:      inner.x,
-            y:      inner.y + y_offset,
-            width:  inner.width,
-            height: CARD_HEIGHT,
-        };
+        // If selected is below viewport, scroll down until it fits
+        loop {
+            let mut y = 0u16;
+            let mut last_visible_pos = *scroll_offset;
+            for (pos, &h) in card_heights.iter().enumerate().skip(*scroll_offset) {
+                if y + h > cards_inner.height {
+                    break;
+                }
+                last_visible_pos = pos;
+                y += h;
+            }
 
-        let is_selected = app.session.selected_card == Some(idx);
-        let is_running = app.session.running_queries.contains_key(&idx);
-        let running_block = app.session.running_queries.get(&idx);
+            if selected_pos <= last_visible_pos {
+                break; // Selected is visible
+            }
 
-        render_query_card(f, card_area, entry, is_selected, is_running, running_block);
-        y_offset += CARD_HEIGHT;
+            // Scroll down by 1
+            if *scroll_offset < total_cards.saturating_sub(1) {
+                *scroll_offset += 1;
+            } else {
+                break; // Can't scroll further
+            }
+        }
     }
 
-    // Show scroll indicator if needed
-    if total_cards > visible_cards {
-        let position = app.session.selected_card.map(|s| s + 1).unwrap_or(total_cards + 1);
-        let indicator = format!(" {}/{} ", position, total_cards + 1); // +1 for input
+    // Find which cards are visible in current viewport
+    let mut visible_cards: Vec<(usize, usize, u16, u16)> = vec![]; // (filtered_pos, history_idx, y_offset, height)
+    let mut y = 0u16;
+    for (pos, &h) in card_heights.iter().enumerate().skip(*scroll_offset) {
+        if y + h > cards_inner.height {
+            break;
+        }
+        visible_cards.push((pos, filtered_indices[pos], y, h));
+        y += h;
+    }
+
+    // Render visible cards
+    for (_, history_idx, y_offset, height) in &visible_cards {
+        let entry = &app.session.history[*history_idx];
+        let card_area = Rect {
+            x:      cards_inner.x,
+            y:      cards_inner.y + y_offset,
+            width:  cards_inner.width,
+            height: *height,
+        };
+
+        let is_selected = app.session.selected_card == Some(*history_idx);
+        let is_running = app.session.running_queries.contains_key(history_idx);
+        let running_block = app.session.running_queries.get(history_idx);
+
+        render_query_card(f, card_area, entry, is_selected, is_running, running_block);
+    }
+
+    // Show scroll indicator if there are cards not visible
+    let all_visible = visible_cards.len() == total_cards;
+    if !all_visible {
+        let position = selected_filtered_pos.map(|p| p + 1).unwrap_or(0);
+        let indicator = format!(" {}/{} ", position, total_cards);
         let indicator_area = Rect {
-            x:      inner.x + inner.width.saturating_sub(indicator.len() as u16 + 1),
-            y:      inner.y + inner.height.saturating_sub(1),
+            x:      cards_inner.x + cards_inner.width.saturating_sub(indicator.len() as u16 + 1),
+            y:      cards_inner.y + cards_inner.height.saturating_sub(1),
             width:  indicator.len() as u16,
             height: 1,
         };
@@ -219,47 +316,46 @@ fn render_query_card(
     let sql_para = Paragraph::new(sql_text).style(sql_style).wrap(Wrap { trim: true });
     f.render_widget(sql_para, sql_area);
 
-    // Footer: error message or row count
+    // Footer: error message or stats
     let footer = if let Some(ref error) = entry.error {
         let error_preview: String = error.chars().take(inner.width as usize).collect();
         Span::styled(error_preview, Style::default().fg(Color::Red))
+    } else if let Some(block) = running_block {
+        // Running query: show live stats
+        let stats = &block.stats;
+        let rows = stats.final_rows_read.unwrap_or(stats.max_rows_read);
+        let bytes = stats.final_bytes_read.unwrap_or(stats.max_bytes_read);
+        let mem = stats.peak_ram_current;
+        Span::styled(
+            format!(
+                "{} read | {} | {} mem",
+                format_number(rows),
+                format_bytes(bytes),
+                format_bytes(mem)
+            ),
+            Style::default().fg(Color::DarkGray),
+        )
+    } else if entry.rows_read.is_some() || entry.bytes_read.is_some() || entry.peak_memory.is_some()
+    {
+        // Completed query with stats
+        let rows = entry.rows_read.unwrap_or(0);
+        let bytes = entry.bytes_read.unwrap_or(0);
+        let mem = entry.peak_memory.unwrap_or(0);
+        Span::styled(
+            format!(
+                "{} read | {} | {} mem",
+                format_number(rows),
+                format_bytes(bytes),
+                format_bytes(mem)
+            ),
+            Style::default().fg(Color::DarkGray),
+        )
     } else {
-        let row_count = running_block.map(|b| b.result_count()).unwrap_or(entry.row_count as usize);
-        Span::styled(format!("{} rows", row_count), Style::default().fg(Color::DarkGray))
+        // Fallback for old entries without stats
+        Span::styled(format!("{} rows", entry.row_count), Style::default().fg(Color::DarkGray))
     };
     let footer_para = Paragraph::new(Line::from(footer));
     f.render_widget(footer_para, footer_area);
-}
-
-/// Render the input card at the bottom
-fn render_input_card(f: &mut Frame, area: Rect, app: &mut App, is_focused: bool) {
-    let border_style = if is_focused {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    let title = if is_focused && app.session.mode == Mode::Edit {
-        "New Query (Ctrl+Enter to run)"
-    } else if is_focused {
-        "New Query (Enter to edit)"
-    } else {
-        "New Query"
-    };
-
-    // Set textarea block styling
-    let block = Block::default().borders(Borders::ALL).title(title).border_style(border_style);
-    app.session.new_query.set_block(block);
-
-    // Style the textarea cursor based on focus
-    if is_focused && app.session.mode == Mode::Edit {
-        app.session.new_query.set_cursor_style(Style::default().bg(Color::White).fg(Color::Black));
-    } else {
-        app.session.new_query.set_cursor_style(Style::default());
-    }
-
-    // Render the actual TextArea widget
-    f.render_widget(&app.session.new_query, area);
 }
 
 /// Render full-screen results view (when viewing a specific query)
@@ -317,13 +413,13 @@ fn format_relative_time(timestamp: u64) -> String {
     let diff = now - timestamp;
 
     if diff < 60 {
-        format!("{}s", diff)
+        format!("{}s ago", diff)
     } else if diff < 3600 {
-        format!("{}m", diff / 60)
+        format!("{}m ago", diff / 60)
     } else if diff < 86400 {
-        format!("{}h", diff / 3600)
+        format!("{}h ago", diff / 3600)
     } else {
-        format!("{}d", diff / 86400)
+        format!("{}d ago", diff / 86400)
     }
 }
 
@@ -522,15 +618,23 @@ fn render_results_pane(
     }
 
     if let Some(ref error) = block.error {
+        // Combine error color (red) with focus state
+        let border_style = if focused && mode == Mode::Edit {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else if focused {
+            Style::default().fg(Color::LightRed)
+        } else {
+            Style::default().fg(Color::Red)
+        };
         let error_block = Block::default()
             .borders(Borders::ALL)
             .title(format!("{} Error", expand_char))
-            .border_style(Style::default().fg(Color::Red));
+            .border_style(border_style);
         let para = Paragraph::new(error.as_str())
             .block(error_block)
             .style(Style::default().fg(Color::Red))
             .wrap(Wrap { trim: false })
-            .scroll((0, 0));
+            .scroll((block.error_scroll, 0));
         f.render_widget(para, area);
         return;
     }
@@ -793,49 +897,44 @@ fn render_stats_pane(
                     .constraints(constraints)
                     .split(area);
 
-                // Line 1: Current stats with rates
-                let current_line = format!(
-                    "{} Stats Current: {} rows ({}) @ {}/s, {}/s",
-                    expand_char,
-                    format_number(block.stats.rows_read),
-                    format_bytes(block.stats.bytes_read),
-                    format_rate(read_rows_rate),
-                    format_bytes(read_bytes_rate as u64),
-                );
-
-                // Line 2: Max stats
-                let max_line = format!(
-                    "           Max:     {} rows ({})",
-                    format_number(block.stats.max_rows_read),
-                    format_bytes(block.stats.max_bytes_read),
-                );
-
-                // Line 3: Final stats (from server ProfileInfo)
-                let final_line = match (block.stats.final_rows_read, block.stats.final_bytes_read) {
-                    (Some(rows), Some(bytes)) => {
-                        let blocks_str = block
-                            .stats
-                            .final_blocks
-                            .map(|b| format!(" in {} blocks", format_number(b)))
-                            .unwrap_or_default();
-                        format!(
-                            "           Final:   {} rows ({}){} [from server]",
-                            format_number(rows),
-                            format_bytes(bytes),
-                            blocks_str
-                        )
+                // Stats line - show progress while running, server totals when complete
+                let stats_line = if block.running {
+                    format!(
+                        "{} Running: {} rows read, {} read @ {}/s, {}/s",
+                        expand_char,
+                        format_number(block.stats.rows_read),
+                        format_bytes(block.stats.bytes_read),
+                        format_rate(read_rows_rate),
+                        format_bytes(read_bytes_rate as u64),
+                    )
+                } else {
+                    match (block.stats.final_rows_read, block.stats.final_bytes_read) {
+                        (Some(rows), Some(bytes)) => {
+                            let blocks_str = block
+                                .stats
+                                .final_blocks
+                                .map(|b| format!(" in {} blocks", format_number(b)))
+                                .unwrap_or_default();
+                            let peak_mem = format_bytes(block.stats.peak_ram_current);
+                            format!(
+                                "{} Finished: {} rows read, {} read{}, peak {}",
+                                expand_char,
+                                format_number(rows),
+                                format_bytes(bytes),
+                                blocks_str,
+                                peak_mem
+                            )
+                        }
+                        _ => format!("{} Finished: (server stats not available)", expand_char),
                     }
-                    _ if block.running => "           Final:   (query in progress...)".to_string(),
-                    _ => "           Final:   (not available)".to_string(),
                 };
 
-                let mut lines =
-                    vec![Line::from(current_line), Line::from(max_line), Line::from(final_line)];
+                let mut lines = vec![Line::from(stats_line)];
 
-                // Line 4: Write stats (if any)
+                // Write stats (if any)
                 if has_writes {
                     let write_line = format!(
-                        "           Write:   {} rows ({}) @ {}/s, {}/s",
+                        "           Write: {} rows written, {} written @ {}/s, {}/s",
                         format_number(block.stats.rows_written),
                         format_bytes(block.stats.bytes_written),
                         format_rate(write_rows_rate),
@@ -847,15 +946,20 @@ fn render_stats_pane(
                 // CPU and RAM sparklines (fixed 16 char width)
                 let cpu_sparkline = sparkline_str(&block.stats.cpu_history, 16);
                 let ram_sparkline = sparkline_str(&block.stats.ram_history, 16);
-                let peak_ram_sparkline = sparkline_str(&block.stats.peak_ram_history, 16);
                 let cpu_str = format!("CPU {} {}%", cpu_sparkline, block.stats.cpu_current);
-                let ram_str = format!(
-                    "RAM {} {} (peak {} {})",
-                    ram_sparkline,
-                    format_bytes(block.stats.ram_current),
-                    peak_ram_sparkline,
-                    format_bytes(block.stats.peak_ram_current)
-                );
+                // Only show peak in RAM line when running - when finished, peak is in the Finished
+                // line
+                let is_finished = block.stats.final_rows_read.is_some();
+                let ram_str = if is_finished {
+                    format!("RAM {} {}", ram_sparkline, format_bytes(block.stats.ram_current))
+                } else {
+                    format!(
+                        "RAM {} {}, peak {}",
+                        ram_sparkline,
+                        format_bytes(block.stats.ram_current),
+                        format_bytes(block.stats.peak_ram_current)
+                    )
+                };
                 let metrics_line = format!("  {} | {}", cpu_str, ram_str);
                 lines.push(Line::from(metrics_line));
 
@@ -894,19 +998,17 @@ fn render_stats_pane(
         // Prefer final values if available, otherwise use current
         let (rows, bytes, label) = match (block.stats.final_rows_read, block.stats.final_bytes_read)
         {
-            (Some(r), Some(b)) => (r, b, "Final"),
-            _ => (block.stats.rows_read, block.stats.bytes_read, "Curr"),
+            (Some(r), Some(b)) => (r, b, "Finished"),
+            _ => (block.stats.rows_read, block.stats.bytes_read, "Running"),
         };
 
         let text = if has_writes {
             format!(
-                "{} Stats: {} {} rows ({}) | Max {} rows | W {} @ {}/s | CPU {}% | RAM {} (peak \
-                 {})",
+                "{} {}: {} rows read, {} read | W {} @ {}/s | CPU {}% | RAM {}, peak {}",
                 expand_char,
                 label,
                 format_number(rows),
                 format_bytes(bytes),
-                format_number(block.stats.max_rows_read),
                 format_number(block.stats.rows_written),
                 format_rate(write_rows_rate),
                 cpu_pct,
@@ -915,12 +1017,11 @@ fn render_stats_pane(
             )
         } else {
             format!(
-                "{} Stats: {} {} rows ({}) | Max {} rows | CPU {}% | RAM {} (peak {})",
+                "{} {}: {} rows read, {} read | CPU {}% | RAM {}, peak {}",
                 expand_char,
                 label,
                 format_number(rows),
                 format_bytes(bytes),
-                format_number(block.stats.max_rows_read),
                 cpu_pct,
                 ram_str,
                 peak_ram_str
@@ -1262,52 +1363,67 @@ fn render_logs_pane(
     let dimmed_style = Style::default().fg(Color::DarkGray);
 
     let expand_char = if expanded { "▼" } else { "▶" };
+    let source_count = block.logs_data.source_count();
     let thread_count = block.logs_data.thread_count();
     let total_logs = block.logs_data.total_log_count();
 
     // Update visible height for scroll calculations
     block.logs_data.visible_height = area.height.saturating_sub(3) as usize;
 
-    if !expanded || thread_count == 0 {
-        let text =
-            format!("{} Logs ({} threads, {} entries)", expand_char, thread_count, total_logs);
+    if !expanded || source_count == 0 {
+        let text = format!(
+            "{} Logs ({} sources, {} threads, {} entries)",
+            expand_char, source_count, thread_count, total_logs
+        );
         let para = Paragraph::new(text).style(style);
         f.render_widget(para, area);
         return;
     }
 
-    match block.logs_data.view_mode {
-        LogsViewMode::Grouped => {
-            render_logs_grouped(f, area, block, expand_char, style);
+    match &block.logs_data.view_mode {
+        LogsViewMode::Sources => {
+            render_logs_sources(f, area, block, expand_char, style);
         }
-        LogsViewMode::Expanded { thread_id } => {
-            // Split view: grouped left, thread entries right
+        LogsViewMode::Threads { source } => {
+            let source = source.clone();
+            // Split view: sources left, threads right
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .split(area);
 
-            // Left: grouped table (dimmed)
-            render_logs_grouped(f, chunks[0], block, expand_char, dimmed_style);
-
-            // Right: thread entries (focused)
-            render_logs_thread_expanded(f, chunks[1], block, thread_id, style);
+            render_logs_sources(f, chunks[0], block, expand_char, dimmed_style);
+            render_logs_threads(f, chunks[1], block, &source, style);
         }
-        LogsViewMode::EntryDetail { thread_id, entry_index, scroll_offset } => {
-            // Split view: grouped left, entry detail right
+        LogsViewMode::Entries { source, thread_id } => {
+            let source = source.clone();
+            let thread_id = *thread_id;
+            // Split view: sources left, entries right
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .split(area);
 
-            // Left: grouped table (dimmed)
-            render_logs_grouped(f, chunks[0], block, expand_char, dimmed_style);
+            render_logs_sources(f, chunks[0], block, expand_char, dimmed_style);
+            render_logs_entries(f, chunks[1], block, &source, thread_id, style);
+        }
+        LogsViewMode::EntryDetail { source, thread_id, entry_index, scroll_offset } => {
+            let source = source.clone();
+            let thread_id = *thread_id;
+            let entry_index = *entry_index;
+            let scroll_offset = *scroll_offset;
+            // Split view: sources left, entry detail right
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .split(area);
 
-            // Right: entry detail (focused)
+            render_logs_sources(f, chunks[0], block, expand_char, dimmed_style);
             render_log_entry_detail(
                 f,
                 chunks[1],
                 block,
+                &source,
                 thread_id,
                 entry_index,
                 scroll_offset,
@@ -1317,7 +1433,7 @@ fn render_logs_pane(
     }
 }
 
-fn render_logs_grouped(
+fn render_logs_sources(
     f: &mut Frame,
     area: Rect,
     block: &QueryBlock,
@@ -1330,13 +1446,13 @@ fn render_logs_grouped(
     let selected_row = logs_data.selected_row;
 
     let rows: Vec<Row> = logs_data
-        .sorted_threads
+        .sorted_sources
         .iter()
         .enumerate()
         .skip(scroll_offset)
         .take(visible_height)
-        .filter_map(|(i, thread_id)| {
-            let group = logs_data.groups.get(thread_id)?;
+        .filter_map(|(i, source_name)| {
+            let source = logs_data.sources.get(source_name)?;
 
             let row_style = if i == selected_row {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
@@ -1344,43 +1460,31 @@ fn render_logs_grouped(
                 Style::default()
             };
 
-            let text_truncated: String =
-                group.latest_text.chars().take(60).collect::<String>().replace('\n', " ");
-            let text_display = if group.latest_text.len() > 60 {
-                format!("{}...", text_truncated)
-            } else {
-                text_truncated
-            };
-
             Some(
                 Row::new(vec![
-                    format!("{}", group.thread_id),
-                    format!("({})", group.entries.len()),
-                    group.latest_source.clone(),
-                    text_display,
+                    source.source.clone(),
+                    format!("{}", source.thread_count()),
+                    format!("{}", source.entry_count()),
+                    source.latest_text.replace('\n', " "),
                 ])
                 .style(row_style),
             )
         })
         .collect();
 
-    let widths = [
-        Constraint::Length(12),
-        Constraint::Length(6),
-        Constraint::Length(20),
-        Constraint::Min(30),
-    ];
+    let widths =
+        [Constraint::Fill(1), Constraint::Length(8), Constraint::Length(8), Constraint::Fill(2)];
 
     let title = format!(
-        "{} Logs ({} threads, {} total)",
+        "{} Logs ({} sources, {} total)",
         expand_char,
-        logs_data.thread_count(),
+        logs_data.source_count(),
         logs_data.total_log_count()
     );
 
     let table = Table::new(rows, widths)
         .header(
-            Row::new(vec!["Thread", "Count", "Source", "Latest Text"])
+            Row::new(vec!["Source", "Threads", "Entries", "Latest"])
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         )
         .block(Block::default().borders(Borders::ALL).title(title).border_style(style));
@@ -1388,17 +1492,80 @@ fn render_logs_grouped(
     f.render_widget(table, area);
 }
 
-fn render_logs_thread_expanded(
+fn render_logs_threads(
     f: &mut Frame,
     area: Rect,
     block: &QueryBlock,
+    source_name: &str,
+    style: Style,
+) {
+    let logs_data = &block.logs_data;
+
+    let source = match logs_data.sources.get(source_name) {
+        Some(s) => s,
+        None => {
+            let para = Paragraph::new("Source not found").style(Style::default().fg(Color::Red));
+            f.render_widget(para, area);
+            return;
+        }
+    };
+
+    let visible_height = logs_data.visible_height;
+    let scroll_offset = logs_data.secondary_scroll;
+    let selected_row = logs_data.secondary_selected;
+
+    let rows: Vec<Row> = source
+        .sorted_threads
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
+        .filter_map(|(i, thread_id)| {
+            let thread = source.threads.get(thread_id)?;
+
+            let row_style = if i == selected_row {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default()
+            };
+
+            Some(
+                Row::new(vec![
+                    format!("{}", thread.thread_id),
+                    format!("{}", thread.entries.len()),
+                    thread.latest_text.replace('\n', " "),
+                ])
+                .style(row_style),
+            )
+        })
+        .collect();
+
+    let widths = [Constraint::Length(12), Constraint::Length(8), Constraint::Fill(1)];
+
+    let title = format!("{} ({} threads) - h/Left to go back", source_name, source.thread_count());
+
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(vec!["Thread", "Entries", "Latest"])
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        )
+        .block(Block::default().borders(Borders::ALL).title(title).border_style(style));
+
+    f.render_widget(table, area);
+}
+
+fn render_logs_entries(
+    f: &mut Frame,
+    area: Rect,
+    block: &QueryBlock,
+    source_name: &str,
     thread_id: u64,
     style: Style,
 ) {
     let logs_data = &block.logs_data;
 
-    let group = match logs_data.groups.get(&thread_id) {
-        Some(g) => g,
+    let thread = match logs_data.sources.get(source_name).and_then(|s| s.threads.get(&thread_id)) {
+        Some(t) => t,
         None => {
             let para = Paragraph::new("Thread not found").style(Style::default().fg(Color::Red));
             f.render_widget(para, area);
@@ -1407,10 +1574,10 @@ fn render_logs_thread_expanded(
     };
 
     let visible_height = logs_data.visible_height;
-    let scroll_offset = logs_data.expanded_scroll;
-    let selected_row = logs_data.expanded_selected;
+    let scroll_offset = logs_data.tertiary_scroll;
+    let selected_row = logs_data.tertiary_selected;
 
-    let rows: Vec<Row> = group
+    let rows: Vec<Row> = thread
         .entries
         .iter()
         .enumerate()
@@ -1423,26 +1590,18 @@ fn render_logs_thread_expanded(
                 Style::default()
             };
 
-            let text_truncated: String =
-                entry.text.chars().take(80).collect::<String>().replace('\n', " ");
-            let text_display = if entry.text.len() > 80 {
-                format!("{}...", text_truncated)
-            } else {
-                text_truncated
-            };
-
-            Row::new(vec![entry.time.clone(), entry.source.clone(), text_display]).style(row_style)
+            Row::new(vec![entry.time.clone(), entry.text.replace('\n', " ")]).style(row_style)
         })
         .collect();
 
-    let widths = [Constraint::Length(26), Constraint::Length(20), Constraint::Min(40)];
+    let widths = [Constraint::Length(26), Constraint::Fill(1)];
 
     let title =
-        format!("Thread {} ({} entries) - h/Left to go back", thread_id, group.entries.len());
+        format!("Thread {} ({} entries) - h/Left to go back", thread_id, thread.entries.len());
 
     let table = Table::new(rows, widths)
         .header(
-            Row::new(vec!["Time", "Source", "Text"])
+            Row::new(vec!["Time", "Text"])
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         )
         .block(Block::default().borders(Borders::ALL).title(title).border_style(style));
@@ -1454,23 +1613,32 @@ fn render_log_entry_detail(
     f: &mut Frame,
     area: Rect,
     block: &QueryBlock,
+    source_name: &str,
     thread_id: u64,
     entry_index: usize,
     scroll_offset: u16,
     style: Style,
 ) {
-    let entry = block.logs_data.groups.get(&thread_id).and_then(|g| g.entries.get(entry_index));
+    let entry = block
+        .logs_data
+        .sources
+        .get(source_name)
+        .and_then(|s| s.threads.get(&thread_id))
+        .and_then(|t| t.entries.get(entry_index));
 
     if let Some(entry) = entry {
         let content = format!(
             "Time: {}\nThread: {}\nSource: {}\n\n{}",
             entry.time, entry.thread_id, entry.source, entry.text
         );
-        let title = format!(
-            "Log Entry {}/{} - h/Left to go back",
-            entry_index + 1,
-            block.logs_data.groups.get(&thread_id).map(|g| g.entries.len()).unwrap_or(0)
-        );
+        let entry_count = block
+            .logs_data
+            .sources
+            .get(source_name)
+            .and_then(|s| s.threads.get(&thread_id))
+            .map(|t| t.entries.len())
+            .unwrap_or(0);
+        let title = format!("Log Entry {}/{} - h/Left to go back", entry_index + 1, entry_count);
         let para = Paragraph::new(content)
             .block(Block::default().borders(Borders::ALL).title(title).border_style(style))
             .wrap(Wrap { trim: false })
@@ -1495,32 +1663,34 @@ fn pane_style(focused: bool, mode: Mode) -> Style {
 }
 
 fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
-    let mode_str = match app.session.mode {
-        Mode::Navigation => "NAV",
-        Mode::Edit => "EDIT",
+    let mode_str = if app.query_editor_open {
+        "EDIT"
+    } else {
+        match app.session.mode {
+            Mode::Navigation => "NAV",
+            Mode::Edit => "EDIT",
+        }
     };
 
-    let focus_str = match &app.session.focus {
-        Focus::HistoryView => {
-            if app.session.selected_card.is_none() {
-                "New Query".to_string()
-            } else {
-                "History".to_string()
+    let focus_str = if app.query_editor_open {
+        "New Query".to_string()
+    } else {
+        match &app.session.focus {
+            Focus::HistoryView => "History".to_string(),
+            Focus::SubPane(pane) => {
+                let pane_name = match pane {
+                    SubPane::Sql => "SQL",
+                    SubPane::Results => "Results",
+                    SubPane::Stats => "Stats",
+                    SubPane::Logs => "Logs",
+                };
+                let query_str = app
+                    .session
+                    .selected_card
+                    .map(|id| format!("Q{}", id + 1))
+                    .unwrap_or_else(|| "?".to_string());
+                format!("{} > {}", query_str, pane_name)
             }
-        }
-        Focus::SubPane(pane) => {
-            let pane_name = match pane {
-                SubPane::Sql => "SQL",
-                SubPane::Results => "Results",
-                SubPane::Stats => "Stats",
-                SubPane::Logs => "Logs",
-            };
-            let query_str = app
-                .session
-                .selected_card
-                .map(|id| format!("Q{}", id + 1))
-                .unwrap_or_else(|| "?".to_string());
-            format!("{} > {}", query_str, pane_name)
         }
     };
 
@@ -1529,34 +1699,33 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
         if query_count > 0 { format!(" ({} queries)", query_count) } else { String::new() };
 
     // Context-sensitive hints
-    let hints =
-        if matches!(app.session.focus, Focus::HistoryView) && app.session.selected_card.is_none() {
-            "Ctrl+Enter: run | Esc: cancel | Ctrl+P/N: history | ?: help".to_string()
-        } else {
-            let mut parts = vec!["j/k: navigate", "l: enter", "h: back", "n: new query"];
+    let hints = if app.query_editor_open {
+        "Cmd+Enter: run | Esc: close | Ctrl+P/N: history | Ctrl+R: search | ?: help".to_string()
+    } else {
+        let mut parts = vec!["j/k: navigate", "l: enter", "h: back", "n: new query"];
 
-            // Cancel hint when query is running
-            if app.session.selected_is_running()
-                && app
-                    .session
-                    .displayed_block()
-                    .filter(|block| block.running && !block.cancel_requested)
-                    .is_some()
-            {
-                parts.push("C: cancel");
-            }
+        // Cancel hint when query is running
+        if app.session.selected_is_running()
+            && app
+                .session
+                .displayed_block()
+                .filter(|block| block.running && !block.cancel_requested)
+                .is_some()
+        {
+            parts.push("C: cancel");
+        }
 
-            // Copy hint when in Results pane + Edit mode
-            if matches!(
-                (&app.session.focus, &app.session.mode),
-                (Focus::SubPane(SubPane::Results), Mode::Edit)
-            ) {
-                parts.push("y: copy");
-            }
+        // Copy hint when in Results pane + Edit mode
+        if matches!(
+            (&app.session.focus, &app.session.mode),
+            (Focus::SubPane(SubPane::Results), Mode::Edit)
+        ) {
+            parts.push("y: copy");
+        }
 
-            parts.push("?: help");
-            parts.join(" | ")
-        };
+        parts.push("?: help");
+        parts.join(" | ")
+    };
 
     let status = format!(" [{}] {}{} | {}", mode_str, focus_str, query_info, hints);
 
@@ -1571,34 +1740,32 @@ fn render_help(f: &mut Frame) {
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
-        Line::from("Navigation Mode:"),
-        Line::from("  j/Down            Move down"),
-        Line::from("  k/Up              Move up"),
-        Line::from("  l/Right/Enter     Enter pane (auto-expands)"),
-        Line::from("  h/Left/Esc        Exit pane (auto-collapses)"),
-        Line::from("  n/i               Jump to New Query"),
+        Line::from("History View:"),
+        Line::from("  j/k or Down/Up    Navigate cards"),
+        Line::from("  l/Right/Enter     View query results"),
+        Line::from("  n/i               Open new query editor"),
+        Line::from("  N/I (Shift)       Open editor with current query's SQL"),
+        Line::from("  Ctrl+P/N          Previous/next query card"),
+        Line::from("  Alt+1..9          Jump to query 1-9"),
         Line::from("  ?                 Toggle help"),
         Line::from("  Ctrl+Q            Quit"),
         Line::from(""),
-        Line::from("Query History Navigation (Global):"),
-        Line::from("  Ctrl+P            Previous query in history"),
-        Line::from("  Ctrl+N            Next query in history"),
-        Line::from("  Alt+1..9          Jump to query 1-9"),
+        Line::from("Query Editor (Modal):"),
+        Line::from("  Cmd+Enter         Execute query"),
+        Line::from("  Escape            Close editor"),
+        Line::from("  Ctrl+P/N          Recall command history"),
+        Line::from("  Ctrl+R            Search command history"),
+        Line::from("  Ctrl+L            Format SQL"),
         Line::from(""),
-        Line::from("Edit Mode (New Query):"),
-        Line::from("  Escape            Exit to navigation mode"),
-        Line::from("  Ctrl+Enter        Execute query"),
-        Line::from("  Alt+Enter         Execute query (alternative)"),
-        Line::from("  Ctrl+P/N          Recall history (replaces text)"),
-        Line::from(""),
-        Line::from("Edit Mode (Results/Stats/Logs):"),
-        Line::from("  j/k or Up/Down    Navigate rows"),
-        Line::from("  l/Right           Drill into row"),
-        Line::from("  h/Left            Go back (or exit pane)"),
+        Line::from("Results View:"),
+        Line::from("  j/k or Down/Up    Navigate panes/rows"),
+        Line::from("  l/Right/Enter     Expand pane / drill into row"),
+        Line::from("  h/Left/Esc        Collapse / go back"),
         Line::from("  Alt+h/l           Scroll columns"),
         Line::from("  PgUp/PgDown       Page navigation"),
         Line::from("  s                 Sort by column"),
-        Line::from("  y                 Copy to clipboard (Results only)"),
+        Line::from("  y                 Copy to clipboard"),
+        Line::from("  C                 Cancel running query"),
         Line::from(""),
         Line::from("Press ? or Esc to close help"),
     ];

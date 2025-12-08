@@ -46,6 +46,7 @@ pub async fn run_tui(client: Client<NativeFormat>, params: ConnectionParams) -> 
     // Load persisted queries from index
     if let Ok(store) = query_store::QueryStore::load().await {
         app.session.load_history(store.entries());
+        app.load_selected_entry().await;
     }
 
     let res = app.run(&mut terminal).await;

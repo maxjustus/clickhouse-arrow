@@ -118,15 +118,20 @@ pub struct LogEntry {
     pub text:      String,
 }
 
-/// View mode for the logs display
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// View mode for the logs display (4-level hierarchy: Sources > Threads > Entries > Detail)
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum LogsViewMode {
     #[default]
-    Grouped,
-    Expanded {
+    Sources,
+    Threads {
+        source: String,
+    },
+    Entries {
+        source:    String,
         thread_id: u64,
     },
     EntryDetail {
+        source:        String,
         thread_id:     u64,
         entry_index:   usize,
         scroll_offset: u16,
@@ -136,11 +141,10 @@ pub enum LogsViewMode {
 /// Grouped log data for a single thread
 #[derive(Debug, Clone)]
 pub struct ThreadLogGroup {
-    pub thread_id:     u64,
-    pub entries:       Vec<LogEntry>, // All logs for this thread (newest first)
-    pub latest_time:   String,        // For sorting
-    pub latest_source: String,        // For display
-    pub latest_text:   String,        // For display
+    pub thread_id:   u64,
+    pub entries:     Vec<LogEntry>, // All logs for this thread (newest first)
+    pub latest_time: String,        // For sorting
+    pub latest_text: String,        // For display
 }
 
 impl ThreadLogGroup {
@@ -149,58 +153,46 @@ impl ThreadLogGroup {
             thread_id,
             entries: Vec::new(),
             latest_time: String::new(),
-            latest_source: String::new(),
             latest_text: String::new(),
         }
     }
 
     pub fn add_entry(&mut self, entry: LogEntry) {
         self.latest_time = entry.time.clone();
-        self.latest_source = entry.source.clone();
         self.latest_text = entry.text.clone();
         // Insert at front for newest-first order
         self.entries.insert(0, entry);
     }
 }
 
-/// Manages grouped logs with navigation state
-#[derive(Debug)]
-pub struct LogsData {
-    pub groups:         HashMap<u64, ThreadLogGroup>,
-    pub sorted_threads: Vec<u64>, // Sorted by most recent time desc
-
-    // Navigation (grouped view)
-    pub view_mode:      LogsViewMode,
-    pub selected_row:   usize,
-    pub scroll_offset:  usize,
-    pub visible_height: usize,
-
-    // Navigation (expanded view)
-    pub expanded_scroll:   usize,
-    pub expanded_selected: usize,
+/// Grouped log data for a single source (contains threads)
+#[derive(Debug, Clone)]
+pub struct SourceLogGroup {
+    pub source:         String,
+    pub threads:        HashMap<u64, ThreadLogGroup>,
+    pub sorted_threads: Vec<u64>,
+    pub latest_time:    String,
+    pub latest_text:    String,
 }
 
-impl Default for LogsData {
-    fn default() -> Self {
+impl SourceLogGroup {
+    pub fn new(source: String) -> Self {
         Self {
-            groups:            HashMap::new(),
-            sorted_threads:    Vec::new(),
-            view_mode:         LogsViewMode::Grouped,
-            selected_row:      0,
-            scroll_offset:     0,
-            visible_height:    10,
-            expanded_scroll:   0,
-            expanded_selected: 0,
+            source,
+            threads: HashMap::new(),
+            sorted_threads: Vec::new(),
+            latest_time: String::new(),
+            latest_text: String::new(),
         }
     }
-}
 
-impl LogsData {
     pub fn add_entry(&mut self, entry: LogEntry) {
         let thread_id = entry.thread_id;
-        let is_new = !self.groups.contains_key(&thread_id);
+        self.latest_time = entry.time.clone();
+        self.latest_text = entry.text.clone();
 
-        self.groups
+        let is_new = !self.threads.contains_key(&thread_id);
+        self.threads
             .entry(thread_id)
             .or_insert_with(|| ThreadLogGroup::new(thread_id))
             .add_entry(entry);
@@ -214,19 +206,94 @@ impl LogsData {
     fn resort_threads(&mut self) {
         let empty = String::new();
         self.sorted_threads.sort_by(|a, b| {
-            let time_a = self.groups.get(a).map(|g| g.latest_time.as_str()).unwrap_or(&empty);
-            let time_b = self.groups.get(b).map(|g| g.latest_time.as_str()).unwrap_or(&empty);
+            let time_a = self.threads.get(a).map(|g| g.latest_time.as_str()).unwrap_or(&empty);
+            let time_b = self.threads.get(b).map(|g| g.latest_time.as_str()).unwrap_or(&empty);
             time_b.cmp(time_a) // Descending - most recent first
         });
     }
 
     pub fn thread_count(&self) -> usize { self.sorted_threads.len() }
 
-    pub fn total_log_count(&self) -> usize { self.groups.values().map(|g| g.entries.len()).sum() }
+    pub fn entry_count(&self) -> usize { self.threads.values().map(|t| t.entries.len()).sum() }
+}
+
+/// Manages grouped logs with navigation state
+#[derive(Debug)]
+pub struct LogsData {
+    pub sources:        HashMap<String, SourceLogGroup>,
+    pub sorted_sources: Vec<String>, // Sorted by most recent time desc
+
+    // Navigation state
+    pub view_mode:      LogsViewMode,
+    pub selected_row:   usize, // Current selection at each level
+    pub scroll_offset:  usize, // Scroll offset at each level
+    pub visible_height: usize,
+
+    // Secondary navigation (threads/entries within expanded view)
+    pub secondary_selected: usize,
+    pub secondary_scroll:   usize,
+
+    // Tertiary navigation (entries within thread)
+    pub tertiary_selected: usize,
+    pub tertiary_scroll:   usize,
+}
+
+impl Default for LogsData {
+    fn default() -> Self {
+        Self {
+            sources:            HashMap::new(),
+            sorted_sources:     Vec::new(),
+            view_mode:          LogsViewMode::Sources,
+            selected_row:       0,
+            scroll_offset:      0,
+            visible_height:     10,
+            secondary_selected: 0,
+            secondary_scroll:   0,
+            tertiary_selected:  0,
+            tertiary_scroll:    0,
+        }
+    }
+}
+
+impl LogsData {
+    pub fn add_entry(&mut self, entry: LogEntry) {
+        let source = entry.source.clone();
+        let is_new = !self.sources.contains_key(&source);
+
+        self.sources
+            .entry(source.clone())
+            .or_insert_with(|| SourceLogGroup::new(source.clone()))
+            .add_entry(entry);
+
+        if is_new {
+            self.sorted_sources.push(source);
+        }
+        self.resort_sources();
+    }
+
+    fn resort_sources(&mut self) {
+        let empty = String::new();
+        self.sorted_sources.sort_by(|a, b| {
+            let time_a = self.sources.get(a).map(|g| g.latest_time.as_str()).unwrap_or(&empty);
+            let time_b = self.sources.get(b).map(|g| g.latest_time.as_str()).unwrap_or(&empty);
+            time_b.cmp(time_a) // Descending - most recent first
+        });
+    }
+
+    pub fn source_count(&self) -> usize { self.sorted_sources.len() }
+
+    pub fn thread_count(&self) -> usize { self.sources.values().map(|s| s.thread_count()).sum() }
+
+    pub fn total_log_count(&self) -> usize { self.sources.values().map(|s| s.entry_count()).sum() }
+
+    /// Get thread group, navigating through source
+    fn get_thread_group(&self, source: &str, thread_id: u64) -> Option<&ThreadLogGroup> {
+        self.sources.get(source)?.threads.get(&thread_id)
+    }
 
     pub fn nav_up(&mut self) {
         match &mut self.view_mode {
-            LogsViewMode::Grouped => {
+            LogsViewMode::Sources => {
                 if self.selected_row > 0 {
                     self.selected_row -= 1;
                     if self.selected_row < self.scroll_offset {
@@ -234,11 +301,19 @@ impl LogsData {
                     }
                 }
             }
-            LogsViewMode::Expanded { .. } => {
-                if self.expanded_selected > 0 {
-                    self.expanded_selected -= 1;
-                    if self.expanded_selected < self.expanded_scroll {
-                        self.expanded_scroll = self.expanded_selected;
+            LogsViewMode::Threads { .. } => {
+                if self.secondary_selected > 0 {
+                    self.secondary_selected -= 1;
+                    if self.secondary_selected < self.secondary_scroll {
+                        self.secondary_scroll = self.secondary_selected;
+                    }
+                }
+            }
+            LogsViewMode::Entries { .. } => {
+                if self.tertiary_selected > 0 {
+                    self.tertiary_selected -= 1;
+                    if self.tertiary_selected < self.tertiary_scroll {
+                        self.tertiary_scroll = self.tertiary_selected;
                     }
                 }
             }
@@ -249,10 +324,10 @@ impl LogsData {
     }
 
     pub fn nav_down(&mut self) {
-        match &mut self.view_mode {
-            LogsViewMode::Grouped => {
-                if !self.sorted_threads.is_empty()
-                    && self.selected_row < self.sorted_threads.len() - 1
+        match &self.view_mode {
+            LogsViewMode::Sources => {
+                if !self.sorted_sources.is_empty()
+                    && self.selected_row < self.sorted_sources.len() - 1
                 {
                     self.selected_row += 1;
                     let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
@@ -262,22 +337,41 @@ impl LogsData {
                     }
                 }
             }
-            LogsViewMode::Expanded { thread_id } => {
-                if let Some(group) = self.groups.get(thread_id)
-                    && self.expanded_selected < group.entries.len().saturating_sub(1)
-                {
-                    self.expanded_selected += 1;
-                    let max_visible = self.expanded_scroll + self.visible_height.saturating_sub(1);
-                    if self.expanded_selected > max_visible {
-                        self.expanded_scroll = self
-                            .expanded_selected
-                            .saturating_sub(self.visible_height.saturating_sub(1));
+            LogsViewMode::Threads { source } => {
+                let source = source.clone();
+                if let Some(src) = self.sources.get(&source) {
+                    if self.secondary_selected < src.sorted_threads.len().saturating_sub(1) {
+                        self.secondary_selected += 1;
+                        let max_visible =
+                            self.secondary_scroll + self.visible_height.saturating_sub(1);
+                        if self.secondary_selected > max_visible {
+                            self.secondary_scroll = self
+                                .secondary_selected
+                                .saturating_sub(self.visible_height.saturating_sub(1));
+                        }
                     }
                 }
             }
-            LogsViewMode::EntryDetail { scroll_offset, .. } => {
-                // TODO: could limit based on text length, but simpler to just allow scrolling
-                *scroll_offset = scroll_offset.saturating_add(1);
+            LogsViewMode::Entries { source, thread_id } => {
+                let source = source.clone();
+                let thread_id = *thread_id;
+                if let Some(thread) = self.get_thread_group(&source, thread_id) {
+                    if self.tertiary_selected < thread.entries.len().saturating_sub(1) {
+                        self.tertiary_selected += 1;
+                        let max_visible =
+                            self.tertiary_scroll + self.visible_height.saturating_sub(1);
+                        if self.tertiary_selected > max_visible {
+                            self.tertiary_scroll = self
+                                .tertiary_selected
+                                .saturating_sub(self.visible_height.saturating_sub(1));
+                        }
+                    }
+                }
+            }
+            LogsViewMode::EntryDetail { .. } => {
+                if let LogsViewMode::EntryDetail { scroll_offset, .. } = &mut self.view_mode {
+                    *scroll_offset = scroll_offset.saturating_add(1);
+                }
             }
         }
     }
@@ -285,13 +379,17 @@ impl LogsData {
     pub fn page_up(&mut self) {
         let page_size = self.visible_height.max(1);
         match &mut self.view_mode {
-            LogsViewMode::Grouped => {
+            LogsViewMode::Sources => {
                 self.selected_row = self.selected_row.saturating_sub(page_size);
                 self.scroll_offset = self.scroll_offset.saturating_sub(page_size);
             }
-            LogsViewMode::Expanded { .. } => {
-                self.expanded_selected = self.expanded_selected.saturating_sub(page_size);
-                self.expanded_scroll = self.expanded_scroll.saturating_sub(page_size);
+            LogsViewMode::Threads { .. } => {
+                self.secondary_selected = self.secondary_selected.saturating_sub(page_size);
+                self.secondary_scroll = self.secondary_scroll.saturating_sub(page_size);
+            }
+            LogsViewMode::Entries { .. } => {
+                self.tertiary_selected = self.tertiary_selected.saturating_sub(page_size);
+                self.tertiary_scroll = self.tertiary_scroll.saturating_sub(page_size);
             }
             LogsViewMode::EntryDetail { scroll_offset, .. } => {
                 *scroll_offset = scroll_offset.saturating_sub(page_size as u16);
@@ -301,9 +399,9 @@ impl LogsData {
 
     pub fn page_down(&mut self) {
         let page_size = self.visible_height.max(1);
-        match &mut self.view_mode {
-            LogsViewMode::Grouped => {
-                let max_row = self.sorted_threads.len().saturating_sub(1);
+        match &self.view_mode {
+            LogsViewMode::Sources => {
+                let max_row = self.sorted_sources.len().saturating_sub(1);
                 self.selected_row = (self.selected_row + page_size).min(max_row);
                 let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
                 if self.selected_row > max_visible {
@@ -311,41 +409,70 @@ impl LogsData {
                         self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
                 }
             }
-            LogsViewMode::Expanded { thread_id } => {
-                if let Some(group) = self.groups.get(thread_id) {
-                    let max_row = group.entries.len().saturating_sub(1);
-                    self.expanded_selected = (self.expanded_selected + page_size).min(max_row);
-                    let max_visible = self.expanded_scroll + self.visible_height.saturating_sub(1);
-                    if self.expanded_selected > max_visible {
-                        self.expanded_scroll = self
-                            .expanded_selected
+            LogsViewMode::Threads { source } => {
+                let source = source.clone();
+                if let Some(src) = self.sources.get(&source) {
+                    let max_row = src.sorted_threads.len().saturating_sub(1);
+                    self.secondary_selected = (self.secondary_selected + page_size).min(max_row);
+                    let max_visible = self.secondary_scroll + self.visible_height.saturating_sub(1);
+                    if self.secondary_selected > max_visible {
+                        self.secondary_scroll = self
+                            .secondary_selected
                             .saturating_sub(self.visible_height.saturating_sub(1));
                     }
                 }
             }
-            LogsViewMode::EntryDetail { scroll_offset, .. } => {
-                *scroll_offset = scroll_offset.saturating_add(page_size as u16);
+            LogsViewMode::Entries { source, thread_id } => {
+                let source = source.clone();
+                let thread_id = *thread_id;
+                if let Some(thread) = self.get_thread_group(&source, thread_id) {
+                    let max_row = thread.entries.len().saturating_sub(1);
+                    self.tertiary_selected = (self.tertiary_selected + page_size).min(max_row);
+                    let max_visible = self.tertiary_scroll + self.visible_height.saturating_sub(1);
+                    if self.tertiary_selected > max_visible {
+                        self.tertiary_scroll = self
+                            .tertiary_selected
+                            .saturating_sub(self.visible_height.saturating_sub(1));
+                    }
+                }
+            }
+            LogsViewMode::EntryDetail { .. } => {
+                if let LogsViewMode::EntryDetail { scroll_offset, .. } = &mut self.view_mode {
+                    *scroll_offset = scroll_offset.saturating_add(page_size as u16);
+                }
             }
         }
     }
 
     pub fn expand(&mut self) -> bool {
-        match self.view_mode {
-            LogsViewMode::Grouped => {
-                if let Some(&thread_id) = self.sorted_threads.get(self.selected_row) {
-                    self.view_mode = LogsViewMode::Expanded { thread_id };
-                    self.expanded_scroll = 0;
-                    self.expanded_selected = 0;
+        match &self.view_mode {
+            LogsViewMode::Sources => {
+                if let Some(source) = self.sorted_sources.get(self.selected_row).cloned() {
+                    self.view_mode = LogsViewMode::Threads { source };
+                    self.secondary_scroll = 0;
+                    self.secondary_selected = 0;
                     true
                 } else {
                     false
                 }
             }
-            LogsViewMode::Expanded { thread_id } => {
-                // Drill into selected entry
+            LogsViewMode::Threads { source } => {
+                if let Some(src) = self.sources.get(source) {
+                    if let Some(&thread_id) = src.sorted_threads.get(self.secondary_selected) {
+                        self.view_mode =
+                            LogsViewMode::Entries { source: source.clone(), thread_id };
+                        self.tertiary_scroll = 0;
+                        self.tertiary_selected = 0;
+                        return true;
+                    }
+                }
+                false
+            }
+            LogsViewMode::Entries { source, thread_id } => {
                 self.view_mode = LogsViewMode::EntryDetail {
-                    thread_id,
-                    entry_index: self.expanded_selected,
+                    source:        source.clone(),
+                    thread_id:     *thread_id,
+                    entry_index:   self.tertiary_selected,
                     scroll_offset: 0,
                 };
                 true
@@ -355,20 +482,30 @@ impl LogsData {
     }
 
     pub fn collapse(&mut self) -> bool {
-        match self.view_mode {
-            LogsViewMode::Grouped => false, // Signal to exit edit mode
-            LogsViewMode::Expanded { thread_id } => {
-                self.view_mode = LogsViewMode::Grouped;
-                // Restore selection to the thread we were viewing
-                if let Some(idx) = self.sorted_threads.iter().position(|&id| id == thread_id) {
+        match &self.view_mode {
+            LogsViewMode::Sources => false, // Signal to exit edit mode
+            LogsViewMode::Threads { source } => {
+                // Restore selection to the source we were viewing
+                if let Some(idx) = self.sorted_sources.iter().position(|s| s == source) {
                     self.selected_row = idx;
                 }
+                self.view_mode = LogsViewMode::Sources;
                 true
             }
-            LogsViewMode::EntryDetail { thread_id, entry_index, .. } => {
-                self.view_mode = LogsViewMode::Expanded { thread_id };
-                // Restore selection to the entry we were viewing
-                self.expanded_selected = entry_index;
+            LogsViewMode::Entries { source, thread_id } => {
+                // Restore selection to the thread we were viewing
+                if let Some(src) = self.sources.get(source) {
+                    if let Some(idx) = src.sorted_threads.iter().position(|&id| id == *thread_id) {
+                        self.secondary_selected = idx;
+                    }
+                }
+                self.view_mode = LogsViewMode::Threads { source: source.clone() };
+                true
+            }
+            LogsViewMode::EntryDetail { source, thread_id, entry_index, .. } => {
+                self.tertiary_selected = *entry_index;
+                self.view_mode =
+                    LogsViewMode::Entries { source: source.clone(), thread_id: *thread_id };
                 true
             }
         }
@@ -377,7 +514,7 @@ impl LogsData {
     /// Move to previous row/entry (works in all view modes)
     pub fn prev_detail_entry(&mut self) {
         match &mut self.view_mode {
-            LogsViewMode::Grouped => {
+            LogsViewMode::Sources => {
                 if self.selected_row > 0 {
                     self.selected_row -= 1;
                     if self.selected_row < self.scroll_offset {
@@ -385,11 +522,19 @@ impl LogsData {
                     }
                 }
             }
-            LogsViewMode::Expanded { .. } => {
-                if self.expanded_selected > 0 {
-                    self.expanded_selected -= 1;
-                    if self.expanded_selected < self.expanded_scroll {
-                        self.expanded_scroll = self.expanded_selected;
+            LogsViewMode::Threads { .. } => {
+                if self.secondary_selected > 0 {
+                    self.secondary_selected -= 1;
+                    if self.secondary_selected < self.secondary_scroll {
+                        self.secondary_scroll = self.secondary_selected;
+                    }
+                }
+            }
+            LogsViewMode::Entries { .. } => {
+                if self.tertiary_selected > 0 {
+                    self.tertiary_selected -= 1;
+                    if self.tertiary_selected < self.tertiary_scroll {
+                        self.tertiary_scroll = self.tertiary_selected;
                     }
                 }
             }
@@ -404,9 +549,9 @@ impl LogsData {
 
     /// Move to next row/entry (works in all view modes)
     pub fn next_detail_entry(&mut self) {
-        match &mut self.view_mode {
-            LogsViewMode::Grouped => {
-                let max_row = self.sorted_threads.len().saturating_sub(1);
+        match &self.view_mode {
+            LogsViewMode::Sources => {
+                let max_row = self.sorted_sources.len().saturating_sub(1);
                 if self.selected_row < max_row {
                     self.selected_row += 1;
                     let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
@@ -416,26 +561,52 @@ impl LogsData {
                     }
                 }
             }
-            LogsViewMode::Expanded { thread_id } => {
-                if let Some(group) = self.groups.get(thread_id) {
-                    let max_row = group.entries.len().saturating_sub(1);
-                    if self.expanded_selected < max_row {
-                        self.expanded_selected += 1;
+            LogsViewMode::Threads { source } => {
+                let source = source.clone();
+                if let Some(src) = self.sources.get(&source) {
+                    let max_row = src.sorted_threads.len().saturating_sub(1);
+                    if self.secondary_selected < max_row {
+                        self.secondary_selected += 1;
                         let max_visible =
-                            self.expanded_scroll + self.visible_height.saturating_sub(1);
-                        if self.expanded_selected > max_visible {
-                            self.expanded_scroll = self
-                                .expanded_selected
+                            self.secondary_scroll + self.visible_height.saturating_sub(1);
+                        if self.secondary_selected > max_visible {
+                            self.secondary_scroll = self
+                                .secondary_selected
                                 .saturating_sub(self.visible_height.saturating_sub(1));
                         }
                     }
                 }
             }
-            LogsViewMode::EntryDetail { thread_id, entry_index, scroll_offset } => {
-                let max = self.groups.get(thread_id).map(|g| g.entries.len()).unwrap_or(0);
-                if *entry_index < max.saturating_sub(1) {
-                    *entry_index += 1;
-                    *scroll_offset = 0;
+            LogsViewMode::Entries { source, thread_id } => {
+                let source = source.clone();
+                let thread_id = *thread_id;
+                if let Some(thread) = self.get_thread_group(&source, thread_id) {
+                    let max_row = thread.entries.len().saturating_sub(1);
+                    if self.tertiary_selected < max_row {
+                        self.tertiary_selected += 1;
+                        let max_visible =
+                            self.tertiary_scroll + self.visible_height.saturating_sub(1);
+                        if self.tertiary_selected > max_visible {
+                            self.tertiary_scroll = self
+                                .tertiary_selected
+                                .saturating_sub(self.visible_height.saturating_sub(1));
+                        }
+                    }
+                }
+            }
+            LogsViewMode::EntryDetail { source, thread_id, entry_index, .. } => {
+                let source = source.clone();
+                let thread_id = *thread_id;
+                let cur_entry = *entry_index;
+                let max =
+                    self.get_thread_group(&source, thread_id).map(|t| t.entries.len()).unwrap_or(0);
+                if cur_entry < max.saturating_sub(1) {
+                    if let LogsViewMode::EntryDetail { entry_index, scroll_offset, .. } =
+                        &mut self.view_mode
+                    {
+                        *entry_index = cur_entry + 1;
+                        *scroll_offset = 0;
+                    }
                 }
             }
         }
@@ -443,36 +614,49 @@ impl LogsData {
 
     /// Jump backward by `count` rows/entries (works in all view modes)
     pub fn prev_detail_entry_jump(&mut self, count: usize) {
-        match &mut self.view_mode {
-            LogsViewMode::Grouped => {
+        match &self.view_mode {
+            LogsViewMode::Sources => {
                 self.selected_row = self.selected_row.saturating_sub(count);
                 if self.selected_row < self.scroll_offset {
                     self.scroll_offset = self.selected_row;
                 }
             }
-            LogsViewMode::Expanded { .. } => {
-                self.expanded_selected = self.expanded_selected.saturating_sub(count);
-                if self.expanded_selected < self.expanded_scroll {
-                    self.expanded_scroll = self.expanded_selected;
+            LogsViewMode::Threads { .. } => {
+                self.secondary_selected = self.secondary_selected.saturating_sub(count);
+                if self.secondary_selected < self.secondary_scroll {
+                    self.secondary_scroll = self.secondary_selected;
                 }
             }
-            LogsViewMode::EntryDetail { thread_id, entry_index, scroll_offset } => {
+            LogsViewMode::Entries { .. } => {
+                self.tertiary_selected = self.tertiary_selected.saturating_sub(count);
+                if self.tertiary_selected < self.tertiary_scroll {
+                    self.tertiary_scroll = self.tertiary_selected;
+                }
+            }
+            LogsViewMode::EntryDetail { source, thread_id, entry_index, .. } => {
+                let source = source.clone();
+                let thread_id = *thread_id;
+                let cur_entry = *entry_index;
                 let max = self
-                    .groups
-                    .get(thread_id)
-                    .map(|g| g.entries.len().saturating_sub(1))
+                    .get_thread_group(&source, thread_id)
+                    .map(|t| t.entries.len().saturating_sub(1))
                     .unwrap_or(0);
-                *entry_index = entry_index.saturating_sub(count).min(max);
-                *scroll_offset = 0;
+                let new_entry = cur_entry.saturating_sub(count).min(max);
+                if let LogsViewMode::EntryDetail { entry_index, scroll_offset, .. } =
+                    &mut self.view_mode
+                {
+                    *entry_index = new_entry;
+                    *scroll_offset = 0;
+                }
             }
         }
     }
 
     /// Jump forward by `count` rows/entries (works in all view modes)
     pub fn next_detail_entry_jump(&mut self, count: usize) {
-        match &mut self.view_mode {
-            LogsViewMode::Grouped => {
-                let max_row = self.sorted_threads.len().saturating_sub(1);
+        match &self.view_mode {
+            LogsViewMode::Sources => {
+                let max_row = self.sorted_sources.len().saturating_sub(1);
                 self.selected_row = (self.selected_row + count).min(max_row);
                 let max_visible = self.scroll_offset + self.visible_height.saturating_sub(1);
                 if self.selected_row > max_visible {
@@ -480,26 +664,48 @@ impl LogsData {
                         self.selected_row.saturating_sub(self.visible_height.saturating_sub(1));
                 }
             }
-            LogsViewMode::Expanded { thread_id } => {
-                if let Some(group) = self.groups.get(thread_id) {
-                    let max_row = group.entries.len().saturating_sub(1);
-                    self.expanded_selected = (self.expanded_selected + count).min(max_row);
-                    let max_visible = self.expanded_scroll + self.visible_height.saturating_sub(1);
-                    if self.expanded_selected > max_visible {
-                        self.expanded_scroll = self
-                            .expanded_selected
+            LogsViewMode::Threads { source } => {
+                let source = source.clone();
+                if let Some(src) = self.sources.get(&source) {
+                    let max_row = src.sorted_threads.len().saturating_sub(1);
+                    self.secondary_selected = (self.secondary_selected + count).min(max_row);
+                    let max_visible = self.secondary_scroll + self.visible_height.saturating_sub(1);
+                    if self.secondary_selected > max_visible {
+                        self.secondary_scroll = self
+                            .secondary_selected
                             .saturating_sub(self.visible_height.saturating_sub(1));
                     }
                 }
             }
-            LogsViewMode::EntryDetail { thread_id, entry_index, scroll_offset } => {
+            LogsViewMode::Entries { source, thread_id } => {
+                let source = source.clone();
+                let thread_id = *thread_id;
+                if let Some(thread) = self.get_thread_group(&source, thread_id) {
+                    let max_row = thread.entries.len().saturating_sub(1);
+                    self.tertiary_selected = (self.tertiary_selected + count).min(max_row);
+                    let max_visible = self.tertiary_scroll + self.visible_height.saturating_sub(1);
+                    if self.tertiary_selected > max_visible {
+                        self.tertiary_scroll = self
+                            .tertiary_selected
+                            .saturating_sub(self.visible_height.saturating_sub(1));
+                    }
+                }
+            }
+            LogsViewMode::EntryDetail { source, thread_id, entry_index, .. } => {
+                let source = source.clone();
+                let thread_id = *thread_id;
+                let cur_entry = *entry_index;
                 let max = self
-                    .groups
-                    .get(thread_id)
-                    .map(|g| g.entries.len().saturating_sub(1))
+                    .get_thread_group(&source, thread_id)
+                    .map(|t| t.entries.len().saturating_sub(1))
                     .unwrap_or(0);
-                *entry_index = (*entry_index + count).min(max);
-                *scroll_offset = 0;
+                let new_entry = (cur_entry + count).min(max);
+                if let LogsViewMode::EntryDetail { entry_index, scroll_offset, .. } =
+                    &mut self.view_mode
+                {
+                    *entry_index = new_entry;
+                    *scroll_offset = 0;
+                }
             }
         }
     }
@@ -854,6 +1060,7 @@ pub struct QueryBlock {
     pub logs:               Vec<LogEntry>,
     pub logs_data:          LogsData,
     pub error:              Option<String>,
+    pub error_scroll:       u16,
     pub running:            bool,
     pub cancel_requested:   bool,
     pub cache_id:           Option<String>, // ID in QueryStore if cached
@@ -870,6 +1077,7 @@ impl QueryBlock {
             logs: Vec::new(),
             logs_data: LogsData::default(),
             error: None,
+            error_scroll: 0,
             running: false, // Not running until backend starts it
             cancel_requested: false,
             cache_id: None,
@@ -1040,8 +1248,11 @@ pub enum Mode {
 /// The entire session state
 pub struct Session {
     // History of queries (shown as cards)
-    pub history:       Vec<QueryStoreEntry>,
-    pub selected_card: Option<usize>, // None = input focused, Some(i) = card i selected
+    pub history:                Vec<QueryStoreEntry>,
+    pub selected_card:          Option<usize>, // None = empty history, Some(i) = card i selected
+    pub history_scroll_offset:  usize,         // First visible card index in history view
+    pub history_search_active:  bool,          // Search mode active in history view
+    pub history_search_pattern: String,        // Current search filter pattern
 
     // Currently displayed query data (when viewing full results)
     pub current_block:    Option<QueryBlock>,
@@ -1061,17 +1272,20 @@ pub struct Session {
 impl Session {
     pub fn new() -> Self {
         let mut new_query = TextArea::default();
-        new_query.set_placeholder_text("Enter SQL query... (Ctrl+Enter to execute)");
+        new_query.set_placeholder_text("Enter SQL query... (Cmd+Enter to execute)");
 
         Self {
             history: Vec::new(),
-            selected_card: None, // Start with input focused
+            selected_card: None,
+            history_scroll_offset: 0,
+            history_search_active: false,
+            history_search_pattern: String::new(),
             current_block: None,
             loading_entry_id: None,
             running_queries: HashMap::new(),
             new_query,
             focus: Focus::HistoryView,
-            mode: Mode::Edit, // Start in edit mode for input
+            mode: Mode::Navigation,
             toast: None,
             app_error: None,
         }
@@ -1082,7 +1296,10 @@ impl Session {
         let mut entries = entries;
         entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         self.history = entries;
-        // Don't auto-select, keep input focused
+        // Select most recent entry (last one) if any exist
+        if !self.history.is_empty() {
+            self.selected_card = Some(self.history.len() - 1);
+        }
     }
 
     /// Add a new entry to history (at the bottom, newest last)
@@ -1129,39 +1346,72 @@ impl Session {
         self.running_queries.get_mut(&idx)
     }
 
+    /// Get indices of history entries matching the current search pattern
+    pub fn filtered_history_indices(&self) -> Vec<usize> {
+        // Filter whenever pattern is non-empty, regardless of search_active state
+        if self.history_search_pattern.is_empty() {
+            return (0..self.history.len()).collect();
+        }
+        let pattern = self.history_search_pattern.to_lowercase();
+        self.history
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.sql_preview.to_lowercase().contains(&pattern))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Move card selection up (previous card), returns true if selection changed
-    /// Layout: [Card 0 (newest)] [Card 1] ... [Card N (oldest)] [Input]
-    /// Up from Input → last card, Up from Card 0 → stays (top of list)
+    /// Layout: [Card 0 (oldest)] [Card 1] ... [Card N (newest)]
     pub fn card_prev(&mut self) -> bool {
+        let filtered = self.filtered_history_indices();
+        if filtered.is_empty() {
+            return false;
+        }
         if let Some(idx) = self.selected_card {
-            if idx > 0 {
-                self.selected_card = Some(idx - 1);
+            // Find current position in filtered list
+            if let Some(pos) = filtered.iter().position(|&i| i == idx) {
+                if pos > 0 {
+                    self.selected_card = Some(filtered[pos - 1]);
+                    return true;
+                }
+            } else if let Some(&last) = filtered.last() {
+                // Current selection not in filtered list, jump to last
+                self.selected_card = Some(last);
                 return true;
             }
-            // At card 0 (top), don't move
-        } else if !self.history.is_empty() {
-            // From input, go to last card (closest visually)
-            self.selected_card = Some(self.history.len() - 1);
+        } else if let Some(&last) = filtered.last() {
+            // No selection, select last (newest)
+            self.selected_card = Some(last);
             return true;
         }
         false
     }
 
     /// Move card selection down (next card), returns true if selection changed
-    /// Layout: [Card 0 (newest)] [Card 1] ... [Card N (oldest)] [Input]
-    /// Down from last card → Input, Down from Input → stays (bottom)
+    /// Layout: [Card 0 (oldest)] [Card 1] ... [Card N (newest)]
     pub fn card_next(&mut self) -> bool {
+        let filtered = self.filtered_history_indices();
+        if filtered.is_empty() {
+            return false;
+        }
         if let Some(idx) = self.selected_card {
-            if idx + 1 < self.history.len() {
-                self.selected_card = Some(idx + 1);
-                return true;
-            } else {
-                // From last card, go to input (at bottom)
-                self.selected_card = None;
+            // Find current position in filtered list
+            if let Some(pos) = filtered.iter().position(|&i| i == idx) {
+                if pos + 1 < filtered.len() {
+                    self.selected_card = Some(filtered[pos + 1]);
+                    return true;
+                }
+            } else if let Some(&first) = filtered.first() {
+                // Current selection not in filtered list, jump to first
+                self.selected_card = Some(first);
                 return true;
             }
+        } else if let Some(&first) = filtered.first() {
+            // No selection, select first (oldest)
+            self.selected_card = Some(first);
+            return true;
         }
-        // Already at input, don't move
         false
     }
 

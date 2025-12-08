@@ -26,8 +26,14 @@ pub struct QueryStoreEntry {
     pub sql_preview: String, // First 80 chars
     pub timestamp:   u64,    // Unix timestamp
     pub duration_ms: Option<u64>, // Execution time
-    pub row_count:   u64,    // Number of rows
+    pub row_count:   u64,    // Number of rows returned
     pub error:       Option<String>, // Error message if failed
+    #[serde(default)]
+    pub rows_read:   Option<u64>, // Rows read from storage
+    #[serde(default)]
+    pub bytes_read:  Option<u64>, // Bytes read from storage
+    #[serde(default)]
+    pub peak_memory: Option<u64>, // Peak memory usage
 }
 
 pub struct QueryStore {
@@ -131,6 +137,10 @@ pub struct QueryCacheWriter {
     profile_info_buf: Vec<u8>,
     logs_buf:         Vec<u8>,
     row_count:        u64,
+    // Stats tracking
+    rows_read:        u64,
+    bytes_read:       u64,
+    peak_memory:      u64,
 }
 
 impl QueryCacheWriter {
@@ -159,6 +169,9 @@ impl QueryCacheWriter {
             profile_info_buf: Vec::new(),
             logs_buf: Vec::new(),
             row_count: 0,
+            rows_read: 0,
+            bytes_read: 0,
+            peak_memory: 0,
         })
     }
 
@@ -169,6 +182,13 @@ impl QueryCacheWriter {
     }
 
     pub fn write_profile_event(&mut self, event: &serde_json::Value) {
+        // Track peak memory from profile events
+        if event.get("name").and_then(|v| v.as_str()) == Some("MemoryTrackerPeakUsage") {
+            if let Some(value) = event.get("value").and_then(|v| v.as_i64()) {
+                self.peak_memory = self.peak_memory.max(value.unsigned_abs());
+            }
+        }
+
         if let Ok(line) = serde_json::to_string(event) {
             self.profile_buf.extend_from_slice(line.as_bytes());
             self.profile_buf.push(b'\n');
@@ -183,6 +203,14 @@ impl QueryCacheWriter {
     }
 
     pub fn write_profile_info(&mut self, profile_info: &serde_json::Value) {
+        // Extract rows/bytes from profile info
+        if let Some(rows) = profile_info.get("rows").and_then(|v| v.as_u64()) {
+            self.rows_read = rows;
+        }
+        if let Some(bytes) = profile_info.get("bytes").and_then(|v| v.as_u64()) {
+            self.bytes_read = bytes;
+        }
+
         // ProfileInfo is sent once at query end, write only if buffer is empty
         if self.profile_info_buf.is_empty() {
             if let Ok(line) = serde_json::to_string(profile_info) {
@@ -262,6 +290,9 @@ impl QueryCacheWriter {
             duration_ms,
             row_count: self.row_count,
             error,
+            rows_read: if self.rows_read > 0 { Some(self.rows_read) } else { None },
+            bytes_read: if self.bytes_read > 0 { Some(self.bytes_read) } else { None },
+            peak_memory: if self.peak_memory > 0 { Some(self.peak_memory) } else { None },
         })
     }
 }

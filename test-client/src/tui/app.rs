@@ -48,18 +48,19 @@ pub enum QueryCommand {
 }
 
 pub struct App {
-    pub session:      Session,
-    pub should_quit:  bool,
-    pub show_help:    bool,
-    pub history:      History,
-    cmd_tx:           mpsc::Sender<QueryCommand>,
-    event_tx:         mpsc::Sender<AppEvent>,
-    event_rx:         mpsc::Receiver<AppEvent>,
+    pub session:           Session,
+    pub should_quit:       bool,
+    pub show_help:         bool,
+    pub query_editor_open: bool, // Modal query editor state
+    pub history:           History,
+    cmd_tx:                mpsc::Sender<QueryCommand>,
+    event_tx:              mpsc::Sender<AppEvent>,
+    event_rx:              mpsc::Receiver<AppEvent>,
     /// Maps query_id -> block_index for event routing
-    query_map:        HashMap<usize, usize>,
-    next_query_id:    usize,
+    query_map:             HashMap<usize, usize>,
+    next_query_id:         usize,
     /// Cached UI state per query (keyed by cache_id)
-    view_state_cache: HashMap<String, ViewState>,
+    view_state_cache:      HashMap<String, ViewState>,
 }
 
 impl App {
@@ -73,6 +74,7 @@ impl App {
             session: Session::new(),
             should_quit: false,
             show_help: false,
+            query_editor_open: false,
             history,
             cmd_tx,
             event_tx,
@@ -107,11 +109,9 @@ impl App {
                         self.handle_key(key).await?;
                     }
                     Event::Paste(text) => {
-                        // Always paste into new query editor
+                        // Always paste into new query editor and open the modal
                         self.session.new_query.insert_str(&text);
-                        self.session.focus = Focus::HistoryView;
-                        self.session.selected_card = None; // Focus input
-                        self.session.mode = Mode::Edit;
+                        self.query_editor_open = true;
                     }
                     _ => {}
                 }
@@ -127,31 +127,31 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
-        // 'n' or 'i' jumps to new query input from anywhere - except when already editing input
-        // Shift+N or Shift+I pre-populates with current query's SQL
-        let in_input_edit = matches!(self.session.focus, Focus::HistoryView)
-            && self.session.selected_card.is_none()
-            && self.session.mode == Mode::Edit;
-        if !in_input_edit
+        // 'n' or 'i' opens query editor modal (empty)
+        // Shift+N or Shift+I opens modal pre-populated with current query's SQL
+        // Skip if history search is active (let search handle the key)
+        if !self.query_editor_open
+            && !self.session.history_search_active
             && !key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(
-                key.code,
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('i') | KeyCode::Char('I')
-            )
+            && matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N'))
         {
             self.show_help = false;
 
+            // Clear editor first
+            self.session.new_query = tui_textarea::TextArea::default();
+            self.session
+                .new_query
+                .set_placeholder_text("Enter SQL query... (Cmd+Enter to execute)");
+
             // Shift variant: pre-populate with current query's SQL
-            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                if let Some(sql) = self.session.displayed_block().map(|b| b.sql.clone()) {
-                    self.set_new_query_text(&sql);
-                }
+            if key.modifiers.contains(KeyModifiers::SHIFT)
+                && let Some(sql) = self.session.displayed_block().map(|b| b.sql.clone())
+            {
+                self.set_new_query_text(&sql);
             }
 
-            // Go to history view with input focused
-            self.session.focus = Focus::HistoryView;
-            self.session.selected_card = None;
-            self.session.mode = Mode::Edit;
+            // Open modal
+            self.query_editor_open = true;
             return Ok(());
         }
 
@@ -176,37 +176,31 @@ impl App {
                 self.should_quit = true;
                 return Ok(());
             }
-            KeyCode::Char('?') => {
+            KeyCode::Char('?') if !self.session.history_search_active => {
                 self.show_help = true;
                 return Ok(());
             }
-            // Ctrl+P: Previous query card (global, except in input edit)
+            // Ctrl+P: Previous query card (global, but not in query editor modal)
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let in_input_edit = self.session.mode == Mode::Edit
-                    && matches!(self.session.focus, Focus::HistoryView)
-                    && self.session.selected_card.is_none();
-                if !in_input_edit {
+                if !self.query_editor_open {
                     self.save_current_view_state();
                     if self.session.card_prev() {
                         self.load_selected_entry().await;
                     }
                     return Ok(());
                 }
-                // Fall through to mode handler for input edit
+                // Fall through to modal handler
             }
-            // Ctrl+N: Next query card (global, except in input edit)
+            // Ctrl+N: Next query card (global, but not in query editor modal)
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let in_input_edit = self.session.mode == Mode::Edit
-                    && matches!(self.session.focus, Focus::HistoryView)
-                    && self.session.selected_card.is_none();
-                if !in_input_edit {
+                if !self.query_editor_open {
                     self.save_current_view_state();
                     if self.session.card_next() {
                         self.load_selected_entry().await;
                     }
                     return Ok(());
                 }
-                // Fall through to mode handler for input edit
+                // Fall through to modal handler
             }
             // Alt+1 through Alt+9: Jump directly to history entry
             KeyCode::Char(c @ '1'..='9') if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -220,202 +214,19 @@ impl App {
             _ => {}
         }
 
+        // Query editor modal has its own key handling
+        if self.query_editor_open {
+            return self.handle_query_editor_key(key).await;
+        }
+
         match self.session.mode {
             Mode::Navigation => self.handle_navigation_key(key).await,
             Mode::Edit => self.handle_edit_key(key).await,
         }
     }
 
-    async fn handle_navigation_key(&mut self, key: KeyEvent) -> Result<()> {
-        match &self.session.focus {
-            Focus::HistoryView => {
-                match key.code {
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        // Navigate to next card (or from input to first card)
-                        self.save_current_view_state();
-                        if self.session.card_next() {
-                            self.load_selected_entry().await;
-                        }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        // Navigate to previous card
-                        self.save_current_view_state();
-                        if self.session.card_prev() {
-                            self.load_selected_entry().await;
-                        }
-                    }
-                    KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
-                        // If on a card, enter full results view
-                        if self.session.selected_card.is_some()
-                            && self.session.displayed_block().is_some()
-                        {
-                            self.session.focus = Focus::SubPane(SubPane::Results);
-                        } else {
-                            // On input, enter edit mode
-                            self.session.mode = Mode::Edit;
-                        }
-                    }
-                    KeyCode::Char('i') => {
-                        // Enter edit mode (for input or for viewing card details)
-                        self.session.mode = Mode::Edit;
-                    }
-                    KeyCode::Char('c') | KeyCode::Char('C') => {
-                        self.cancel_selected_query().await;
-                    }
-                    _ => {}
-                }
-            }
-            Focus::SubPane(_pane) => {
-                match key.code {
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        self.session.subpane_next();
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        self.session.subpane_prev();
-                    }
-                    KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char('i') => {
-                        // Enter edit mode for any pane
-                        self.session.mode = Mode::Edit;
-                    }
-                    KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
-                        // Go back to history view
-                        self.session.focus = Focus::HistoryView;
-                    }
-                    KeyCode::Char('c') | KeyCode::Char('C') => {
-                        self.cancel_selected_query().await;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn handle_edit_key(&mut self, key: KeyEvent) -> Result<()> {
-        // Escape handling
-        if key.code == KeyCode::Esc {
-            // In input area (HistoryView with no card selected)
-            if matches!(self.session.focus, Focus::HistoryView)
-                && self.session.selected_card.is_none()
-            {
-                let text = self.session.new_query.lines().join("\n");
-                if !text.trim().is_empty() {
-                    // Clear the editor instead of exiting
-                    self.session.new_query = tui_textarea::TextArea::default();
-                    self.session
-                        .new_query
-                        .set_placeholder_text("Enter SQL query... (Ctrl+Enter to execute)");
-                    return Ok(());
-                }
-                // Empty editor - just exit edit mode, stay in history view
-                self.session.mode = Mode::Navigation;
-                return Ok(());
-            }
-            // Other focuses: just exit edit mode
-            self.session.mode = Mode::Navigation;
-            return Ok(());
-        }
-
-        // Ctrl+P/N in SubPane: context-dependent behavior
-        // - Base table view: switch queries in history
-        // - Detail/split view: navigate rows
-        if let Focus::SubPane(pane) = self.session.focus {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                match key.code {
-                    KeyCode::Char('p') => {
-                        if let Some(block) = self.session.displayed_block_mut() {
-                            let in_detail = match pane {
-                                SubPane::Results => block
-                                    .results
-                                    .as_ref()
-                                    .map(|t| !matches!(t.view_mode, ResultsViewMode::Table))
-                                    .unwrap_or(false),
-                                SubPane::Stats => {
-                                    !matches!(block.stats.view_mode, MetricsViewMode::Table)
-                                }
-                                SubPane::Logs => {
-                                    !matches!(block.logs_data.view_mode, LogsViewMode::Grouped)
-                                }
-                                _ => false,
-                            };
-                            if in_detail {
-                                match pane {
-                                    SubPane::Results => {
-                                        if let Some(t) = &mut block.results {
-                                            t.prev_detail_row();
-                                        }
-                                    }
-                                    SubPane::Stats => block.stats.prev_detail_row(),
-                                    SubPane::Logs => block.logs_data.prev_detail_entry(),
-                                    _ => {}
-                                }
-                            } else {
-                                self.session.card_prev();
-                            }
-                        } else {
-                            self.session.card_prev();
-                        }
-                        return Ok(());
-                    }
-                    KeyCode::Char('n') => {
-                        if let Some(block) = self.session.displayed_block_mut() {
-                            let in_detail = match pane {
-                                SubPane::Results => block
-                                    .results
-                                    .as_ref()
-                                    .map(|t| !matches!(t.view_mode, ResultsViewMode::Table))
-                                    .unwrap_or(false),
-                                SubPane::Stats => {
-                                    !matches!(block.stats.view_mode, MetricsViewMode::Table)
-                                }
-                                SubPane::Logs => {
-                                    !matches!(block.logs_data.view_mode, LogsViewMode::Grouped)
-                                }
-                                _ => false,
-                            };
-                            if in_detail {
-                                match pane {
-                                    SubPane::Results => {
-                                        if let Some(t) = &mut block.results {
-                                            t.next_detail_row();
-                                        }
-                                    }
-                                    SubPane::Stats => block.stats.next_detail_row(),
-                                    SubPane::Logs => block.logs_data.next_detail_entry(),
-                                    _ => {}
-                                }
-                            } else {
-                                self.session.card_next();
-                            }
-                        } else {
-                            self.session.card_next();
-                        }
-                        return Ok(());
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        match &self.session.focus {
-            Focus::HistoryView => {
-                // In history view: if on input, handle keys; if on a card, enter navigation
-                if self.session.selected_card.is_none() {
-                    self.handle_new_query_key(key).await?;
-                } else {
-                    // On a card - edit mode not meaningful, go to navigation
-                    self.session.mode = Mode::Navigation;
-                }
-            }
-            Focus::SubPane(pane) => {
-                let pane = *pane;
-                self.handle_subpane_key(key, pane).await?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn handle_new_query_key(&mut self, key: KeyEvent) -> Result<()> {
+    /// Handle keys in the query editor modal
+    async fn handle_query_editor_key(&mut self, key: KeyEvent) -> Result<()> {
         let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let is_alt = key.modifiers.contains(KeyModifiers::ALT);
 
@@ -486,6 +297,11 @@ impl App {
         }
 
         match (key.code, is_ctrl, is_alt) {
+            // Escape closes the modal
+            (KeyCode::Esc, _, _) => {
+                self.query_editor_open = false;
+                self.history.reset_nav();
+            }
             // Start history search
             (KeyCode::Char('r'), true, _) => {
                 let current = self.session.new_query.lines().join("\n");
@@ -523,6 +339,9 @@ impl App {
                     duration_ms: None,
                     row_count: 0,
                     error: None,
+                    rows_read: None,
+                    bytes_read: None,
+                    peak_memory: None,
                 };
 
                 // Insert entry at end of history (newest last)
@@ -538,11 +357,12 @@ impl App {
                 self.session.focus = Focus::SubPane(SubPane::Results);
                 self.session.mode = Mode::Navigation;
 
-                // Clear editor
+                // Close modal and clear editor
+                self.query_editor_open = false;
                 self.session.new_query = tui_textarea::TextArea::default();
                 self.session
                     .new_query
-                    .set_placeholder_text("Enter SQL query... (Ctrl+Enter to execute)");
+                    .set_placeholder_text("Enter SQL query... (Cmd+Enter to execute)");
 
                 // Send execute command
                 let query_id = self.next_query_id;
@@ -584,6 +404,213 @@ impl App {
             _ => {
                 self.session.new_query.input(key);
                 self.history.reset_nav();
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_navigation_key(&mut self, key: KeyEvent) -> Result<()> {
+        match &self.session.focus {
+            Focus::HistoryView => {
+                // Search mode input handling
+                if self.session.history_search_active {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.session.history_search_active = false;
+                            self.session.history_search_pattern.clear();
+                        }
+                        KeyCode::Enter => {
+                            // Exit search but keep filter
+                            self.session.history_search_active = false;
+                        }
+                        KeyCode::Backspace => {
+                            if self.session.history_search_pattern.is_empty() {
+                                self.session.history_search_active = false;
+                            } else {
+                                self.session.history_search_pattern.pop();
+                                self.session.history_scroll_offset = 0;
+                                // Always select newest match when filter changes
+                                let filtered = self.session.filtered_history_indices();
+                                self.session.selected_card = filtered.last().copied();
+                            }
+                        }
+                        KeyCode::Down => {
+                            self.save_current_view_state();
+                            if self.session.card_next() {
+                                self.load_selected_entry().await;
+                            }
+                        }
+                        KeyCode::Up => {
+                            self.save_current_view_state();
+                            if self.session.card_prev() {
+                                self.load_selected_entry().await;
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            self.session.history_search_pattern.push(c);
+                            self.session.history_scroll_offset = 0;
+                            // Always select newest match when typing
+                            let filtered = self.session.filtered_history_indices();
+                            self.session.selected_card = filtered.last().copied();
+                        }
+                        _ => {}
+                    }
+                    return Ok(());
+                }
+
+                match key.code {
+                    KeyCode::Char('/') => {
+                        // Resume editing existing filter, don't clear
+                        self.session.history_search_active = true;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.save_current_view_state();
+                        if self.session.card_next() {
+                            self.load_selected_entry().await;
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.save_current_view_state();
+                        if self.session.card_prev() {
+                            self.load_selected_entry().await;
+                        }
+                    }
+                    KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                        // Enter full results view for selected card
+                        if self.session.selected_card.is_some()
+                            && self.session.displayed_block().is_some()
+                        {
+                            self.session.focus = Focus::SubPane(SubPane::Results);
+                        }
+                    }
+                    KeyCode::Char('c') | KeyCode::Char('C') => {
+                        self.cancel_selected_query().await;
+                    }
+                    _ => {}
+                }
+            }
+            Focus::SubPane(_pane) => {
+                match key.code {
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.session.subpane_next();
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.session.subpane_prev();
+                    }
+                    KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char('i') => {
+                        // Enter edit mode for any pane
+                        self.session.mode = Mode::Edit;
+                    }
+                    KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
+                        // Go back to history view
+                        self.session.focus = Focus::HistoryView;
+                    }
+                    KeyCode::Char('c') | KeyCode::Char('C') => {
+                        self.cancel_selected_query().await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_edit_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Escape exits edit mode
+        if key.code == KeyCode::Esc {
+            self.session.mode = Mode::Navigation;
+            return Ok(());
+        }
+
+        // Ctrl+P/N in SubPane: context-dependent behavior
+        // - Base table view: switch queries in history
+        // - Detail/split view: navigate rows
+        if let Focus::SubPane(pane) = self.session.focus {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                match key.code {
+                    KeyCode::Char('p') => {
+                        if let Some(block) = self.session.displayed_block_mut() {
+                            let in_detail = match pane {
+                                SubPane::Results => block
+                                    .results
+                                    .as_ref()
+                                    .map(|t| !matches!(t.view_mode, ResultsViewMode::Table))
+                                    .unwrap_or(false),
+                                SubPane::Stats => {
+                                    !matches!(block.stats.view_mode, MetricsViewMode::Table)
+                                }
+                                SubPane::Logs => {
+                                    !matches!(block.logs_data.view_mode, LogsViewMode::Sources)
+                                }
+                                _ => false,
+                            };
+                            if in_detail {
+                                match pane {
+                                    SubPane::Results => {
+                                        if let Some(t) = &mut block.results {
+                                            t.prev_detail_row();
+                                        }
+                                    }
+                                    SubPane::Stats => block.stats.prev_detail_row(),
+                                    SubPane::Logs => block.logs_data.prev_detail_entry(),
+                                    _ => {}
+                                }
+                            } else {
+                                self.session.card_prev();
+                            }
+                        } else {
+                            self.session.card_prev();
+                        }
+                        return Ok(());
+                    }
+                    KeyCode::Char('n') => {
+                        if let Some(block) = self.session.displayed_block_mut() {
+                            let in_detail = match pane {
+                                SubPane::Results => block
+                                    .results
+                                    .as_ref()
+                                    .map(|t| !matches!(t.view_mode, ResultsViewMode::Table))
+                                    .unwrap_or(false),
+                                SubPane::Stats => {
+                                    !matches!(block.stats.view_mode, MetricsViewMode::Table)
+                                }
+                                SubPane::Logs => {
+                                    !matches!(block.logs_data.view_mode, LogsViewMode::Sources)
+                                }
+                                _ => false,
+                            };
+                            if in_detail {
+                                match pane {
+                                    SubPane::Results => {
+                                        if let Some(t) = &mut block.results {
+                                            t.next_detail_row();
+                                        }
+                                    }
+                                    SubPane::Stats => block.stats.next_detail_row(),
+                                    SubPane::Logs => block.logs_data.next_detail_entry(),
+                                    _ => {}
+                                }
+                            } else {
+                                self.session.card_next();
+                            }
+                        } else {
+                            self.session.card_next();
+                        }
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        match &self.session.focus {
+            Focus::HistoryView => {
+                // Edit mode not meaningful in history view (no input here)
+                self.session.mode = Mode::Navigation;
+            }
+            Focus::SubPane(pane) => {
+                let pane = *pane;
+                self.handle_subpane_key(key, pane).await?;
             }
         }
         Ok(())
@@ -672,6 +699,25 @@ impl App {
                 _ => {}
             },
             SubPane::Results => {
+                // Handle error scrolling if error is displayed instead of results
+                if block.error.is_some() {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => block.error_scroll += 1,
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            block.error_scroll = block.error_scroll.saturating_sub(1);
+                        }
+                        KeyCode::PageDown => block.error_scroll += 10,
+                        KeyCode::PageUp => {
+                            block.error_scroll = block.error_scroll.saturating_sub(10);
+                        }
+                        KeyCode::Home => block.error_scroll = 0,
+                        KeyCode::Left | KeyCode::Char('h') => {
+                            self.session.mode = Mode::Navigation;
+                        }
+                        _ => {}
+                    }
+                    return Ok(());
+                }
                 if let Some(ref mut table) = block.results {
                     if table.header_focused {
                         // Header navigation mode
@@ -929,7 +975,7 @@ impl App {
     }
 
     /// Load selected history entry's data (async)
-    async fn load_selected_entry(&mut self) {
+    pub async fn load_selected_entry(&mut self) {
         let Some(hist_idx) = self.session.selected_card else {
             return;
         };
