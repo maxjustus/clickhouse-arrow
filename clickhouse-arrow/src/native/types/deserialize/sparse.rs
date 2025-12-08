@@ -78,20 +78,19 @@ pub(crate) async fn read_sparse_with_path<R: ClickHouseRead>(
             has_value_after_defaults = false;
             trailing_defaults = group_size;
             break;
-        } else {
-            let start_of_group =
-                if !first && !indices.is_empty() { indices[indices.len() - 1] + 1 } else { 0 };
-            if group_size >= tmp_offset {
-                indices.push(start_of_group + group_size - tmp_offset);
-                tmp_offset = 0;
-                first = false;
-            } else {
-                skipped_values_rows += 1;
-                tmp_offset = tmp_offset.saturating_sub(group_size + 1);
-            }
-            trailing_defaults = 0;
-            next_total_rows += 1;
         }
+        let start_of_group =
+            if !first && !indices.is_empty() { indices[indices.len() - 1] + 1 } else { 0 };
+        if group_size >= tmp_offset {
+            indices.push(start_of_group + group_size - tmp_offset);
+            tmp_offset = 0;
+            first = false;
+        } else {
+            skipped_values_rows += 1;
+            tmp_offset = tmp_offset.saturating_sub(group_size + 1);
+        }
+        trailing_defaults = 0;
+        next_total_rows += 1;
         total_rows = next_total_rows;
     }
 

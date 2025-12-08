@@ -185,7 +185,7 @@ fn serialize_value_data<W: Write>(writer: &mut W, value: &Value, ty: &Type) -> R
 
         (Value::DateTime64(dt64), Type::DateTime64(_, _)) => writer.write_i64_le(dt64.1 as i64)?,
 
-        (Value::String(s), Type::String) | (Value::String(s), Type::FixedSizedString(_)) => {
+        (Value::String(s), Type::String | Type::FixedSizedString(_)) => {
             writer.write_varuint(s.len() as u64)?;
             writer.write_all(s)?;
         }

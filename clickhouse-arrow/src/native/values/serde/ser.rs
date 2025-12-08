@@ -179,7 +179,7 @@ fn serialize_typed_impl<S: Serializer>(
         (Value::Ipv4(ip), _) => serializer.serialize_str(&ip.to_string()),
         (Value::Ipv6(ip), _) => serializer.serialize_str(&ip.to_string()),
         // Enums: serialize the textual variant like ClickHouse JSONEachRow
-        (Value::Enum8(name, _), _) | (Value::Enum16(name, _), _) => serializer.serialize_str(name),
+        (Value::Enum8(name, _) | Value::Enum16(name, _), _) => serializer.serialize_str(name),
 
         // Dates: ISO date strings
         (Value::Date(date), _) => {
@@ -220,7 +220,7 @@ fn serialize_typed_impl<S: Serializer>(
         }
 
         // Variant/Dynamic: unwrap and serialize contained value
-        (Value::Variant(_, boxed), _) | (Value::Dynamic(_, boxed), _) => {
+        (Value::Variant(_, boxed) | Value::Dynamic(_, boxed), _) => {
             let inner_ty = boxed.guess_type();
             serialize_typed_impl(boxed, &inner_ty, map_key_policy, serializer)
         }

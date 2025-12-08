@@ -338,7 +338,7 @@ impl<'de> Deserializer<'de> for TypedDeserializer<'_> {
             (Value::Uuid(u), _) => visitor.visit_string(u.to_string()),
             (Value::Ipv4(ip), _) => visitor.visit_string(ip.to_string()),
             (Value::Ipv6(ip), _) => visitor.visit_string(ip.to_string()),
-            (Value::Enum8(name, _), _) | (Value::Enum16(name, _), _) => {
+            (Value::Enum8(name, _) | Value::Enum16(name, _), _) => {
                 visitor.visit_string(name.clone())
             }
 

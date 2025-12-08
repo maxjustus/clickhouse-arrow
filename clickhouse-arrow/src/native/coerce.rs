@@ -106,7 +106,7 @@ pub(crate) fn can_convert_to_type(value: &Value, target_type: &Type) -> bool {
         (Value::Array(_), Type::Array(_)) => true,
         (Value::Tuple(_), Type::Tuple(_) | Type::TupleNamed(_)) => true,
         // Map types and Array-of-pairs to Map
-        (Value::Map(_, _), Type::Map(_, _)) | (Value::Array(_), Type::Map(_, _)) => true,
+        (Value::Map(_, _) | Value::Array(_), Type::Map(_, _)) => true,
 
         // Recursive
         (v, Type::Nullable(inner)) => can_convert_to_type(v, inner),
