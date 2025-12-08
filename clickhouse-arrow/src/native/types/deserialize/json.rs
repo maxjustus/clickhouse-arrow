@@ -300,84 +300,19 @@ impl JsonDeserializer {
             typed_values.push(values);
         }
 
-        // 2. Read dynamic path columns (V1/V2 has separate Dynamic columns for listed paths)
-        // Each dynamic path from ObjectStructure is serialized as a Dynamic column
-        // NOTE: If num_dynamic_paths=0, there are no Dynamic columns - all data goes to shared data
-        let mut dynamic_values = Vec::with_capacity(dynamic_path_names.len());
-        for _ in 0..dynamic_path_names.len() {
-            // Read Dynamic column: version + types + prefixes + data
-            let dynamic_version = reader.read_u64_le().await?;
-            if dynamic_version > 3 {
-                return Err(Error::DeserializeError(format!(
-                    "Unsupported Dynamic version in V1/V2 format: {dynamic_version}"
-                )));
-            }
+        // 2. V1/V2: Dynamic paths are NOT serialized as separate columns
+        // Despite what SerializationObject.cpp suggests, testing shows that for V1/V2,
+        // all dynamic paths (those listed in num_dynamic_paths) are stored in the shared data Map
+        // The num_dynamic_paths field is for statistics/metadata only
+        // Dynamic version 2 is used internally but columns are not serialized separately
+        let dynamic_values: Vec<Vec<Value>> = Vec::new();
 
-            // Read types
-            let total_types = reader.read_var_uint().await?;
-            let mut type_list = Vec::with_capacity(total_types.try_into().unwrap_or(usize::MAX));
-            for _ in 0..total_types {
-                type_list.push(Self::parse_type_entry(reader.read_string().await?)?);
-            }
-
-            // Read prefixes
-            let mut dummy_state = DeserializerState::default();
-            for (_, typ) in &type_list {
-                typ.deserialize_prefix_async(reader, &mut dummy_state).await?;
-            }
-
-            // Read discriminators
-            let mut discriminators = Vec::with_capacity(rows);
-            for _ in 0..rows {
-                discriminators.push(read_discriminator!(async reader, total_types));
-            }
-
-            // Prepare offset bookkeeping
-            let total_types_usize = total_types.try_into().map_err(|_| {
-                Error::DeserializeError("Too many dynamic types in V1/V2 path".to_string())
-            })?;
-            let (offsets, row_count_by_type) =
-                Self::build_offsets(&discriminators, total_types, total_types_usize);
-
-            // Read column data
-            let mut columns = vec![Vec::new(); total_types_usize];
-            for (idx, (_type_name, typ)) in type_list.iter().enumerate() {
-                if let Some(&count) = row_count_by_type.get(idx)
-                    && count > 0
-                {
-                    let values = typ.deserialize_column(reader, count, &mut dummy_state).await?;
-                    columns[idx] = values;
-                }
-            }
-
-            // Reconstruct values for this dynamic path
-            let values = Self::reconstruct_path_values(
-                &discriminators,
-                &offsets,
-                &columns,
-                total_types,
-                rows,
-            );
-            dynamic_values.push(values);
-        }
-
-        // 3. Read shared data Map(String, String) if there are dynamic paths
-        // When num_dynamic_paths==0, ClickHouse may not serialize the Map column at all
-        let shared_data = if !dynamic_path_names.is_empty() {
-            // Map(String, String) internally uses Array(Tuple(String, String))
-            // The Array prefix MUST be read before attempting to read the data
-            let map_type = Type::Map(Box::new(Type::String), Box::new(Type::String));
-
-            // CRITICAL: Read Map prefix first (consumes Array(Tuple) prefix bytes from stream)
-            let mut map_prefix_state = DeserializerState::default();
-            map_type.deserialize_prefix_async(reader, &mut map_prefix_state).await?;
-
-            // Now read the actual Map data (offsets, keys, values)
-            Self::read_shared_data_map(reader, rows).await?
-        } else {
-            // No dynamic paths means no shared data Map
-            vec![std::collections::HashMap::new(); rows]
-        };
+        // 3. Read shared data Map(String, String) - ALWAYS written by ClickHouse
+        // Per SerializationObject.cpp:
+        // shared_data_serialization->serializeBinaryBulkWithMultipleStreams()
+        // is called unconditionally, even when num_dynamic_paths==0
+        // Note: Map prefix was already read in read_prefix_shared_data()
+        let shared_data = Self::read_shared_data_map(reader, rows).await?;
 
         // 4. Reconstruct JSON objects by merging typed paths, dynamic paths, and shared data
         let mut result = Vec::with_capacity(rows);
@@ -392,8 +327,12 @@ impl JsonDeserializer {
                 }
             }
 
-            // Add dynamic path values
+            // Add dynamic path values (V1/V2: none, all in shared data; V3: separate columns)
             for (idx, path_name) in dynamic_path_names.iter().enumerate() {
+                // Skip if no dynamic_values (V1/V2 case where everything is in shared data)
+                if idx >= dynamic_values.len() {
+                    break;
+                }
                 let value = &dynamic_values[idx][row_idx];
                 if !matches!(value, Value::Null) {
                     if let Some(segments) = path_segments.get(path_name) {
@@ -477,7 +416,7 @@ impl JsonDeserializer {
             let offset = offset as usize;
             let mut row_map = HashMap::new();
             for i in prev_offset..offset {
-                row_map.insert(keys[i].clone(), values[i].clone());
+                drop(row_map.insert(keys[i].clone(), values[i].clone()));
             }
             result.push(row_map);
             prev_offset = offset;
@@ -511,13 +450,34 @@ impl JsonDeserializer {
             dynamic_path_names.push(path_name);
         }
 
+        // NOTE: Statistics are conditionally written based on object_and_dynamic_write_statistics setting
+        // Per SerializationObject.cpp lines 721-745, they're only read if object_and_dynamic_read_statistics is true
+        // For Native format, ClickHouse appears to NOT write statistics by default
+        // If we encounter issues, we may need to detect/handle statistics presence
+
         // Read typed path prefixes using their native serializers (alphabetically sorted)
         for (_path_name, type_) in &typed_paths {
             type_.deserialize_prefix_async(reader, state).await?;
         }
 
-        // For V1/V2, dynamic paths are stored in a shared data Map, not separate columns
-        // We don't read any discriminators or type lists here - that happens during data reading
+        // V1/V2 with dynamic paths is not yet supported
+        // Dynamic columns in V1/V2 use Dynamic version 2, but our deserializer only supports version 3
+        // For now, error out if there are any dynamic paths
+        if num_dynamic_paths > 0 {
+            return Err(Error::DeserializeError(format!(
+                "V1/V2 JSON Object format with dynamic paths (num_dynamic_paths={}) is not yet \
+                 supported. Please use V3 (FLATTENED) format by setting client_protocol_version >= \
+                 54473 and output_format_native_use_flattened_dynamic_and_json_serialization = 1",
+                num_dynamic_paths
+            )));
+        }
+        let path_dynamic_states = BTreeMap::new();
+
+        // Read the shared data Map(String, String) prefix
+        // Per SerializationObject.cpp lines 649-652, shared_data_serialization->deserializeBinaryBulkStatePrefix
+        // is called in the PREFIX phase
+        let map_type = Type::Map(Box::new(Type::String), Box::new(Type::String));
+        map_type.deserialize_prefix_async(reader, state).await?;
 
         // Build and cache path segments for typed and dynamic paths
         let mut path_segments = BTreeMap::new();
@@ -543,7 +503,7 @@ impl JsonDeserializer {
             typed_path_columns: None,
             rows: None,
             dynamic_data: None, // V1/V2 don't use this field
-            path_dynamic_states: BTreeMap::new(),
+            path_dynamic_states,  // Use the states we just created
             typed_path_states: BTreeMap::new(),
             path_segments,
             #[allow(deprecated)]
