@@ -11,8 +11,9 @@ use crate::native::values::Value;
 use crate::{Error, Result};
 
 // JSON serialization versions
-// Using FLATTENED format (version 3) for client compatibility
+const JSON_OBJECT_VERSION_V1: u64 = 0; // Legacy with extra max_dynamic_paths field
 const JSON_OBJECT_VERSION_STRING: u64 = 1;
+const JSON_OBJECT_VERSION_V2: u64 = 2; // Modern with shared data
 const JSON_OBJECT_VERSION_FLATTENED: u64 = 3;
 
 pub(crate) struct JsonDeserializer;
@@ -47,6 +48,9 @@ impl JsonDeserializer {
         })?;
 
         match version {
+            JSON_OBJECT_VERSION_V1 | JSON_OBJECT_VERSION_V2 => {
+                Self::read_shared_data_format(reader, rows, &json_state).await
+            }
             JSON_OBJECT_VERSION_FLATTENED => {
                 let dynamic_data = json_state.dynamic_data.clone().ok_or_else(|| {
                     Error::DeserializeError("JSON object data not set".to_string())
@@ -275,6 +279,185 @@ impl JsonDeserializer {
     }
 }
 
+impl JsonDeserializer {
+    /// Read V1/V2 format with shared data Map
+    async fn read_shared_data_format<R: ClickHouseRead>(
+        reader: &mut R,
+        rows: usize,
+        json_state: &JsonStateData,
+    ) -> Result<Vec<Value>> {
+        use crate::native::types::deserialize::binary_value::deserialize_binary_value;
+
+        let typed_paths = &json_state.typed_paths;
+        let path_segments = &json_state.path_segments;
+
+        // 1. Read typed path columns
+        let mut typed_values = Vec::with_capacity(typed_paths.len());
+        for (_path_name, type_) in typed_paths {
+            let mut typed_state = DeserializerState::default();
+            let values = type_.deserialize_column(reader, rows, &mut typed_state).await?;
+            typed_values.push(values);
+        }
+
+        // 2. Read shared data Map(String, String)
+        // In V1/V2, ALL dynamic paths are stored in a single shared data Map
+        // (not separate columns like in V3)
+        let shared_data = Self::read_shared_data_map(reader, rows).await?;
+
+        // 3. Reconstruct JSON objects by merging typed paths and shared data
+        let mut result = Vec::with_capacity(rows);
+        for row_idx in 0..rows {
+            let mut json_obj = serde_json::Map::new();
+
+            // Add typed path values
+            for (idx, (path_name, _type_)) in typed_paths.iter().enumerate() {
+                let value = &typed_values[idx][row_idx];
+                if let Some(segments) = path_segments.get(path_name) {
+                    Self::set_nested_value_segments(&mut json_obj, segments, value)?;
+                }
+            }
+
+            // Add shared data values (all dynamic paths)
+            if let Some(row_shared_data) = shared_data.get(row_idx) {
+                for (path_name, binary_value_bytes) in row_shared_data {
+                    // Deserialize the binary value
+                    let value = deserialize_binary_value(binary_value_bytes)
+                        .map_err(|e| Error::DeserializeError(format!("Failed to deserialize shared data value for path {}: {}", path_name, e)))?;
+
+                    // Set it in the JSON object
+                    if let Some(segments) = path_segments.get(path_name) {
+                        Self::set_nested_value_segments(&mut json_obj, segments, &value)?;
+                    } else {
+                        // Path not in segments map, split it
+                        let segments: Vec<String> = path_name.split('.').map(|s| s.to_string()).collect();
+                        Self::set_nested_value_segments(&mut json_obj, &segments, &value)?;
+                    }
+                }
+            }
+
+            result.push(Value::Json(serde_json::Value::Object(json_obj)));
+        }
+
+        Ok(result)
+    }
+
+    /// Read the shared data Map(String, String) for V1/V2 formats
+    /// Returns a vector of maps (one per row), where each map contains path -> binary_value_bytes
+    async fn read_shared_data_map<R: ClickHouseRead>(
+        reader: &mut R,
+        rows: usize,
+    ) -> Result<Vec<std::collections::HashMap<String, Vec<u8>>>> {
+        use std::collections::HashMap;
+
+        // Shared data is Map(String, String) serialized as Array(Tuple(String, String))
+        // Stream 1: ArraySizes (cumulative offsets, u64 each)
+        let mut offsets = Vec::with_capacity(rows);
+        for _ in 0..rows {
+            offsets.push(reader.read_u64_le().await?);
+        }
+
+        let total_entries = offsets.last().copied().unwrap_or(0) as usize;
+
+        // Stream 2: Keys (String column - path names)
+        let mut keys = Vec::with_capacity(total_entries);
+        for _ in 0..total_entries {
+            let key_bytes = reader.read_string().await?;
+            let key = String::from_utf8(key_bytes)
+                .map_err(|e| Error::DeserializeError(format!("Invalid UTF-8 in shared data key: {e}")))?;
+            keys.push(key);
+        }
+
+        // Stream 3: Values (String column - binary encoded values)
+        let mut values = Vec::with_capacity(total_entries);
+        for _ in 0..total_entries {
+            let value_bytes = reader.read_string().await?;
+            values.push(value_bytes);
+        }
+
+        // Group by row using offsets
+        let mut result = Vec::with_capacity(rows);
+        let mut prev_offset = 0;
+        for offset in offsets {
+            let offset = offset as usize;
+            let mut row_map = HashMap::new();
+            for i in prev_offset..offset {
+                row_map.insert(keys[i].clone(), values[i].clone());
+            }
+            result.push(row_map);
+            prev_offset = offset;
+        }
+
+        Ok(result)
+    }
+
+    /// Read prefix for V1 and V2 (shared data formats)
+    async fn read_prefix_shared_data<R: ClickHouseRead>(
+        version: u64,
+        typed_paths: Vec<(String, Type)>,
+        reader: &mut R,
+        state: &mut DeserializerState,
+    ) -> Result<()> {
+        // V1 has an extra max_dynamic_paths field that we skip
+        if version == JSON_OBJECT_VERSION_V1 {
+            let _max_dynamic_paths = reader.read_var_uint().await?;
+        }
+
+        // Read number of dynamic paths
+        let num_dynamic_paths = reader.read_var_uint().await?;
+
+        // Read dynamic path names
+        let mut dynamic_path_names = Vec::with_capacity(num_dynamic_paths.try_into().unwrap_or(usize::MAX));
+        for _ in 0..num_dynamic_paths {
+            let path_bytes = reader.read_string().await?;
+            let path_name = String::from_utf8(path_bytes)
+                .map_err(|e| Error::DeserializeError(format!("Invalid UTF-8 in path: {e}")))?;
+            dynamic_path_names.push(path_name);
+        }
+
+        // Read typed path prefixes using their native serializers (alphabetically sorted)
+        for (_path_name, type_) in &typed_paths {
+            type_.deserialize_prefix_async(reader, state).await?;
+        }
+
+        // For V1/V2, dynamic paths are stored in a shared data Map, not separate columns
+        // We don't read any discriminators or type lists here - that happens during data reading
+
+        // Build and cache path segments for typed and dynamic paths
+        let mut path_segments = BTreeMap::new();
+        for (name, _) in &typed_paths {
+            drop(
+                path_segments
+                    .insert(name.clone(), name.split('.').map(|s| s.to_string()).collect()),
+            );
+        }
+        for name in &dynamic_path_names {
+            drop(
+                path_segments
+                    .insert(name.clone(), name.split('.').map(|s| s.to_string()).collect()),
+            );
+        }
+
+        // Store metadata in state
+        state.type_specific = TypeSpecificState::Json(JsonStateData {
+            version: Some(version),
+            dynamic_paths: dynamic_path_names,
+            typed_paths,
+            dynamic_path_columns: None,
+            typed_path_columns: None,
+            rows: None,
+            dynamic_data: None, // V1/V2 don't use this field
+            path_dynamic_states: BTreeMap::new(),
+            typed_path_states: BTreeMap::new(),
+            path_segments,
+            #[allow(deprecated)]
+            paths: vec![],
+            #[allow(deprecated)]
+            path_columns: None,
+        });
+        Ok(())
+    }
+}
+
 impl Deserializer for JsonDeserializer {
     async fn read_prefix<R: ClickHouseRead>(
         type_: &Type,
@@ -301,10 +484,15 @@ impl Deserializer for JsonDeserializer {
             return Ok(());
         }
 
+        // Handle V1 and V2 (shared data formats)
+        if version == JSON_OBJECT_VERSION_V1 || version == JSON_OBJECT_VERSION_V2 {
+            return Self::read_prefix_shared_data(version, typed_paths, reader, state).await;
+        }
+
         if version != JSON_OBJECT_VERSION_FLATTENED {
             return Err(Error::DeserializeError(format!(
-                "Unsupported JSON serialization version {version}. Expected STRING (1) or \
-                 FLATTENED (3)."
+                "Unsupported JSON serialization version {version}. Expected V1 (0), STRING (1), \
+                 V2 (2), or FLATTENED (3)."
             )));
         }
 
