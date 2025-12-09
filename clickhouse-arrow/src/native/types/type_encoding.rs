@@ -101,7 +101,7 @@ const TYPE_MAP: u8 = 0x27;
 const TYPE_BOOL: u8 = 0x2D;
 
 /// Decode a type from its binary encoding
-pub fn decode_type<R: Read>(reader: &mut R) -> Result<Type> {
+pub(crate) fn decode_type<R: Read>(reader: &mut R) -> Result<Type> {
     let type_byte = reader.read_u8()?;
 
     match type_byte {
@@ -167,7 +167,7 @@ pub fn decode_type<R: Read>(reader: &mut R) -> Result<Type> {
 }
 
 /// Encode a type to its binary encoding
-pub fn encode_type<W: Write>(writer: &mut W, ty: &Type) -> Result<()> {
+pub(crate) fn encode_type<W: Write>(writer: &mut W, ty: &Type) -> Result<()> {
     match ty {
         Type::Nothing => writer.write_u8(TYPE_NOTHING)?,
         Type::UInt8 => writer.write_u8(TYPE_UINT8)?,

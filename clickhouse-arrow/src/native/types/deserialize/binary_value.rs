@@ -110,13 +110,13 @@ impl<R: Read> SyncReadExt for R {}
 ///
 /// The slice contains: [type_byte][value_data]
 /// Returns the deserialized Value
-pub fn deserialize_binary_value(data: &[u8]) -> Result<Value> {
+pub(crate) fn deserialize_binary_value(data: &[u8]) -> Result<Value> {
     let mut cursor = std::io::Cursor::new(data);
     deserialize_binary_value_from_reader(&mut cursor)
 }
 
 /// Deserialize a binary-encoded value from a reader
-pub fn deserialize_binary_value_from_reader<R: Read>(reader: &mut R) -> Result<Value> {
+pub(crate) fn deserialize_binary_value_from_reader<R: Read>(reader: &mut R) -> Result<Value> {
     let ty = decode_type(reader)?;
     deserialize_value_with_type(reader, &ty)
 }

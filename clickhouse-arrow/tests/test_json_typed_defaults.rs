@@ -73,10 +73,11 @@ async fn test_json_typed_nullability_defaults_e2e() {
             };
 
             let block = Block {
-                info:         BlockInfo::default(),
-                rows:         rows.len() as u64,
+                info: BlockInfo::default(),
+                rows: rows.len() as u64,
                 column_types: vec![("data".to_string(), type_)],
-                column_data:  rows,
+                column_data: rows,
+                ..Default::default()
             };
 
             // Insert using native

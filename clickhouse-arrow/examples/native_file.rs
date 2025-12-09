@@ -123,10 +123,11 @@ async fn main() {
                 values.push(Value::UInt64(i));
             }
             let block = clickhouse_arrow::native::block::Block {
-                info:         Default::default(),
-                rows:         count,
+                info: Default::default(),
+                rows: count,
                 column_types: vec![("number".to_string(), Type::UInt64)],
-                column_data:  values,
+                column_data: values,
+                ..Default::default()
             };
 
             writer.write(block).await.expect("write block");

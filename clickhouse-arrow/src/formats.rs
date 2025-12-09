@@ -181,12 +181,6 @@ pub struct JsonState {
     pub(crate) typed_path_states: BTreeMap<String, SerializerState>,
     /// Cached path segmentation for faster nested JSON assembly (path -> segments)
     pub path_segments:            BTreeMap<String, Vec<String>>,
-
-    // Deprecated - kept for compatibility during migration
-    #[deprecated(note = "Use dynamic_paths instead")]
-    pub paths:        Vec<String>,
-    #[deprecated(note = "Use dynamic_path_columns instead")]
-    pub path_columns: Option<BTreeMap<String, Vec<Value>>>,
 }
 
 #[cfg(test)]

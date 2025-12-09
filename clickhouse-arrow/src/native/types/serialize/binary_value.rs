@@ -94,7 +94,7 @@ impl<W: Write> SyncWriteExt for W {}
 /// Serialize a value to binary format with type byte prefix
 ///
 /// The output format is: [type_byte][value_data]
-pub fn serialize_binary_value<W: Write>(writer: &mut W, value: &Value) -> Result<()> {
+pub(crate) fn serialize_binary_value<W: Write>(writer: &mut W, value: &Value) -> Result<()> {
     let ty = infer_type(value)?;
     encode_type(writer, &ty)?;
     serialize_value_data(writer, value, &ty)

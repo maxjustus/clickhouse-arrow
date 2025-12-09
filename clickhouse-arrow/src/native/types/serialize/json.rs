@@ -29,8 +29,8 @@ fn json_version_to_dynamic_version(json_version: Option<u64>) -> Option<u64> {
     json_version.map(|v| match v {
         JSON_OBJECT_VERSION_V1 => DYNAMIC_VERSION_V1, // JSON V1 (0) → Dynamic V1 (0)
         JSON_OBJECT_VERSION_V2 => DYNAMIC_VERSION_V2, // JSON V2 (2) → Dynamic V2 (2)
-        JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED => DYNAMIC_VERSION_V3, /* JSON V3 (3) →
-                                                                             * Dynamic V3 (3) */
+        JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED => DYNAMIC_VERSION_V3, /* JSON V3 (3) → */
+        // Dynamic V3 (3)
         _ => v, // Unknown version, pass through
     })
 }
@@ -342,6 +342,7 @@ impl JsonSerializer {
 
 impl JsonSerializer {
     /// Analyze JSON values and return metadata for use in `write_prefix`
+    #[allow(dead_code)] // Used by tests
     pub(crate) fn analyze_values(values: &[Value], type_: &Type) -> Result<TypeSpecificState> {
         Self::analyze_values_with_version(values, type_, None)
     }
@@ -460,21 +461,16 @@ impl JsonSerializer {
 
         let state = JsonState {
             version, // Will be used in write_prefix if set, otherwise defaults to V3
-            dynamic_paths: dynamic_paths.clone(),
-            typed_paths: typed_paths.clone(),
+            dynamic_paths,
+            typed_paths,
             dynamic_path_columns: Some(dynamic_path_columns),
             typed_path_columns: Some(json_data.typed_path_columns),
             shared_path_columns,
             rows: Some(json_data.rows),
             dynamic_data: None,
-            path_dynamic_states, // Pre-built per-path Dynamic states
-            typed_path_states,   // Pre-built states for typed paths
+            path_dynamic_states,
+            typed_path_states,
             path_segments: BTreeMap::new(),
-            // Deprecated fields for compatibility
-            #[allow(deprecated)]
-            paths: dynamic_paths,
-            #[allow(deprecated)]
-            path_columns: None,
         };
 
         Ok(TypeSpecificState::Json(state))
@@ -487,28 +483,6 @@ impl JsonSerializer {
         } else {
             JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED
         }
-    }
-
-    /// Write paths header based on version (async)
-    async fn write_paths_header_async<W: ClickHouseWrite>(
-        paths: &[String],
-        version: u64,
-        writer: &mut W,
-    ) -> Result<()> {
-        if version != JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED {
-            return Err(Error::SerializeError(format!(
-                "Unsupported JSON serialization version: {version}"
-            )));
-        }
-
-        // V3 format: total dynamic paths count
-        writer.write_var_uint(paths.len() as u64).await?;
-
-        // Write path names
-        for path in paths {
-            writer.write_string(path.as_bytes().to_vec()).await?;
-        }
-        Ok(())
     }
 }
 
@@ -580,7 +554,7 @@ impl Serializer for JsonSerializer {
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        // Get metadata from state
+        // Take metadata from state (avoids cloning column data)
         let (
             version,
             typed_paths,
@@ -588,17 +562,21 @@ impl Serializer for JsonSerializer {
             dynamic_paths,
             dynamic_columns,
             shared_columns,
+            path_dynamic_states,
             rows,
-        ) = if let TypeSpecificState::Json(json_state) = &state.type_specific {
+        ) = if let TypeSpecificState::Json(json_state) = &mut state.type_specific {
             let rows = json_state.rows.ok_or_else(|| {
                 Error::SerializeError("JSON rows count not found in state".to_string())
             })?;
 
-            let typed_columns = json_state.typed_path_columns.clone().unwrap_or_default();
-            let dynamic_columns = json_state.dynamic_path_columns.clone().unwrap_or_default();
-            let shared_columns = json_state.shared_path_columns.clone();
+            // Take ownership of column data (consumed during write)
+            let typed_columns = json_state.typed_path_columns.take().unwrap_or_default();
+            let dynamic_columns = json_state.dynamic_path_columns.take().unwrap_or_default();
+            let shared_columns = json_state.shared_path_columns.take();
+            let path_dynamic_states = std::mem::take(&mut json_state.path_dynamic_states);
             let version = json_state.version.unwrap_or(JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED);
 
+            // Clone small Vec<String> and Vec<(String, Type)> (cheap)
             (
                 version,
                 json_state.typed_paths.clone(),
@@ -606,6 +584,7 @@ impl Serializer for JsonSerializer {
                 json_state.dynamic_paths.clone(),
                 dynamic_columns,
                 shared_columns,
+                path_dynamic_states,
                 rows,
             )
         } else {
@@ -634,23 +613,15 @@ impl Serializer for JsonSerializer {
             type_.serialize_column(column_values, writer, &mut typed_state).await?;
         }
 
-        // Get dynamic states
-        let path_dynamic_states = if let TypeSpecificState::Json(json_state) = &state.type_specific
-        {
-            json_state.path_dynamic_states.clone()
-        } else {
-            Default::default()
-        };
-
         // Write dynamic path columns
         // For V1/V2, paths must be sorted alphabetically
         let sorted_paths: Vec<String> =
             if version == JSON_OBJECT_VERSION_V1 || version == JSON_OBJECT_VERSION_V2 {
-                let mut paths = dynamic_paths.clone();
+                let mut paths = dynamic_paths;
                 paths.sort();
                 paths
             } else {
-                dynamic_paths.clone()
+                dynamic_paths
             };
 
         for path in &sorted_paths {
@@ -724,17 +695,8 @@ impl JsonSerializer {
             for path in dynamic_paths {
                 if dynamic_columns.get(path).is_some() {
                     if let Some(dyn_state) = path_dynamic_states.get(path) {
-                        let original = std::mem::replace(
-                            &mut state.type_specific,
-                            TypeSpecificState::Dynamic(dyn_state.clone()),
-                        );
-                        DynamicSerializer::write_prefix(
-                            &Type::Dynamic { max_types: None },
-                            writer,
-                            state,
-                        )
-                        .await?;
-                        state.type_specific = original;
+                        DynamicSerializer::write_prefix_with_state(dyn_state, writer, state)
+                            .await?;
                     }
                 }
             }
@@ -788,13 +750,7 @@ impl JsonSerializer {
                 let mut dyn_state_v1v2 = dyn_state.clone();
                 dyn_state_v1v2.version = json_version_to_dynamic_version(Some(version));
 
-                let original = std::mem::replace(
-                    &mut state.type_specific,
-                    TypeSpecificState::Dynamic(dyn_state_v1v2),
-                );
-                DynamicSerializer::write_prefix(&Type::Dynamic { max_types: None }, writer, state)
-                    .await?;
-                state.type_specific = original;
+                DynamicSerializer::write_prefix_with_state(&dyn_state_v1v2, writer, state).await?;
             }
         }
 

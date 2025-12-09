@@ -32,16 +32,13 @@ impl DynamicSerializer {
         state: &mut SerializerState,
         dynamic_state: TypeSpecificState,
     ) -> Result<()> {
-        // Temporarily swap state to use provided Dynamic state
-        let original_state = std::mem::replace(&mut state.type_specific, dynamic_state);
-
-        // Write the actual data
-        Self::write_internal_async(&Type::Dynamic { max_types: None }, values, writer, state)
-            .await?;
-
-        // Restore original state
-        state.type_specific = original_state;
-        Ok(())
+        if let TypeSpecificState::Dynamic(dyn_state) = &dynamic_state {
+            Self::write_internal_with_state(values, writer, state, dyn_state).await
+        } else {
+            Err(crate::Error::SerializeError(
+                "Expected Dynamic state for write_dynamic_data_async".to_string(),
+            ))
+        }
     }
 
     /// Check if server supports Dynamic type (V3 requires >= 25.6)
@@ -57,15 +54,6 @@ impl DynamicSerializer {
             }
         }
         Ok(())
-    }
-
-    /// Get Dynamic serialization version from state, defaulting to FLATTENED
-    fn get_version(state: &SerializerState) -> u64 {
-        if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-            dynamic_state.version.unwrap_or(DYNAMIC_VERSION_FLATTENED)
-        } else {
-            DYNAMIC_VERSION_FLATTENED
-        }
     }
 
     /// Build type registry from values
@@ -221,38 +209,34 @@ impl DynamicSerializer {
         Self::write_columns_internal_async(type_names, type_map, &rows_by_type, writer, state).await
     }
 
-    /// Write complete Dynamic data (async version)
-    pub(crate) async fn write_internal_async<W: ClickHouseWrite>(
-        _: &Type,
+    /// Write complete Dynamic data using DynamicState directly (avoids state swapping)
+    async fn write_internal_with_state<W: ClickHouseWrite>(
         values: &[Value],
         writer: &mut W,
         state: &mut SerializerState,
+        dyn_state: &DynamicState,
     ) -> Result<()> {
-        // Get metadata from state
-        let (version, type_names, type_map, total_types) =
-            if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-                let total = usize::try_from(dynamic_state.total_types).unwrap_or(usize::MAX);
-                let ver = dynamic_state.version.unwrap_or(DYNAMIC_VERSION_FLATTENED);
-                (ver, dynamic_state.type_names.clone(), dynamic_state.type_map.clone(), total)
-            } else {
-                return Err(crate::Error::SerializeError(
-                    "Dynamic serialization state not found. `analyze_values` must be called \
-                     before `write`."
-                        .to_string(),
-                ));
-            };
+        let version = dyn_state.version.unwrap_or(DYNAMIC_VERSION_FLATTENED);
+        let total_types = usize::try_from(dyn_state.total_types).unwrap_or(usize::MAX);
 
         match version {
             DYNAMIC_VERSION_V1 | DYNAMIC_VERSION_V2 => {
-                Self::write_data_v1_v2_async(values, writer, state, &type_names, &type_map).await
+                Self::write_data_v1_v2_async(
+                    values,
+                    writer,
+                    state,
+                    &dyn_state.type_names,
+                    &dyn_state.type_map,
+                )
+                .await
             }
             DYNAMIC_VERSION_FLATTENED => {
                 Self::write_data_v3_async(
                     values,
                     writer,
                     state,
-                    &type_names,
-                    &type_map,
+                    &dyn_state.type_names,
+                    &dyn_state.type_map,
                     total_types,
                 )
                 .await
@@ -260,6 +244,25 @@ impl DynamicSerializer {
             _ => Err(crate::Error::SerializeError(format!(
                 "Unsupported Dynamic version for write: {version}"
             ))),
+        }
+    }
+
+    /// Write complete Dynamic data (async version)
+    pub(crate) async fn write_internal_async<W: ClickHouseWrite>(
+        _: &Type,
+        values: &[Value],
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
+            let dyn_state = dynamic_state.clone();
+            Self::write_internal_with_state(values, writer, state, &dyn_state).await
+        } else {
+            Err(crate::Error::SerializeError(
+                "Dynamic serialization state not found. `analyze_values` must be called before \
+                 `write`."
+                    .to_string(),
+            ))
         }
     }
 
@@ -326,46 +329,59 @@ impl DynamicSerializer {
         Ok(())
     }
 
+    /// Write prefix using DynamicState directly (avoids state swapping in callers)
+    pub(crate) async fn write_prefix_with_state<W: ClickHouseWrite>(
+        dyn_state: &DynamicState,
+        writer: &mut W,
+        state: &mut SerializerState,
+    ) -> Result<()> {
+        let version = dyn_state.version.unwrap_or(DYNAMIC_VERSION_FLATTENED);
+
+        // Check server version support
+        Self::check_server_version(state, version)?;
+
+        trace!("Writing Dynamic prefix with version {}", version);
+        writer.write_u64_le(version).await?;
+
+        trace!("Dynamic state: {} types: {:?}", dyn_state.total_types, dyn_state.type_names);
+
+        match version {
+            DYNAMIC_VERSION_V1 | DYNAMIC_VERSION_V2 => {
+                Self::write_prefix_v1_v2_async(
+                    writer,
+                    state,
+                    version,
+                    &dyn_state.type_names,
+                    &dyn_state.type_map,
+                )
+                .await
+            }
+            DYNAMIC_VERSION_FLATTENED => {
+                Self::write_prefix_v3_async(
+                    writer,
+                    state,
+                    &dyn_state.type_names,
+                    &dyn_state.type_map,
+                    dyn_state.total_types,
+                )
+                .await
+            }
+            _ => Err(crate::Error::SerializeError(format!(
+                "Unsupported Dynamic version for write: {version}"
+            ))),
+        }
+    }
+
     #[allow(clippy::used_underscore_binding)]
     pub(crate) async fn write_prefix<W: ClickHouseWrite>(
         _type: &Type,
         writer: &mut W,
         state: &mut SerializerState,
     ) -> Result<()> {
-        let version = Self::get_version(state);
-
-        // Check server version support
-        Self::check_server_version(state, version)?;
-
-        trace!("Writing Dynamic prefix with version {}", version);
-        // Always write version first
-        writer.write_u64_le(version).await?;
-
-        // Check if we have metadata from previous analysis
         if let TypeSpecificState::Dynamic(dynamic_state) = &state.type_specific {
-            trace!(
-                "Dynamic state: {} types: {:?}",
-                dynamic_state.total_types, dynamic_state.type_names
-            );
-
-            // Clone to avoid borrowing issues
-            let type_names = dynamic_state.type_names.clone();
-            let type_map = dynamic_state.type_map.clone();
-            let total_types = dynamic_state.total_types;
-
-            match version {
-                DYNAMIC_VERSION_V1 | DYNAMIC_VERSION_V2 => {
-                    Self::write_prefix_v1_v2_async(writer, state, version, &type_names, &type_map)
-                        .await
-                }
-                DYNAMIC_VERSION_FLATTENED => {
-                    Self::write_prefix_v3_async(writer, state, &type_names, &type_map, total_types)
-                        .await
-                }
-                _ => Err(crate::Error::SerializeError(format!(
-                    "Unsupported Dynamic version for write: {version}"
-                ))),
-            }
+            // Clone the state since we need to pass it by reference
+            let dyn_state = dynamic_state.clone();
+            Self::write_prefix_with_state(&dyn_state, writer, state).await
         } else {
             Err(crate::Error::SerializeError(
                 "Dynamic serialization state not found. `analyze_values` must be called before \

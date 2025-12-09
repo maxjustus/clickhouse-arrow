@@ -490,7 +490,7 @@ impl JsonDeserializer {
 
             // Extract the DynamicState from DeserializerState
             if let TypeSpecificState::Dynamic(dynamic_state) = deserializer_state.type_specific {
-                path_dynamic_states.insert(path_name.clone(), dynamic_state);
+                drop(path_dynamic_states.insert(path_name.clone(), dynamic_state));
             } else {
                 return Err(Error::DeserializeError(format!(
                     "Expected Dynamic state after reading prefix for path: {path_name}"
@@ -529,14 +529,10 @@ impl JsonDeserializer {
             typed_path_columns: None,
             shared_path_columns: None,
             rows: None,
-            dynamic_data: None,  // V1/V2 don't use this field
-            path_dynamic_states, // Use the states we just created
+            dynamic_data: None,
+            path_dynamic_states,
             typed_path_states: BTreeMap::new(),
             path_segments,
-            #[allow(deprecated)]
-            paths: vec![],
-            #[allow(deprecated)]
-            path_columns: None,
         });
         Ok(())
     }
@@ -658,13 +654,8 @@ impl Deserializer for JsonDeserializer {
             rows: None,
             dynamic_data: Some(dynamic_data),
             path_dynamic_states: BTreeMap::new(),
-            typed_path_states: BTreeMap::new(), // Not used in deserialization
+            typed_path_states: BTreeMap::new(),
             path_segments,
-            // Deprecated fields - leave as default
-            #[allow(deprecated)]
-            paths: vec![],
-            #[allow(deprecated)]
-            path_columns: None,
         });
         Ok(())
     }

@@ -56,10 +56,11 @@ async fn test_json_max_dynamic_types_server_selection() {
             };
 
             let block = Block {
-                info:         BlockInfo::default(),
-                rows:         rows.len() as u64,
+                info: BlockInfo::default(),
+                rows: rows.len() as u64,
                 column_types: vec![("data".to_string(), type_)],
-                column_data:  rows.clone(),
+                column_data: rows.clone(),
+                ..Default::default()
             };
 
             use futures_util::StreamExt;
