@@ -35,13 +35,6 @@ fn json_version_to_dynamic_version(json_version: Option<u64>) -> Option<u64> {
     })
 }
 
-// JSON v3 object serialization is now supported via thread-local caching
-// The implementation follows the same pattern as Dynamic type serialization:
-// 1. analyze_values is called before serialization to collect metadata
-// 2. metadata is cached in thread-local storage
-// 3. write_prefix uses cached metadata to write the full header
-// 4. write uses cached data to write column data efficiently
-
 /// Parsed JSON data organized by typed and dynamic paths
 #[derive(Debug, Clone)]
 struct JsonData {
@@ -65,33 +58,14 @@ impl JsonData {
         }
     }
 
-    /// Parse JSON values into path-organized structure
-    fn from_values(
-        values: Vec<Value>,
-        typed_paths: &[(String, Type)],
+    /// Build skip matchers from exact strings and regex patterns
+    fn compile_skip_matchers(
         skip_exact: &[String],
         skip_regex: &[String],
-    ) -> Result<Self> {
-        let mut dynamic_path_columns: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-        let mut typed_path_columns: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-        let rows = values.len();
+    ) -> Result<(std::collections::HashSet<String>, Vec<regex::Regex>)> {
+        let skip_set: std::collections::HashSet<String> = skip_exact.iter().cloned().collect();
 
-        // Pre-populate typed path columns; use default for non-nullable types
-        for (path, ty) in typed_paths {
-            // Prefill: Variant columns expect Variant values (use null discriminator),
-            // otherwise use Null for effectively-nullable types or the type default.
-            let fill = match ty {
-                Type::Variant(_) => Value::Variant(0xFF, Box::new(Value::Null)),
-                _ if Self::is_effectively_nullable(ty) => Value::Null,
-                _ => ty.default_value(),
-            };
-            drop(typed_path_columns.insert(path.clone(), vec![fill; rows]));
-        }
-
-        // Prepare skip matchers
-        let skip_exact_set: std::collections::HashSet<&str> =
-            skip_exact.iter().map(|s| s.as_str()).collect();
-        let skip_patterns: Result<Vec<regex::Regex>> = skip_regex
+        let patterns: Result<Vec<regex::Regex>> = skip_regex
             .iter()
             .map(|p| {
                 regex::Regex::new(p).map_err(|e| {
@@ -99,92 +73,100 @@ impl JsonData {
                 })
             })
             .collect();
-        let skip_patterns = skip_patterns?;
+
+        Ok((skip_set, patterns?))
+    }
+
+    /// Pre-fill typed columns with appropriate defaults
+    fn init_typed_columns(
+        typed_paths: &[(String, Type)],
+        rows: usize,
+    ) -> BTreeMap<String, Vec<Value>> {
+        let mut columns = BTreeMap::new();
+        for (path, ty) in typed_paths {
+            let fill = match ty {
+                Type::Variant(_) => Value::Variant(0xFF, Box::new(Value::Null)),
+                _ if Self::is_effectively_nullable(ty) => Value::Null,
+                _ => ty.default_value(),
+            };
+            drop(columns.insert(path.clone(), vec![fill; rows]));
+        }
+        columns
+    }
+
+    /// Parse a Value into serde_json::Value (returns None for Null)
+    fn parse_json_value(value: Value) -> Result<Option<serde_json::Value>> {
+        match value {
+            Value::Object(bytes) => {
+                let json = serde_json::from_slice(&bytes)
+                    .map_err(|e| Error::SerializeError(format!("Invalid JSON bytes: {e}")))?;
+                Ok(Some(json))
+            }
+            #[cfg(feature = "serde")]
+            Value::Json(json) => Ok(Some(json)),
+            Value::String(bytes) => {
+                let s = String::from_utf8(bytes).map_err(|e| {
+                    Error::SerializeError(format!("Invalid UTF-8 in JSON string: {e}"))
+                })?;
+                let json = serde_json::from_str(&s)
+                    .map_err(|e| Error::SerializeError(format!("Invalid JSON string: {e}")))?;
+                Ok(Some(json))
+            }
+            Value::Null => Ok(None),
+            _ => Err(Error::SerializeError(format!(
+                "JSON serialization expects Object or String, got: {value:?}"
+            ))),
+        }
+    }
+
+    /// Pad all columns to exactly `rows` entries with Null
+    fn pad_columns(columns: &mut BTreeMap<String, Vec<Value>>, rows: usize) {
+        for column in columns.values_mut() {
+            column.resize(rows, Value::Null);
+        }
+    }
+
+    /// Count non-null values per path
+    fn compute_frequency(columns: &BTreeMap<String, Vec<Value>>) -> BTreeMap<String, usize> {
+        columns
+            .iter()
+            .map(|(path, col)| {
+                let count = col.iter().filter(|v| !matches!(v, Value::Null)).count();
+                (path.clone(), count)
+            })
+            .collect()
+    }
+
+    /// Parse JSON values into path-organized structure
+    fn from_values(
+        values: Vec<Value>,
+        typed_paths: &[(String, Type)],
+        skip_exact: &[String],
+        skip_regex: &[String],
+    ) -> Result<Self> {
+        let rows = values.len();
+        let (skip_set, skip_patterns) = Self::compile_skip_matchers(skip_exact, skip_regex)?;
+        let mut typed_path_columns = Self::init_typed_columns(typed_paths, rows);
+        let mut dynamic_path_columns: BTreeMap<String, Vec<Value>> = BTreeMap::new();
 
         for (row_idx, value) in values.into_iter().enumerate() {
-            match value {
-                Value::Object(bytes) => {
-                    // Parse JSON bytes into object
-                    let json_value: serde_json::Value = serde_json::from_slice(&bytes)
-                        .map_err(|e| Error::SerializeError(format!("Invalid JSON bytes: {e}")))?;
-
-                    // Extract paths from JSON object
-                    Self::extract_paths_from_json(
-                        &json_value,
-                        "",
-                        &mut dynamic_path_columns,
-                        &mut typed_path_columns,
-                        typed_paths,
-                        &skip_exact_set,
-                        &skip_patterns,
-                        row_idx,
-                        rows,
-                    )?;
-                }
-                #[cfg(feature = "serde")]
-                Value::Json(json_value) => {
-                    // Consume structured JSON directly, no parsing
-                    Self::extract_paths_from_json(
-                        &json_value,
-                        "",
-                        &mut dynamic_path_columns,
-                        &mut typed_path_columns,
-                        typed_paths,
-                        &skip_exact_set,
-                        &skip_patterns,
-                        row_idx,
-                        rows,
-                    )?;
-                }
-                Value::String(bytes) => {
-                    // Parse JSON string into object
-                    let json_str = String::from_utf8(bytes).map_err(|e| {
-                        Error::SerializeError(format!("Invalid UTF-8 in JSON string: {e}"))
-                    })?;
-
-                    let json_value: serde_json::Value = serde_json::from_str(&json_str)
-                        .map_err(|e| Error::SerializeError(format!("Invalid JSON string: {e}")))?;
-
-                    // Extract paths from JSON object
-                    Self::extract_paths_from_json(
-                        &json_value,
-                        "",
-                        &mut dynamic_path_columns,
-                        &mut typed_path_columns,
-                        typed_paths,
-                        &skip_exact_set,
-                        &skip_patterns,
-                        row_idx,
-                        rows,
-                    )?;
-                }
-                Value::Null => {
-                    // For null values, we don't add any paths - they'll be filled with nulls
-                }
-                _ => {
-                    return Err(Error::SerializeError(format!(
-                        "JSON serialization expects Object (bytes) or String (text) containing \
-                         JSON, got: {value:?}"
-                    )));
-                }
+            if let Some(json) = Self::parse_json_value(value)? {
+                Self::extract_paths_from_json(
+                    &json,
+                    "",
+                    &mut dynamic_path_columns,
+                    &mut typed_path_columns,
+                    typed_paths,
+                    &skip_set,
+                    &skip_patterns,
+                    row_idx,
+                    rows,
+                )?;
             }
         }
 
-        // Ensure all path columns have the correct number of rows (fill with nulls)
-        for column in dynamic_path_columns.values_mut() {
-            while column.len() < rows {
-                column.push(Value::Null);
-            }
-        }
-
-        // Calculate path frequency: count non-null values per dynamic path
-        let path_frequency: BTreeMap<String, usize> = dynamic_path_columns
-            .iter()
-            .map(|(path, column)| {
-                let non_null_count = column.iter().filter(|v| !matches!(v, Value::Null)).count();
-                (path.clone(), non_null_count)
-            })
-            .collect();
+        Self::pad_columns(&mut dynamic_path_columns, rows);
+        let path_frequency = Self::compute_frequency(&dynamic_path_columns);
 
         Ok(JsonData { dynamic_path_columns, typed_path_columns, path_frequency, rows })
     }
@@ -196,7 +178,7 @@ impl JsonData {
         dynamic_path_columns: &mut BTreeMap<String, Vec<Value>>,
         typed_path_columns: &mut BTreeMap<String, Vec<Value>>,
         typed_paths: &[(String, Type)],
-        skip_exact: &std::collections::HashSet<&str>,
+        skip_exact: &std::collections::HashSet<String>,
         skip_patterns: &[regex::Regex],
         row_idx: usize,
         total_rows: usize,
@@ -505,46 +487,48 @@ impl Serializer for JsonSerializer {
             json_state.version = Some(version);
         }
 
-        // Retrieve metadata from state
-        if let TypeSpecificState::Json(json_state) = &state.type_specific {
-            let typed_paths = json_state.typed_paths.clone();
-            let dynamic_paths = json_state.dynamic_paths.clone();
-            let dynamic_columns = json_state.dynamic_path_columns.clone();
-            let path_dynamic_states = json_state.path_dynamic_states.clone();
+        // Clone metadata from state (required due to borrow checker - state is passed mutably to
+        // nested calls)
+        let (typed_paths, dynamic_paths, path_dynamic_states) =
+            if let TypeSpecificState::Json(json_state) = &state.type_specific {
+                (
+                    json_state.typed_paths.clone(),
+                    json_state.dynamic_paths.clone(),
+                    json_state.path_dynamic_states.clone(),
+                )
+            } else {
+                return Err(Error::SerializeError(
+                    "JSON serialization state not found. `analyze_values` must be called before \
+                     `write_prefix`."
+                        .to_string(),
+                ));
+            };
 
-            match version {
-                JSON_OBJECT_VERSION_V1 | JSON_OBJECT_VERSION_V2 => {
-                    Self::write_prefix_v1_v2_async(
-                        writer,
-                        state,
-                        version,
-                        &typed_paths,
-                        &dynamic_paths,
-                        &path_dynamic_states,
-                    )
-                    .await
-                }
-                JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED => {
-                    Self::write_prefix_v3_async(
-                        writer,
-                        state,
-                        &typed_paths,
-                        &dynamic_paths,
-                        &dynamic_columns,
-                        &path_dynamic_states,
-                    )
-                    .await
-                }
-                _ => Err(Error::SerializeError(format!(
-                    "Unsupported JSON version for write: {version}"
-                ))),
+        match version {
+            JSON_OBJECT_VERSION_V1 | JSON_OBJECT_VERSION_V2 => {
+                Self::write_prefix_v1_v2_async(
+                    writer,
+                    state,
+                    version,
+                    &typed_paths,
+                    &dynamic_paths,
+                    &path_dynamic_states,
+                )
+                .await
             }
-        } else {
-            Err(Error::SerializeError(
-                "JSON serialization state not found. `analyze_values` must be called before \
-                 `write_prefix`."
-                    .to_string(),
-            ))
+            JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED => {
+                Self::write_prefix_v3_async(
+                    writer,
+                    state,
+                    &typed_paths,
+                    &dynamic_paths,
+                    &path_dynamic_states,
+                )
+                .await
+            }
+            _ => {
+                Err(Error::SerializeError(format!("Unsupported JSON version for write: {version}")))
+            }
         }
     }
 
@@ -665,19 +649,15 @@ impl JsonSerializer {
         state: &mut SerializerState,
         typed_paths: &[(String, Type)],
         dynamic_paths: &[String],
-        dynamic_columns: &Option<BTreeMap<String, Vec<Value>>>,
         path_dynamic_states: &BTreeMap<String, crate::formats::DynamicState>,
     ) -> Result<()> {
-        // V3 format: total_types, then type names, then nested prefixes
         writer.write_var_uint(dynamic_paths.len() as u64).await?;
 
-        // Write path names
         for path in dynamic_paths {
             writer.write_string(path.as_bytes().to_vec()).await?;
         }
 
-        // Write typed path prefixes using their nested serializers
-        // Sort typed paths by name to match ClickHouse's deterministic order
+        // Write typed path prefixes (sorted for deterministic order)
         let mut typed_entries: Vec<(&String, &Type)> =
             typed_paths.iter().map(|(n, t)| (n, t)).collect();
         typed_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -690,15 +670,11 @@ impl JsonSerializer {
             path_type.serialize_prefix_async(writer, &mut typed_prefix_state).await?;
         }
 
-        // Write Dynamic column headers for each dynamic path using precomputed states
-        if let Some(dynamic_columns) = dynamic_columns {
-            for path in dynamic_paths {
-                if dynamic_columns.get(path).is_some() {
-                    if let Some(dyn_state) = path_dynamic_states.get(path) {
-                        DynamicSerializer::write_prefix_with_state(dyn_state, writer, state)
-                            .await?;
-                    }
-                }
+        // Write Dynamic prefix for each path (path_dynamic_states has entries for all paths with
+        // data)
+        for path in dynamic_paths {
+            if let Some(dyn_state) = path_dynamic_states.get(path) {
+                DynamicSerializer::write_prefix_with_state(dyn_state, writer, state).await?;
             }
         }
 

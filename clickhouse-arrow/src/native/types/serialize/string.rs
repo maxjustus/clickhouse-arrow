@@ -37,23 +37,17 @@ impl Serializer for StringSerializer {
                     emit_bytes(type_, &bytes, writer).await?;
                 }
                 Value::Array(items) => {
-                    // validate function already confirmed the types here (it's an indirect
-                    // Vec<u8>/Vec<i8>)
-                    let bytes = items
+                    let bytes: Vec<u8> = items
                         .into_iter()
-                        .filter_map(|x| {
-                            match x {
-                                Value::UInt8(x) => Ok(x),
-                                #[expect(clippy::cast_sign_loss)]
-                                Value::Int8(x) => Ok(x as u8),
-                                // TODO: This is wrong, it will never deserialize w/ missing pieces
-                                _ => Err(Error::SerializeError(format!(
-                                    "StringSerializer called with non-string type: {type_:?}"
-                                ))),
-                            }
-                            .ok()
+                        .map(|x| match x {
+                            Value::UInt8(x) => Ok(x),
+                            #[expect(clippy::cast_sign_loss)]
+                            Value::Int8(x) => Ok(x as u8),
+                            _ => Err(Error::SerializeError(format!(
+                                "StringSerializer called with non-byte value: {x:?}"
+                            ))),
                         })
-                        .collect::<Vec<u8>>();
+                        .collect::<Result<Vec<u8>, _>>()?;
                     emit_bytes(type_, &bytes, writer).await?;
                 }
                 _ => {
@@ -64,5 +58,47 @@ impl Serializer for StringSerializer {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_array_with_non_byte_values_returns_error() {
+        let mut buf = Vec::new();
+        let mut state = SerializerState::default();
+
+        // Array with a Float64 mixed in - should error, not silently drop
+        let values = vec![Value::Array(vec![
+            Value::UInt8(65),
+            Value::Float64(3.14), // Invalid - not a byte
+            Value::UInt8(67),
+        ])];
+
+        let result = StringSerializer::write(&Type::String, values, &mut buf, &mut state).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("non-byte value"));
+    }
+
+    #[tokio::test]
+    async fn test_array_with_valid_bytes_succeeds() {
+        let mut buf = Vec::new();
+        let mut state = SerializerState::default();
+
+        let values = vec![Value::Array(vec![
+            Value::UInt8(65), // 'A'
+            Value::UInt8(66), // 'B'
+            Value::Int8(67),  // 'C' (as signed)
+        ])];
+
+        let result = StringSerializer::write(&Type::String, values, &mut buf, &mut state).await;
+
+        assert!(result.is_ok());
+        // String format: varint length + bytes
+        assert_eq!(&buf[1..], b"ABC");
     }
 }
