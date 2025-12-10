@@ -48,19 +48,18 @@ pub enum QueryCommand {
 }
 
 pub struct App {
-    pub session:           Session,
-    pub should_quit:       bool,
-    pub show_help:         bool,
-    pub query_editor_open: bool, // Modal query editor state
-    pub history:           History,
-    cmd_tx:                mpsc::Sender<QueryCommand>,
-    event_tx:              mpsc::Sender<AppEvent>,
-    event_rx:              mpsc::Receiver<AppEvent>,
+    pub session:      Session,
+    pub should_quit:  bool,
+    pub show_help:    bool,
+    pub history:      History,
+    cmd_tx:           mpsc::Sender<QueryCommand>,
+    event_tx:         mpsc::Sender<AppEvent>,
+    event_rx:         mpsc::Receiver<AppEvent>,
     /// Maps query_id -> block_index for event routing
-    query_map:             HashMap<usize, usize>,
-    next_query_id:         usize,
+    query_map:        HashMap<usize, usize>,
+    next_query_id:    usize,
     /// Cached UI state per query (keyed by cache_id)
-    view_state_cache:      HashMap<String, ViewState>,
+    view_state_cache: HashMap<String, ViewState>,
 }
 
 impl App {
@@ -74,7 +73,6 @@ impl App {
             session: Session::new(),
             should_quit: false,
             show_help: false,
-            query_editor_open: false,
             history,
             cmd_tx,
             event_tx,
@@ -109,9 +107,9 @@ impl App {
                         self.handle_key(key).await?;
                     }
                     Event::Paste(text) => {
-                        // Always paste into new query editor and open the modal
+                        // Always paste into new query editor and open it
                         self.session.new_query.insert_str(&text);
-                        self.query_editor_open = true;
+                        self.session.focus = Focus::QueryEditor;
                     }
                     _ => {}
                 }
@@ -127,10 +125,10 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
-        // 'n' or 'i' opens query editor modal (empty)
-        // Shift+N or Shift+I opens modal pre-populated with current query's SQL
+        // 'n' opens query editor (empty)
+        // Shift+N opens editor pre-populated with current query's SQL
         // Skip if history search is active (let search handle the key)
-        if !self.query_editor_open
+        if self.session.focus != Focus::QueryEditor
             && !self.session.history_search_active
             && !key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N'))
@@ -150,8 +148,9 @@ impl App {
                 self.set_new_query_text(&sql);
             }
 
-            // Open modal
-            self.query_editor_open = true;
+            // Save where we came from and open editor
+            self.session.previous_focus = Some(self.session.focus.clone());
+            self.session.focus = Focus::QueryEditor;
             return Ok(());
         }
 
@@ -180,27 +179,27 @@ impl App {
                 self.show_help = true;
                 return Ok(());
             }
-            // Ctrl+P: Previous query card (global, but not in query editor modal)
+            // Ctrl+P: Previous query card (global, but not in query editor)
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if !self.query_editor_open {
+                if self.session.focus != Focus::QueryEditor {
                     self.save_current_view_state();
                     if self.session.card_prev() {
                         self.load_selected_entry().await;
                     }
                     return Ok(());
                 }
-                // Fall through to modal handler
+                // Fall through to editor handler
             }
-            // Ctrl+N: Next query card (global, but not in query editor modal)
+            // Ctrl+N: Next query card (global, but not in query editor)
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if !self.query_editor_open {
+                if self.session.focus != Focus::QueryEditor {
                     self.save_current_view_state();
                     if self.session.card_next() {
                         self.load_selected_entry().await;
                     }
                     return Ok(());
                 }
-                // Fall through to modal handler
+                // Fall through to editor handler
             }
             // Alt+1 through Alt+9: Jump directly to history entry
             KeyCode::Char(c @ '1'..='9') if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -214,8 +213,8 @@ impl App {
             _ => {}
         }
 
-        // Query editor modal has its own key handling
-        if self.query_editor_open {
+        // Query editor has its own key handling
+        if self.session.focus == Focus::QueryEditor {
             return self.handle_query_editor_key(key).await;
         }
 
@@ -297,9 +296,10 @@ impl App {
         }
 
         match (key.code, is_ctrl, is_alt) {
-            // Escape closes the modal
+            // Escape closes the editor and returns to previous focus
             (KeyCode::Esc, _, _) => {
-                self.query_editor_open = false;
+                self.session.focus =
+                    self.session.previous_focus.take().unwrap_or(Focus::HistoryView);
                 self.history.reset_nav();
             }
             // Start history search
@@ -357,8 +357,7 @@ impl App {
                 self.session.focus = Focus::SubPane(SubPane::Results);
                 self.session.mode = Mode::Navigation;
 
-                // Close modal and clear editor
-                self.query_editor_open = false;
+                // Clear editor
                 self.session.new_query = tui_textarea::TextArea::default();
                 self.session
                     .new_query
@@ -411,6 +410,10 @@ impl App {
 
     async fn handle_navigation_key(&mut self, key: KeyEvent) -> Result<()> {
         match &self.session.focus {
+            Focus::QueryEditor => {
+                // QueryEditor has its own key handler - this is a safety net
+                return Ok(());
+            }
             Focus::HistoryView => {
                 // Search mode input handling
                 if self.session.history_search_active {
@@ -604,6 +607,10 @@ impl App {
         }
 
         match &self.session.focus {
+            Focus::QueryEditor => {
+                // QueryEditor has its own key handler - this is a safety net
+                // Edit mode is always active in QueryEditor
+            }
             Focus::HistoryView => {
                 // Edit mode not meaningful in history view (no input here)
                 self.session.mode = Mode::Navigation;

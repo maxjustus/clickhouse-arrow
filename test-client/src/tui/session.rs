@@ -1234,6 +1234,8 @@ pub enum SubPane {
 pub enum Focus {
     /// History view with query cards (query input is at bottom)
     HistoryView,
+    /// Full-page query editor
+    QueryEditor,
     /// Full results view for a selected query
     SubPane(SubPane),
 }
@@ -1262,11 +1264,12 @@ pub struct Session {
     pub running_queries: HashMap<usize, QueryBlock>,
 
     // UI state
-    pub new_query: TextArea<'static>,
-    pub focus:     Focus,
-    pub mode:      Mode,
-    pub toast:     Option<(String, Instant)>,
-    pub app_error: Option<String>, // Non-query errors (archive, clipboard, etc.)
+    pub new_query:      TextArea<'static>,
+    pub focus:          Focus,
+    pub previous_focus: Option<Focus>,
+    pub mode:           Mode,
+    pub toast:          Option<(String, Instant)>,
+    pub app_error:      Option<String>, // Non-query errors (archive, clipboard, etc.)
 }
 
 impl Session {
@@ -1285,6 +1288,7 @@ impl Session {
             running_queries: HashMap::new(),
             new_query,
             focus: Focus::HistoryView,
+            previous_focus: None,
             mode: Mode::Navigation,
             toast: None,
             app_error: None,

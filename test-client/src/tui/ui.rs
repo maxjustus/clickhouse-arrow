@@ -64,14 +64,12 @@ fn render_session(f: &mut Frame, area: Rect, app: &mut App) {
         Focus::HistoryView => {
             render_history_view(f, area, app);
         }
+        Focus::QueryEditor => {
+            render_query_editor_fullscreen(f, area, app);
+        }
         Focus::SubPane(_) => {
             render_results_fullscreen(f, area, app);
         }
-    }
-
-    // Render query editor modal on top of any view
-    if app.query_editor_open {
-        render_query_editor_modal(f, area, app);
     }
 }
 
@@ -80,12 +78,8 @@ fn render_history_view(f: &mut Frame, area: Rect, app: &mut App) {
     render_history_cards(f, area, app);
 }
 
-/// Render the query editor as a centered modal
-fn render_query_editor_modal(f: &mut Frame, area: Rect, app: &mut App) {
-    // Modal takes 80% width, 50% height, centered
-    let modal_area = centered_rect(80, 50, area);
-    f.render_widget(Clear, modal_area);
-
+/// Render the query editor as a full-page view
+fn render_query_editor_fullscreen(f: &mut Frame, area: Rect, app: &mut App) {
     // Title changes based on search mode
     let title = if app.history.is_searching() {
         let pattern = app.history.search_pattern();
@@ -104,7 +98,7 @@ fn render_query_editor_modal(f: &mut Frame, area: Rect, app: &mut App) {
     app.session.new_query.set_block(block);
     app.session.new_query.set_cursor_style(Style::default().bg(Color::White).fg(Color::Black));
 
-    f.render_widget(&app.session.new_query, modal_area);
+    f.render_widget(&app.session.new_query, area);
 }
 
 /// Calculate card height based on SQL content and available width
@@ -1663,34 +1657,30 @@ fn pane_style(focused: bool, mode: Mode) -> Style {
 }
 
 fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
-    let mode_str = if app.query_editor_open {
-        "EDIT"
-    } else {
-        match app.session.mode {
+    let mode_str = match app.session.focus {
+        Focus::QueryEditor => "EDIT",
+        _ => match app.session.mode {
             Mode::Navigation => "NAV",
             Mode::Edit => "EDIT",
-        }
+        },
     };
 
-    let focus_str = if app.query_editor_open {
-        "New Query".to_string()
-    } else {
-        match &app.session.focus {
-            Focus::HistoryView => "History".to_string(),
-            Focus::SubPane(pane) => {
-                let pane_name = match pane {
-                    SubPane::Sql => "SQL",
-                    SubPane::Results => "Results",
-                    SubPane::Stats => "Stats",
-                    SubPane::Logs => "Logs",
-                };
-                let query_str = app
-                    .session
-                    .selected_card
-                    .map(|id| format!("Q{}", id + 1))
-                    .unwrap_or_else(|| "?".to_string());
-                format!("{} > {}", query_str, pane_name)
-            }
+    let focus_str = match &app.session.focus {
+        Focus::QueryEditor => "New Query".to_string(),
+        Focus::HistoryView => "History".to_string(),
+        Focus::SubPane(pane) => {
+            let pane_name = match pane {
+                SubPane::Sql => "SQL",
+                SubPane::Results => "Results",
+                SubPane::Stats => "Stats",
+                SubPane::Logs => "Logs",
+            };
+            let query_str = app
+                .session
+                .selected_card
+                .map(|id| format!("Q{}", id + 1))
+                .unwrap_or_else(|| "?".to_string());
+            format!("{} > {}", query_str, pane_name)
         }
     };
 
@@ -1699,32 +1689,35 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
         if query_count > 0 { format!(" ({} queries)", query_count) } else { String::new() };
 
     // Context-sensitive hints
-    let hints = if app.query_editor_open {
-        "Cmd+Enter: run | Esc: close | Ctrl+P/N: history | Ctrl+R: search | ?: help".to_string()
-    } else {
-        let mut parts = vec!["j/k: navigate", "l: enter", "h: back", "n: new query"];
-
-        // Cancel hint when query is running
-        if app.session.selected_is_running()
-            && app
-                .session
-                .displayed_block()
-                .filter(|block| block.running && !block.cancel_requested)
-                .is_some()
-        {
-            parts.push("C: cancel");
+    let hints = match app.session.focus {
+        Focus::QueryEditor => {
+            "Cmd+Enter: run | Esc: close | Ctrl+P/N: history | Ctrl+R: search | ?: help".to_string()
         }
+        _ => {
+            let mut parts = vec!["j/k: navigate", "l: enter", "h: back", "n: new query"];
 
-        // Copy hint when in Results pane + Edit mode
-        if matches!(
-            (&app.session.focus, &app.session.mode),
-            (Focus::SubPane(SubPane::Results), Mode::Edit)
-        ) {
-            parts.push("y: copy");
+            // Cancel hint when query is running
+            if app.session.selected_is_running()
+                && app
+                    .session
+                    .displayed_block()
+                    .filter(|block| block.running && !block.cancel_requested)
+                    .is_some()
+            {
+                parts.push("C: cancel");
+            }
+
+            // Copy hint when in Results pane + Edit mode
+            if matches!(
+                (&app.session.focus, &app.session.mode),
+                (Focus::SubPane(SubPane::Results), Mode::Edit)
+            ) {
+                parts.push("y: copy");
+            }
+
+            parts.push("?: help");
+            parts.join(" | ")
         }
-
-        parts.push("?: help");
-        parts.join(" | ")
     };
 
     let status = format!(" [{}] {}{} | {}", mode_str, focus_str, query_info, hints);
