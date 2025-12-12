@@ -22,28 +22,82 @@ use crate::tui::widgets::table::ResultsViewMode;
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
-    QueryStarted { query_id: usize },
-    QueryComplete { query_id: usize },
-    QueryError { query_id: usize, error: String },
-    RowReceived { query_id: usize, row: serde_json::Value },
-    ProfileEvent { query_id: usize, event: serde_json::Value },
-    ProfileInfoEvent { query_id: usize, profile_info: serde_json::Value },
-    LogEvent { query_id: usize, log: serde_json::Value },
-    ProgressEvent { query_id: usize, progress: serde_json::Value },
-    QueryCached { query_id: usize, entry: QueryStoreEntry },
+    /// A sub-query within a multi-query cell has started
+    QueryStarted {
+        query_id: usize,
+        sub_idx:  usize,
+    },
+    /// A sub-query has completed successfully
+    QueryComplete {
+        query_id: usize,
+        sub_idx:  usize,
+    },
+    /// A sub-query has failed
+    QueryError {
+        query_id: usize,
+        sub_idx:  usize,
+        error:    String,
+    },
+    /// A result row was received for a sub-query
+    RowReceived {
+        query_id: usize,
+        sub_idx:  usize,
+        row:      serde_json::Value,
+    },
+    /// A profile event for a sub-query
+    ProfileEvent {
+        query_id: usize,
+        sub_idx:  usize,
+        event:    serde_json::Value,
+    },
+    /// Final profile info for a sub-query
+    ProfileInfoEvent {
+        query_id:     usize,
+        sub_idx:      usize,
+        profile_info: serde_json::Value,
+    },
+    /// Log message (shared across all sub-queries in a cell)
+    LogEvent {
+        query_id: usize,
+        log:      serde_json::Value,
+    },
+    /// Progress update for a sub-query
+    ProgressEvent {
+        query_id: usize,
+        sub_idx:  usize,
+        progress: serde_json::Value,
+    },
+    /// The entire query cell has been cached
+    QueryCached {
+        query_id: usize,
+        entry:    QueryStoreEntry,
+    },
     // Connection events
-    ConnectionLost { error: String },
-    Reconnecting { attempt: u32 },
+    ConnectionLost {
+        error: String,
+    },
+    Reconnecting {
+        attempt: u32,
+    },
     Reconnected,
     // Archive loading events
-    ArchiveRowLoaded { cache_id: String, row: serde_json::Value },
+    ArchiveRowLoaded {
+        cache_id: String,
+        sub_idx:  usize,
+        row:      serde_json::Value,
+    },
     ArchiveLoadComplete,
-    ArchiveLoadError { cache_id: String, error: String },
+    ArchiveLoadError {
+        cache_id: String,
+        error:    String,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum QueryCommand {
-    Execute { query_id: usize, sql: String },
+    /// Execute one or more SQL statements sequentially
+    Execute { query_id: usize, statements: Vec<String> },
+    /// Cancel a running query cell
     Cancel { query_id: usize },
 }
 
@@ -89,7 +143,7 @@ impl App {
 
             // Poll for completed zoomed value stats computations
             if let Some(block) = self.session.displayed_block_mut()
-                && let Some(table) = &mut block.results
+                && let Some(table) = block.results_mut()
             {
                 table.poll_stats_completion();
             }
@@ -143,7 +197,7 @@ impl App {
 
             // Shift variant: pre-populate with current query's SQL
             if key.modifiers.contains(KeyModifiers::SHIFT)
-                && let Some(sql) = self.session.displayed_block().map(|b| b.sql.clone())
+                && let Some(sql) = self.session.displayed_block().map(|b| b.sql().to_string())
             {
                 self.set_new_query_text(&sql);
             }
@@ -331,6 +385,9 @@ impl App {
                 let id = format!("{}-{}", timestamp, hash);
                 let sql_preview: String = sql.chars().take(500).collect();
 
+                // Split SQL into statements for multi-query support
+                let statements = crate::tui::sql_split::split_statements(&sql);
+
                 let entry = QueryStoreEntry {
                     id: id.clone(),
                     hash,
@@ -342,13 +399,18 @@ impl App {
                     rows_read: None,
                     bytes_read: None,
                     peak_memory: None,
+                    sub_query_count: statements.len(),
                 };
 
                 // Insert entry at end of history (newest last)
                 let hist_idx = self.session.add_history_entry(entry);
 
-                // Create QueryBlock for execution
-                let mut block = QueryBlock::new(sql.clone());
+                // Create QueryBlock for execution (multi-query if needed)
+                let mut block = if statements.len() > 1 {
+                    QueryBlock::new_multi(statements.clone())
+                } else {
+                    QueryBlock::new(sql.clone())
+                };
                 block.running = true;
                 self.session.running_queries.insert(hist_idx, block);
 
@@ -368,7 +430,7 @@ impl App {
                 self.next_query_id += 1;
                 self.query_map.insert(query_id, hist_idx);
 
-                let cmd = QueryCommand::Execute { query_id, sql };
+                let cmd = QueryCommand::Execute { query_id, statements };
                 let _ = self.cmd_tx.send(cmd).await;
             }
             // Navigate to previous history entry
@@ -511,6 +573,27 @@ impl App {
                     KeyCode::Char('c') | KeyCode::Char('C') => {
                         self.cancel_selected_query().await;
                     }
+                    // Multi-query navigation: [ and ] for prev/next, 1-9 for direct jump
+                    KeyCode::Char('[') => {
+                        if let Some(block) = self.session.displayed_block_mut() {
+                            block.prev_query();
+                        }
+                    }
+                    KeyCode::Char(']') => {
+                        if let Some(block) = self.session.displayed_block_mut() {
+                            block.next_query();
+                        }
+                    }
+                    KeyCode::Char(c @ '1'..='9') => {
+                        if let Some(block) = self.session.displayed_block_mut() {
+                            let n = c.to_digit(10).unwrap_or(1) as usize;
+                            block.select_query(n.saturating_sub(1));
+                        }
+                    }
+                    KeyCode::Char('f') | KeyCode::Char('F') => {
+                        // Toggle fullscreen for current pane
+                        self.session.fullscreen = !self.session.fullscreen;
+                    }
                     _ => {}
                 }
             }
@@ -535,12 +618,11 @@ impl App {
                         if let Some(block) = self.session.displayed_block_mut() {
                             let in_detail = match pane {
                                 SubPane::Results => block
-                                    .results
-                                    .as_ref()
+                                    .results()
                                     .map(|t| !matches!(t.view_mode, ResultsViewMode::Table))
                                     .unwrap_or(false),
                                 SubPane::Stats => {
-                                    !matches!(block.stats.view_mode, MetricsViewMode::Table)
+                                    !matches!(block.stats().view_mode, MetricsViewMode::Table)
                                 }
                                 SubPane::Logs => {
                                     !matches!(block.logs_data.view_mode, LogsViewMode::Sources)
@@ -550,11 +632,11 @@ impl App {
                             if in_detail {
                                 match pane {
                                     SubPane::Results => {
-                                        if let Some(t) = &mut block.results {
+                                        if let Some(t) = block.results_mut() {
                                             t.prev_detail_row();
                                         }
                                     }
-                                    SubPane::Stats => block.stats.prev_detail_row(),
+                                    SubPane::Stats => block.stats_mut().prev_detail_row(),
                                     SubPane::Logs => block.logs_data.prev_detail_entry(),
                                     _ => {}
                                 }
@@ -570,12 +652,11 @@ impl App {
                         if let Some(block) = self.session.displayed_block_mut() {
                             let in_detail = match pane {
                                 SubPane::Results => block
-                                    .results
-                                    .as_ref()
+                                    .results()
                                     .map(|t| !matches!(t.view_mode, ResultsViewMode::Table))
                                     .unwrap_or(false),
                                 SubPane::Stats => {
-                                    !matches!(block.stats.view_mode, MetricsViewMode::Table)
+                                    !matches!(block.stats().view_mode, MetricsViewMode::Table)
                                 }
                                 SubPane::Logs => {
                                     !matches!(block.logs_data.view_mode, LogsViewMode::Sources)
@@ -585,11 +666,11 @@ impl App {
                             if in_detail {
                                 match pane {
                                     SubPane::Results => {
-                                        if let Some(t) = &mut block.results {
+                                        if let Some(t) = block.results_mut() {
                                             t.next_detail_row();
                                         }
                                     }
-                                    SubPane::Stats => block.stats.next_detail_row(),
+                                    SubPane::Stats => block.stats_mut().next_detail_row(),
                                     SubPane::Logs => block.logs_data.next_detail_entry(),
                                     _ => {}
                                 }
@@ -651,7 +732,7 @@ impl App {
         // Handle copy to clipboard (needs special handling due to borrow checker)
         if pane == SubPane::Results && key.code == KeyCode::Char('y') {
             let content = if let Some(block) = self.session.displayed_block()
-                && let Some(table) = &block.results
+                && let Some(table) = block.results()
             {
                 table.get_clipboard_content()
             } else {
@@ -689,16 +770,16 @@ impl App {
         match pane {
             SubPane::Sql => match key.code {
                 KeyCode::Down | KeyCode::Char('j') => {
-                    block.sql_scroll += 1;
+                    block.set_sql_scroll(block.sql_scroll() + 1);
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    block.sql_scroll = block.sql_scroll.saturating_sub(1);
+                    block.set_sql_scroll(block.sql_scroll().saturating_sub(1));
                 }
                 KeyCode::PageDown => {
-                    block.sql_scroll += 10;
+                    block.set_sql_scroll(block.sql_scroll() + 10);
                 }
                 KeyCode::PageUp => {
-                    block.sql_scroll = block.sql_scroll.saturating_sub(10);
+                    block.set_sql_scroll(block.sql_scroll().saturating_sub(10));
                 }
                 KeyCode::Left | KeyCode::Char('h') => {
                     self.session.mode = Mode::Navigation;
@@ -707,7 +788,7 @@ impl App {
             },
             SubPane::Results => {
                 // Handle error scrolling if error is displayed instead of results
-                if block.error.is_some() {
+                if block.error().is_some() {
                     match key.code {
                         KeyCode::Down | KeyCode::Char('j') => block.error_scroll += 1,
                         KeyCode::Up | KeyCode::Char('k') => {
@@ -725,7 +806,7 @@ impl App {
                     }
                     return Ok(());
                 }
-                if let Some(ref mut table) = block.results {
+                if let Some(table) = block.results_mut() {
                     if table.header_focused {
                         // Header navigation mode
                         match key.code {
@@ -807,24 +888,24 @@ impl App {
             SubPane::Stats => {
                 // Use new metrics navigation
                 match key.code {
-                    KeyCode::Down | KeyCode::Char('j') => block.stats.nav_down(),
-                    KeyCode::Up | KeyCode::Char('k') => block.stats.nav_up(),
-                    KeyCode::PageDown => block.stats.page_down(),
-                    KeyCode::PageUp => block.stats.page_up(),
+                    KeyCode::Down | KeyCode::Char('j') => block.stats_mut().nav_down(),
+                    KeyCode::Up | KeyCode::Char('k') => block.stats_mut().nav_up(),
+                    KeyCode::PageDown => block.stats_mut().page_down(),
+                    KeyCode::PageUp => block.stats_mut().page_up(),
                     KeyCode::Right | KeyCode::Char('l') => {
-                        block.stats.expand();
+                        block.stats_mut().expand();
                     }
                     KeyCode::Left | KeyCode::Char('h') => {
-                        if !block.stats.collapse() {
+                        if !block.stats_mut().collapse() {
                             // At table level, exit edit mode
                             self.session.mode = Mode::Navigation;
                         }
                     }
                     // Row navigation ([ / ] or Shift+K / Shift+J)
-                    KeyCode::Char('[') | KeyCode::Char('K') => block.stats.prev_detail_row(),
-                    KeyCode::Char(']') | KeyCode::Char('J') => block.stats.next_detail_row(),
-                    KeyCode::Char('{') => block.stats.prev_detail_row_jump(ROW_JUMP_COUNT),
-                    KeyCode::Char('}') => block.stats.next_detail_row_jump(ROW_JUMP_COUNT),
+                    KeyCode::Char('[') | KeyCode::Char('K') => block.stats_mut().prev_detail_row(),
+                    KeyCode::Char(']') | KeyCode::Char('J') => block.stats_mut().next_detail_row(),
+                    KeyCode::Char('{') => block.stats_mut().prev_detail_row_jump(ROW_JUMP_COUNT),
+                    KeyCode::Char('}') => block.stats_mut().next_detail_row_jump(ROW_JUMP_COUNT),
                     _ => {}
                 }
             }
@@ -857,54 +938,96 @@ impl App {
         self.query_map.get(&query_id).copied()
     }
 
+    /// Clean up a finished query (completed or failed) from running_queries and query_map
+    fn cleanup_finished_query(&mut self, query_id: usize, hist_idx: usize) {
+        // Remove from running_queries and move to current_block if user is viewing this query
+        if let Some(block) = self.session.running_queries.remove(&hist_idx) {
+            if self.session.selected_card == Some(hist_idx) {
+                self.session.current_block = Some(block);
+            }
+            // If not viewing, block is already archived - let it drop
+        }
+
+        // Clean up query_map
+        self.query_map.retain(|&qid, _| qid != query_id);
+    }
+
     pub fn handle_event(&mut self, event: AppEvent) {
         match event {
-            AppEvent::QueryStarted { query_id } => {
+            AppEvent::QueryStarted { query_id, sub_idx } => {
                 if let Some(hist_idx) = self.lookup_query(query_id) {
                     if let Some(block) = self.session.get_running_mut(hist_idx) {
                         block.running = true;
+                        // Update sub-query status
+                        if let Some(sq) = block.queries.get_mut(sub_idx) {
+                            sq.status = crate::tui::session::QueryStatus::Running;
+                        }
                     }
                 }
             }
-            AppEvent::QueryComplete { query_id } => {
+            AppEvent::QueryComplete { query_id, sub_idx } => {
                 if let Some(hist_idx) = self.lookup_query(query_id) {
                     if let Some(block) = self.session.get_running_mut(hist_idx) {
-                        block.running = false;
-                        block.cancel_requested = false;
+                        // Update sub-query status
+                        if let Some(sq) = block.queries.get_mut(sub_idx) {
+                            sq.status = crate::tui::session::QueryStatus::Completed;
+                        }
+                        // Check if all sub-queries are done
+                        let all_done = block.queries.iter().all(|sq| {
+                            matches!(
+                                sq.status,
+                                crate::tui::session::QueryStatus::Completed
+                                    | crate::tui::session::QueryStatus::Failed
+                            )
+                        });
+                        if all_done {
+                            block.running = false;
+                            block.cancel_requested = false;
+                        }
+                    }
+                    // Clean up after all sub-queries are done
+                    if let Some(block) = self.session.running_queries.get(&hist_idx) {
+                        if !block.running {
+                            self.cleanup_finished_query(query_id, hist_idx);
+                        }
                     }
                 }
             }
-            AppEvent::QueryError { query_id, error } => {
+            AppEvent::QueryError { query_id, sub_idx, error } => {
                 if let Some(hist_idx) = self.lookup_query(query_id) {
                     if let Some(block) = self.session.get_running_mut(hist_idx) {
-                        block.error = Some(error.clone());
+                        block.set_error(sub_idx, Some(error.clone()));
                         block.running = false;
                         block.cancel_requested = false;
                     }
+
                     // Update history entry with error
                     if let Some(entry) = self.session.history.get_mut(hist_idx) {
                         entry.error = Some(error);
                     }
+
+                    // Clean up running_queries and query_map
+                    self.cleanup_finished_query(query_id, hist_idx);
                 }
             }
-            AppEvent::RowReceived { query_id, row } => {
+            AppEvent::RowReceived { query_id, sub_idx, row } => {
                 if let Some(hist_idx) = self.lookup_query(query_id) {
                     if let Some(block) = self.session.get_running_mut(hist_idx) {
-                        block.add_result_row(row);
+                        block.add_result_row(row, sub_idx);
                     }
                 }
             }
-            AppEvent::ProfileEvent { query_id, event } => {
+            AppEvent::ProfileEvent { query_id, sub_idx, event } => {
                 if let Some(hist_idx) = self.lookup_query(query_id) {
                     if let Some(block) = self.session.get_running_mut(hist_idx) {
-                        block.add_profile_event(event);
+                        block.add_profile_event(event, sub_idx);
                     }
                 }
             }
-            AppEvent::ProfileInfoEvent { query_id, profile_info } => {
+            AppEvent::ProfileInfoEvent { query_id, sub_idx, profile_info } => {
                 if let Some(hist_idx) = self.lookup_query(query_id) {
                     if let Some(block) = self.session.get_running_mut(hist_idx) {
-                        block.stats.set_final_stats(profile_info);
+                        block.set_final_stats(profile_info, sub_idx);
                     }
                 }
             }
@@ -915,10 +1038,10 @@ impl App {
                     }
                 }
             }
-            AppEvent::ProgressEvent { query_id, progress } => {
+            AppEvent::ProgressEvent { query_id, sub_idx, progress } => {
                 if let Some(hist_idx) = self.lookup_query(query_id) {
                     if let Some(block) = self.session.get_running_mut(hist_idx) {
-                        block.add_progress(progress);
+                        block.add_progress(progress, sub_idx);
                     }
                 }
             }
@@ -947,11 +1070,11 @@ impl App {
             AppEvent::Reconnected => {
                 self.session.show_toast("Reconnected");
             }
-            AppEvent::ArchiveRowLoaded { cache_id, row } => {
+            AppEvent::ArchiveRowLoaded { cache_id, sub_idx, row } => {
                 // Add row to current block if it matches the cache_id
                 if let Some(block) = self.session.current_block.as_mut() {
                     if block.cache_id.as_ref() == Some(&cache_id) {
-                        block.add_result_row(row);
+                        block.add_result_row(row, sub_idx);
                     }
                 }
             }
@@ -987,10 +1110,14 @@ impl App {
             return;
         };
 
-        // If it's a running query, data is already in running_queries
-        if self.session.running_queries.contains_key(&hist_idx) {
-            self.session.loading_entry_id = None;
-            return;
+        // If it's ACTIVELY running, data is already in running_queries
+        if let Some(block) = self.session.running_queries.get(&hist_idx) {
+            if block.running {
+                self.session.loading_entry_id = None;
+                return;
+            }
+            // Query exists in map but not running - this shouldn't happen after cleanup fix
+            // but handle gracefully by falling through to archive load
         }
 
         // Get entry to load
@@ -1011,7 +1138,35 @@ impl App {
         let base_path = QueryStore::find_chc_dir();
         let archive_path = base_path.join(format!("{}.chc", entry.id));
 
-        let archive = match QueryArchiveReader::open(&archive_path) {
+        // Detect multi-query format by checking sub_query_count
+        let sub_query_count = if entry.sub_query_count > 1 {
+            entry.sub_query_count
+        } else {
+            // Legacy entries: detect from archive structure
+            match QueryArchiveReader::sub_query_count(&archive_path) {
+                Ok(count) => count,
+                Err(e) => {
+                    self.session.app_error = Some(format!("Failed to open archive: {}", e));
+                    self.session.loading_entry_id = None;
+                    return;
+                }
+            }
+        };
+
+        if sub_query_count > 1 {
+            self.load_archive_multi(entry, &archive_path, sub_query_count).await;
+        } else {
+            self.load_archive_single(entry, &archive_path).await;
+        }
+    }
+
+    /// Load a single-query archive (backward compatible format)
+    async fn load_archive_single(
+        &mut self,
+        entry: &QueryStoreEntry,
+        archive_path: &std::path::Path,
+    ) {
+        let archive = match QueryArchiveReader::open(&archive_path.to_path_buf()) {
             Ok(a) => a,
             Err(e) => {
                 self.session.app_error = Some(format!("Failed to open archive: {}", e));
@@ -1024,14 +1179,14 @@ impl App {
         let mut query_block = QueryBlock::new(archive.sql.clone());
         query_block.running = false;
         query_block.cache_id = Some(entry.id.clone());
-        query_block.error = entry.error.clone();
+        query_block.set_error(0, entry.error.clone());
 
         // Parse profile events (usually small, do synchronously)
         if !archive.profile.is_empty() {
             let content = String::from_utf8_lossy(&archive.profile);
             for line in content.lines() {
                 if let Ok(json) = serde_json::from_str(line) {
-                    query_block.add_profile_event(json);
+                    query_block.add_profile_event(json, 0);
                 }
             }
         }
@@ -1051,7 +1206,7 @@ impl App {
             let content = String::from_utf8_lossy(&archive.profile_info);
             if let Some(line) = content.lines().next() {
                 if let Ok(json) = serde_json::from_str(line) {
-                    query_block.stats.set_final_stats(json);
+                    query_block.set_final_stats(json, 0);
                 }
             }
         }
@@ -1088,6 +1243,7 @@ impl App {
                                 let _ = event_tx
                                     .send(AppEvent::ArchiveRowLoaded {
                                         cache_id: cache_id.clone(),
+                                        sub_idx:  0,
                                         row:      row_to_json(row),
                                     })
                                     .await;
@@ -1109,6 +1265,132 @@ impl App {
                     }
                 }
             });
+        }
+    }
+
+    /// Load a multi-query archive (numbered subdirectories)
+    async fn load_archive_multi(
+        &mut self,
+        entry: &QueryStoreEntry,
+        archive_path: &std::path::Path,
+        sub_query_count: usize,
+    ) {
+        // Collect SQL statements from each sub-archive
+        let mut statements = Vec::with_capacity(sub_query_count);
+        let mut sub_archives = Vec::with_capacity(sub_query_count);
+
+        for sub_idx in 0..sub_query_count {
+            match QueryArchiveReader::open_multi(&archive_path.to_path_buf(), sub_idx) {
+                Ok(archive) => {
+                    statements.push(archive.sql.clone());
+                    sub_archives.push(archive);
+                }
+                Err(e) => {
+                    self.session.app_error =
+                        Some(format!("Failed to open sub-archive {}: {}", sub_idx, e));
+                    self.session.loading_entry_id = None;
+                    return;
+                }
+            }
+        }
+
+        // Create multi-query block
+        let mut query_block = QueryBlock::new_multi(statements);
+        query_block.running = false;
+        query_block.cache_id = Some(entry.id.clone());
+        query_block.set_error(0, entry.error.clone());
+
+        // Parse profile events and stats for each sub-query
+        for (sub_idx, archive) in sub_archives.iter().enumerate() {
+            // Parse profile events
+            if !archive.profile.is_empty() {
+                let content = String::from_utf8_lossy(&archive.profile);
+                for line in content.lines() {
+                    if let Ok(json) = serde_json::from_str(line) {
+                        query_block.add_profile_event(json, sub_idx);
+                    }
+                }
+            }
+
+            // Parse profile_info (final stats)
+            if !archive.profile_info.is_empty() {
+                let content = String::from_utf8_lossy(&archive.profile_info);
+                if let Some(line) = content.lines().next() {
+                    if let Ok(json) = serde_json::from_str(line) {
+                        query_block.set_final_stats(json, sub_idx);
+                    }
+                }
+            }
+        }
+
+        // Parse shared logs from first archive (logs are at root level, shared)
+        if let Some(first_archive) = sub_archives.first() {
+            if !first_archive.logs.is_empty() {
+                let content = String::from_utf8_lossy(&first_archive.logs);
+                for line in content.lines() {
+                    if let Ok(json) = serde_json::from_str(line) {
+                        query_block.add_log(json);
+                    }
+                }
+            }
+        }
+
+        // Set block immediately so UI shows query structure
+        self.session.current_block = Some(query_block);
+        self.session.loading_entry_id = None;
+
+        // Restore cached view state if available
+        if let Some(state) = self.view_state_cache.get(&entry.id) {
+            if let Some(block) = self.session.current_block.as_mut() {
+                block.apply_view_state(state);
+            }
+        }
+
+        // Spawn background tasks to stream result rows for each sub-query
+        for (sub_idx, archive) in sub_archives.into_iter().enumerate() {
+            if !archive.results.is_empty() {
+                let cache_id = entry.id.clone();
+                let results_data = archive.results;
+                let event_tx = self.event_tx.clone();
+
+                tokio::spawn(async move {
+                    let cursor = Cursor::new(results_data);
+                    let mut file_reader = FileStreamReader::<NativeFormat, _>::new(
+                        cursor,
+                        CompressionMethod::LZ4,
+                        Default::default(),
+                    );
+
+                    loop {
+                        match file_reader.next().await {
+                            Ok(Some(mut block)) => {
+                                for row in block.take_iter_rows() {
+                                    let _ = event_tx
+                                        .send(AppEvent::ArchiveRowLoaded {
+                                            cache_id: cache_id.clone(),
+                                            sub_idx,
+                                            row: row_to_json(row),
+                                        })
+                                        .await;
+                                }
+                            }
+                            Ok(None) => {
+                                let _ = event_tx.send(AppEvent::ArchiveLoadComplete).await;
+                                break;
+                            }
+                            Err(e) => {
+                                let _ = event_tx
+                                    .send(AppEvent::ArchiveLoadError {
+                                        cache_id: cache_id.clone(),
+                                        error:    e.to_string(),
+                                    })
+                                    .await;
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
         }
     }
 }

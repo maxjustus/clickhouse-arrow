@@ -47,6 +47,9 @@ pub struct ViewState {
 
     // SQL
     pub sql_scroll: u16,
+
+    // Fullscreen state
+    pub fullscreen: bool,
 }
 
 /// Aggregated metric data (grouped by name)
@@ -711,6 +714,16 @@ impl LogsData {
     }
 }
 
+/// Status of a sub-query within a multi-query cell
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueryStatus {
+    #[default]
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
 /// Combined stats data (progress + profile metrics)
 #[derive(Debug)]
 pub struct StatsData {
@@ -1050,38 +1063,26 @@ impl StatsData {
     }
 }
 
-/// A single statement and all its associated data
+/// A single statement within a multi-query cell
 #[derive(Debug)]
-pub struct QueryBlock {
-    pub sql:                String,
-    pub sql_scroll:         u16,
-    pub results:            Option<SortableTable>,
-    pub stats:              StatsData,
-    pub logs:               Vec<LogEntry>,
-    pub logs_data:          LogsData,
-    pub error:              Option<String>,
-    pub error_scroll:       u16,
-    pub running:            bool,
-    pub cancel_requested:   bool,
-    pub cache_id:           Option<String>, // ID in QueryStore if cached
-    pub pending_view_state: Option<ViewState>, // Applied when results table is created
+pub struct SubQueryBlock {
+    pub sql:        String,
+    pub sql_scroll: u16,
+    pub results:    Option<SortableTable>,
+    pub stats:      StatsData,
+    pub error:      Option<String>,
+    pub status:     QueryStatus,
 }
 
-impl QueryBlock {
+impl SubQueryBlock {
     pub fn new(sql: String) -> Self {
         Self {
             sql,
             sql_scroll: 0,
             results: None,
             stats: StatsData::default(),
-            logs: Vec::new(),
-            logs_data: LogsData::default(),
             error: None,
-            error_scroll: 0,
-            running: false, // Not running until backend starts it
-            cancel_requested: false,
-            cache_id: None,
-            pending_view_state: None,
+            status: QueryStatus::Pending,
         }
     }
 
@@ -1101,7 +1102,11 @@ impl QueryBlock {
         self.stats.add_profile_event(event);
     }
 
-    pub fn add_result_row(&mut self, row: serde_json::Value) {
+    pub fn add_result_row(
+        &mut self,
+        row: serde_json::Value,
+        pending_view_state: &mut Option<ViewState>,
+    ) {
         if let serde_json::Value::Object(map) = row {
             let table_just_created = self.results.is_none();
 
@@ -1110,7 +1115,7 @@ impl QueryBlock {
                 self.results = Some(SortableTable::new(columns));
 
                 // Apply any pending view state now that table exists
-                if let Some(state) = self.pending_view_state.take() {
+                if let Some(state) = pending_view_state.take() {
                     if let Some(ref mut table) = self.results {
                         table.sort_column = state.results_sort_column;
                         table.sort_order = state.results_sort_order;
@@ -1118,13 +1123,11 @@ impl QueryBlock {
                         table.header_focused = state.results_header_focused;
                         table.focused_col = state.results_focused_col;
                         table.col_offset = state.results_col_offset;
-                        // Note: selected_row and scroll_offset are applied after all rows loaded
                     }
                 }
             }
 
             if let Some(ref mut table) = self.results {
-                // Store JSON values directly to enable nested navigation
                 let row_values: Vec<serde_json::Value> = table
                     .columns
                     .iter()
@@ -1132,6 +1135,157 @@ impl QueryBlock {
                     .collect();
                 table.add_row(row_values);
             }
+        }
+    }
+
+    pub fn result_count(&self) -> usize { self.results.as_ref().map(|t| t.rows.len()).unwrap_or(0) }
+}
+
+/// A multi-query cell containing one or more statements
+#[derive(Debug)]
+pub struct QueryBlock {
+    pub queries:            Vec<SubQueryBlock>,
+    pub active_query:       usize,
+    pub logs:               Vec<LogEntry>,
+    pub logs_data:          LogsData,
+    pub error_scroll:       u16,
+    pub running:            bool,
+    pub cancel_requested:   bool,
+    pub cache_id:           Option<String>,
+    pub pending_view_state: Option<ViewState>,
+}
+
+impl QueryBlock {
+    /// Create a single-query block (backward compatible)
+    pub fn new(sql: String) -> Self {
+        Self {
+            queries:            vec![SubQueryBlock::new(sql)],
+            active_query:       0,
+            logs:               Vec::new(),
+            logs_data:          LogsData::default(),
+            error_scroll:       0,
+            running:            false,
+            cancel_requested:   false,
+            cache_id:           None,
+            pending_view_state: None,
+        }
+    }
+
+    /// Create a multi-query block from multiple SQL statements
+    pub fn new_multi(sqls: Vec<String>) -> Self {
+        let queries = sqls.into_iter().map(SubQueryBlock::new).collect();
+        Self {
+            queries,
+            active_query: 0,
+            logs: Vec::new(),
+            logs_data: LogsData::default(),
+            error_scroll: 0,
+            running: false,
+            cancel_requested: false,
+            cache_id: None,
+            pending_view_state: None,
+        }
+    }
+
+    /// Get the active sub-query
+    pub fn active(&self) -> &SubQueryBlock { &self.queries[self.active_query] }
+
+    /// Get mutable reference to active sub-query
+    pub fn active_mut(&mut self) -> &mut SubQueryBlock { &mut self.queries[self.active_query] }
+
+    /// Check if this is a multi-query cell
+    pub fn is_multi(&self) -> bool { self.queries.len() > 1 }
+
+    /// Navigate to next query
+    pub fn next_query(&mut self) -> bool {
+        if self.active_query + 1 < self.queries.len() {
+            self.active_query += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Navigate to previous query
+    pub fn prev_query(&mut self) -> bool {
+        if self.active_query > 0 {
+            self.active_query -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Select query by index (1-based for keybinding convenience)
+    pub fn select_query(&mut self, n: usize) -> bool {
+        let idx = n.saturating_sub(1);
+        if idx < self.queries.len() {
+            self.active_query = idx;
+            true
+        } else {
+            false
+        }
+    }
+
+    // Delegating methods for backward compatibility
+
+    /// Get SQL of active query
+    pub fn sql(&self) -> &str { &self.active().sql }
+
+    /// Get results of active query
+    pub fn results(&self) -> Option<&SortableTable> { self.active().results.as_ref() }
+
+    /// Get mutable results of active query
+    pub fn results_mut(&mut self) -> Option<&mut SortableTable> {
+        self.active_mut().results.as_mut()
+    }
+
+    /// Get stats of active query
+    pub fn stats(&self) -> &StatsData { &self.active().stats }
+
+    /// Get mutable stats of active query
+    pub fn stats_mut(&mut self) -> &mut StatsData { &mut self.active_mut().stats }
+
+    /// Get error of active query
+    pub fn error(&self) -> Option<&str> { self.active().error.as_deref() }
+
+    /// Set error of a specific sub-query
+    pub fn set_error(&mut self, sub_idx: usize, error: Option<String>) {
+        if let Some(sq) = self.queries.get_mut(sub_idx) {
+            sq.error = error;
+            if sq.error.is_some() {
+                sq.status = QueryStatus::Failed;
+            }
+        }
+    }
+
+    /// Get sql_scroll of active query
+    pub fn sql_scroll(&self) -> u16 { self.active().sql_scroll }
+
+    /// Set sql_scroll of active query
+    pub fn set_sql_scroll(&mut self, scroll: u16) { self.active_mut().sql_scroll = scroll; }
+
+    pub fn add_progress(&mut self, progress: serde_json::Value, sub_idx: usize) {
+        if let Some(sq) = self.queries.get_mut(sub_idx) {
+            sq.add_progress(progress);
+        }
+    }
+
+    pub fn add_profile_event(&mut self, event: serde_json::Value, sub_idx: usize) {
+        if let Some(sq) = self.queries.get_mut(sub_idx) {
+            sq.add_profile_event(event);
+        }
+    }
+
+    pub fn set_final_stats(&mut self, profile_info: serde_json::Value, sub_idx: usize) {
+        if let Some(sq) = self.queries.get_mut(sub_idx) {
+            sq.stats.set_final_stats(profile_info);
+        }
+    }
+
+    pub fn add_result_row(&mut self, row: serde_json::Value, sub_idx: usize) {
+        if let Some(sq) = self.queries.get_mut(sub_idx) {
+            sq.add_result_row(row, &mut self.pending_view_state);
         }
     }
 
@@ -1149,10 +1303,12 @@ impl QueryBlock {
         }
     }
 
-    pub fn result_count(&self) -> usize { self.results.as_ref().map(|t| t.rows.len()).unwrap_or(0) }
+    /// Total result count across all queries
+    pub fn result_count(&self) -> usize { self.queries.iter().map(|q| q.result_count()).sum() }
 
     /// Extract current UI state for caching
     pub fn extract_view_state(&self) -> ViewState {
+        let sq = self.active();
         let (
             results_selected_row,
             results_scroll_offset,
@@ -1162,7 +1318,7 @@ impl QueryBlock {
             results_focused_col,
             results_sort_column,
             results_sort_order,
-        ) = if let Some(ref table) = self.results {
+        ) = if let Some(ref table) = sq.results {
             (
                 table.selected_row,
                 table.scroll_offset,
@@ -1186,19 +1342,32 @@ impl QueryBlock {
             results_focused_col,
             results_sort_column,
             results_sort_order,
-            stats_selected_row: self.stats.selected_row,
-            stats_scroll_offset: self.stats.scroll_offset,
-            stats_view_mode: self.stats.view_mode,
+            stats_selected_row: sq.stats.selected_row,
+            stats_scroll_offset: sq.stats.scroll_offset,
+            stats_view_mode: sq.stats.view_mode,
             logs_selected_row: self.logs_data.selected_row,
             logs_scroll_offset: self.logs_data.scroll_offset,
             logs_view_mode: self.logs_data.view_mode.clone(),
-            sql_scroll: self.sql_scroll,
+            sql_scroll: sq.sql_scroll,
+            fullscreen: false,
         }
     }
 
     /// Apply cached UI state
     pub fn apply_view_state(&mut self, state: &ViewState) {
-        if let Some(ref mut table) = self.results {
+        // Apply to shared logs state
+        self.logs_data.selected_row = state.logs_selected_row;
+        self.logs_data.scroll_offset = state.logs_scroll_offset;
+        self.logs_data.view_mode = state.logs_view_mode.clone();
+
+        // Apply to active sub-query
+        let sq = self.active_mut();
+        sq.sql_scroll = state.sql_scroll;
+        sq.stats.selected_row = state.stats_selected_row;
+        sq.stats.scroll_offset = state.stats_scroll_offset;
+        sq.stats.view_mode = state.stats_view_mode;
+
+        if let Some(ref mut table) = sq.results {
             table.selected_row = state.results_selected_row.min(table.rows.len().saturating_sub(1));
             table.scroll_offset = state.results_scroll_offset;
             table.col_offset = state.results_col_offset;
@@ -1211,13 +1380,6 @@ impl QueryBlock {
             // Results table doesn't exist yet - store for later application
             self.pending_view_state = Some(state.clone());
         }
-        self.stats.selected_row = state.stats_selected_row;
-        self.stats.scroll_offset = state.stats_scroll_offset;
-        self.stats.view_mode = state.stats_view_mode;
-        self.logs_data.selected_row = state.logs_selected_row;
-        self.logs_data.scroll_offset = state.logs_scroll_offset;
-        self.logs_data.view_mode = state.logs_view_mode.clone();
-        self.sql_scroll = state.sql_scroll;
     }
 }
 /// Which sub-pane type
@@ -1268,6 +1430,7 @@ pub struct Session {
     pub focus:          Focus,
     pub previous_focus: Option<Focus>,
     pub mode:           Mode,
+    pub fullscreen:     bool, // True = current pane is fullscreened
     pub toast:          Option<(String, Instant)>,
     pub app_error:      Option<String>, // Non-query errors (archive, clipboard, etc.)
 }
@@ -1290,6 +1453,7 @@ impl Session {
             focus: Focus::HistoryView,
             previous_focus: None,
             mode: Mode::Navigation,
+            fullscreen: false,
             toast: None,
             app_error: None,
         }

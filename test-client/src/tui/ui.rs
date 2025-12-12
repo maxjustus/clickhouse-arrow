@@ -9,7 +9,9 @@ use ratatui::widgets::{
 use ratatui::{Frame, symbols};
 
 use crate::tui::app::App;
-use crate::tui::session::{Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, SubPane};
+use crate::tui::session::{
+    Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, QueryStatus, SubPane,
+};
 use crate::tui::widgets::table::{
     NumericStats, PathStats, PathStatsState, PathValueType, ResultsViewMode, SortableTable,
     UniqueSample,
@@ -57,6 +59,36 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     // Render column stats modal overlay (on top of content, below toasts)
     render_column_stats_modal_overlay(f, chunks[0], app);
+
+    // Render app-level error modal (on top of everything, below toasts)
+    if let Some(ref error) = app.session.app_error {
+        const MAX_ERROR_WIDTH: u16 = 100;
+        const MAX_ERROR_HEIGHT: u16 = 20;
+
+        let error_width = MAX_ERROR_WIDTH.min(f.area().width.saturating_sub(4));
+        let error_height = MAX_ERROR_HEIGHT.min(f.area().height.saturating_sub(4));
+
+        // Center the error modal
+        let error_area = centered_rect(
+            (error_width * 100 / f.area().width).min(95), // percentage
+            (error_height * 100 / f.area().height).min(90),
+            f.area(),
+        );
+
+        let error_block = Block::default()
+            .borders(Borders::ALL)
+            .title("Error (Press any key to dismiss)")
+            .border_style(Style::default().fg(Color::Red));
+
+        let para = Paragraph::new(error.as_str())
+            .block(error_block)
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: false })
+            .scroll((0, 0));
+
+        f.render_widget(Clear, error_area);
+        f.render_widget(para, error_area);
+    }
 }
 
 fn render_session(f: &mut Frame, area: Rect, app: &mut App) {
@@ -316,7 +348,7 @@ fn render_query_card(
         Span::styled(error_preview, Style::default().fg(Color::Red))
     } else if let Some(block) = running_block {
         // Running query: show live stats
-        let stats = &block.stats;
+        let stats = block.stats();
         let rows = stats.final_rows_read.unwrap_or(stats.max_rows_read);
         let bytes = stats.final_bytes_read.unwrap_or(stats.max_bytes_read);
         let mem = stats.peak_ram_current;
@@ -352,6 +384,61 @@ fn render_query_card(
     f.render_widget(footer_para, footer_area);
 }
 
+/// Render the left sidebar showing query list for multi-query cells
+fn render_query_sidebar(f: &mut Frame, area: Rect, block: &QueryBlock) {
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .title("Queries")
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    let active = block.active_query;
+
+    // Build rows for each query
+    let rows: Vec<Row> = block
+        .queries
+        .iter()
+        .enumerate()
+        .map(|(idx, sub)| {
+            // Status indicator
+            let status_indicator = match sub.status {
+                QueryStatus::Pending => Span::styled(" ", Style::default().fg(Color::DarkGray)),
+                QueryStatus::Running => Span::styled(">", Style::default().fg(Color::Blue)),
+                QueryStatus::Completed => Span::styled("*", Style::default().fg(Color::Green)),
+                QueryStatus::Failed => Span::styled("!", Style::default().fg(Color::Red)),
+            };
+
+            // Truncated SQL preview (first line, max 15 chars)
+            let sql_preview: String =
+                sub.sql.lines().next().unwrap_or("").chars().take(13).collect();
+            let sql_preview =
+                if sub.sql.len() > 13 { format!("{}..", sql_preview) } else { sql_preview };
+
+            // Row style based on selection
+            let row_style = if idx == active {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default()
+            };
+
+            Row::new(vec![
+                format!("{}", idx + 1),
+                status_indicator.content.to_string(),
+                sql_preview,
+            ])
+            .style(row_style)
+        })
+        .collect();
+
+    // Widths: index (2), status (1), sql preview (rest)
+    let widths = [Constraint::Length(2), Constraint::Length(1), Constraint::Min(0)];
+
+    let table = Table::new(rows, widths);
+    f.render_widget(table, inner);
+}
+
 /// Render full-screen results view (when viewing a specific query)
 fn render_results_fullscreen(f: &mut Frame, area: Rect, app: &mut App) {
     // Check if we're loading
@@ -364,28 +451,26 @@ fn render_results_fullscreen(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    // Check for app-level error
-    if let Some(ref error) = app.session.app_error {
-        let error_block = Block::default()
-            .borders(Borders::ALL)
-            .title("Error")
-            .border_style(Style::default().fg(Color::Red));
-        let para = Paragraph::new(error.as_str())
-            .block(error_block)
-            .style(Style::default().fg(Color::Red))
-            .wrap(Wrap { trim: false })
-            .scroll((0, 0));
-        f.render_widget(para, area);
-        return;
-    }
-
     // Display current block
     let hist_idx = app.session.selected_card.unwrap_or(0);
     let focus = app.session.focus.clone();
     let mode = app.session.mode;
+    let fullscreen = app.session.fullscreen;
 
     if let Some(block) = app.session.displayed_block_mut() {
-        render_selected_query(f, area, block, hist_idx, &focus, mode);
+        // If multi-query cell, split area into sidebar + main content
+        if block.is_multi() {
+            const SIDEBAR_WIDTH: u16 = 22;
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)])
+                .split(area);
+
+            render_query_sidebar(f, chunks[0], block);
+            render_selected_query(f, chunks[1], block, hist_idx, &focus, mode, fullscreen);
+        } else {
+            render_selected_query(f, area, block, hist_idx, &focus, mode, fullscreen);
+        }
     } else {
         let empty = Paragraph::new("No data. Press Esc to return to history.")
             .style(Style::default().fg(Color::DarkGray))
@@ -418,9 +503,17 @@ fn format_relative_time(timestamp: u64) -> String {
 }
 
 /// Determine which pane is expanded based on focus and mode
-/// In Navigation mode: all panes expanded
+/// In Navigation mode: all panes expanded (unless fullscreen is true)
 /// In Edit mode on a specific pane: only that pane expanded
-fn focused_pane(focus: &Focus, mode: Mode) -> Option<SubPane> {
+/// With fullscreen flag: current SubPane is expanded regardless of mode
+fn focused_pane(focus: &Focus, mode: Mode, fullscreen: bool) -> Option<SubPane> {
+    // Fullscreen can be triggered independently via 'f' key
+    if fullscreen {
+        if let Focus::SubPane(pane) = focus {
+            return Some(*pane);
+        }
+    }
+    // Original Edit mode logic still works
     match (focus, mode) {
         (Focus::SubPane(pane), Mode::Edit) => Some(*pane),
         _ => None, // Navigation mode = all expanded
@@ -438,9 +531,10 @@ fn render_selected_query(
     block_idx: usize,
     focus: &Focus,
     mode: Mode,
+    fullscreen: bool,
 ) {
     // Determine which pane (if any) is exclusively expanded
-    let focused = focused_pane(focus, mode);
+    let focused = focused_pane(focus, mode, fullscreen);
 
     // Title with breadcrumbs in edit mode
     let title = if let Some(pane) = focused {
@@ -470,7 +564,7 @@ fn render_selected_query(
                 "[cancelling...]"
             } else if block.running {
                 "[running...]"
-            } else if block.error.is_some() {
+            } else if block.error().is_some() {
                 "[error]"
             } else {
                 ""
@@ -494,7 +588,7 @@ fn render_selected_query(
                 Constraint::Min(0) // Fill all space when exclusively focused
             } else {
                 // Dynamic height in navigation mode
-                let sql_lines = block.sql.lines().count() as u16 + 2;
+                let sql_lines = block.sql().lines().count() as u16 + 2;
                 let max_height = inner.height / 4;
                 Constraint::Length(sql_lines.min(max_height).max(3))
             }
@@ -566,7 +660,7 @@ fn render_sql_pane(
 
     // Format SQL for display
     let formatted_sql = sqlformat::format(
-        &block.sql,
+        block.sql(),
         &sqlformat::QueryParams::None,
         &sqlformat::FormatOptions::default(),
     );
@@ -579,11 +673,11 @@ fn render_sql_pane(
         let para = Paragraph::new(formatted_sql.as_str())
             .block(sql_block)
             .wrap(Wrap { trim: false })
-            .scroll((block.sql_scroll, 0));
+            .scroll((block.sql_scroll(), 0));
         f.render_widget(para, area);
     } else {
         // Collapsed: show truncated SQL (use original, not formatted)
-        let sql_preview: String = block.sql.chars().take(60).collect();
+        let sql_preview: String = block.sql().chars().take(60).collect();
         let text = format!("{} SQL: {}", expand_char, sql_preview.replace('\n', " "));
         let para = Paragraph::new(text).style(style);
         f.render_widget(para, area);
@@ -606,12 +700,12 @@ fn render_results_pane(
     // Update visible dimensions for scroll calculations
     // Table uses 67% of width when expanded (67/33 split with detail panel)
     let table_width = area.width * 67 / 100;
-    if let Some(ref mut table) = block.results {
+    if let Some(table) = block.results_mut() {
         table.set_visible_height(area.height);
         table.set_visible_width(table_width);
     }
 
-    if let Some(ref error) = block.error {
+    if let Some(error) = block.error() {
         // Combine error color (red) with focus state
         let border_style = if focused && mode == Mode::Edit {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
@@ -624,7 +718,7 @@ fn render_results_pane(
             .borders(Borders::ALL)
             .title(format!("{} Error", expand_char))
             .border_style(border_style);
-        let para = Paragraph::new(error.as_str())
+        let para = Paragraph::new(error)
             .block(error_block)
             .style(Style::default().fg(Color::Red))
             .wrap(Wrap { trim: false })
@@ -634,7 +728,7 @@ fn render_results_pane(
     }
 
     if expanded {
-        if let Some(ref table) = block.results {
+        if let Some(table) = block.results() {
             let title = format!("{} Results", expand_char);
 
             match &table.view_mode {
@@ -845,28 +939,28 @@ fn render_stats_pane(
 ) {
     let style = pane_style(focused, mode);
     let expand_char = if expanded { "▼" } else { "▶" };
-    let elapsed_ns = block.stats.elapsed_ns;
+    let elapsed_ns = block.stats().elapsed_ns;
 
     // Calculate rates
-    let read_rows_rate = calc_rate(block.stats.rows_read, elapsed_ns);
-    let read_bytes_rate = calc_rate(block.stats.bytes_read, elapsed_ns);
-    let write_rows_rate = calc_rate(block.stats.rows_written, elapsed_ns);
-    let write_bytes_rate = calc_rate(block.stats.bytes_written, elapsed_ns);
+    let read_rows_rate = calc_rate(block.stats().rows_read, elapsed_ns);
+    let read_bytes_rate = calc_rate(block.stats().bytes_read, elapsed_ns);
+    let write_rows_rate = calc_rate(block.stats().rows_written, elapsed_ns);
+    let write_bytes_rate = calc_rate(block.stats().bytes_written, elapsed_ns);
 
     // Progress ratio (if we know total)
-    let progress = block.stats.total_rows.and_then(|total| {
+    let progress = block.stats().total_rows.and_then(|total| {
         if total > 0 {
-            Some((block.stats.rows_read as f64 / total as f64).min(1.0))
+            Some((block.stats().rows_read as f64 / total as f64).min(1.0))
         } else {
             None
         }
     });
 
-    let has_writes = block.stats.rows_written > 0;
+    let has_writes = block.stats().rows_written > 0;
 
     if expanded {
         // Check if we're in expanded metric view
-        match block.stats.view_mode {
+        match block.stats().view_mode {
             MetricsViewMode::Expanded { index } => {
                 // 50/50 split: table on left (dimmed), expanded detail on right (focused)
                 let chunks = Layout::default()
@@ -896,20 +990,20 @@ fn render_stats_pane(
                     format!(
                         "{} Running: {} rows read, {} read @ {}/s, {}/s",
                         expand_char,
-                        format_number(block.stats.rows_read),
-                        format_bytes(block.stats.bytes_read),
+                        format_number(block.stats().rows_read),
+                        format_bytes(block.stats().bytes_read),
                         format_rate(read_rows_rate),
                         format_bytes(read_bytes_rate as u64),
                     )
                 } else {
-                    match (block.stats.final_rows_read, block.stats.final_bytes_read) {
+                    match (block.stats().final_rows_read, block.stats().final_bytes_read) {
                         (Some(rows), Some(bytes)) => {
                             let blocks_str = block
-                                .stats
+                                .stats()
                                 .final_blocks
                                 .map(|b| format!(" in {} blocks", format_number(b)))
                                 .unwrap_or_default();
-                            let peak_mem = format_bytes(block.stats.peak_ram_current);
+                            let peak_mem = format_bytes(block.stats().peak_ram_current);
                             format!(
                                 "{} Finished: {} rows read, {} read{}, peak {}",
                                 expand_char,
@@ -929,8 +1023,8 @@ fn render_stats_pane(
                 if has_writes {
                     let write_line = format!(
                         "           Write: {} rows written, {} written @ {}/s, {}/s",
-                        format_number(block.stats.rows_written),
-                        format_bytes(block.stats.bytes_written),
+                        format_number(block.stats().rows_written),
+                        format_bytes(block.stats().bytes_written),
                         format_rate(write_rows_rate),
                         format_bytes(write_bytes_rate as u64),
                     );
@@ -938,20 +1032,20 @@ fn render_stats_pane(
                 }
 
                 // CPU and RAM sparklines (fixed 16 char width)
-                let cpu_sparkline = sparkline_str(&block.stats.cpu_history, 16);
-                let ram_sparkline = sparkline_str(&block.stats.ram_history, 16);
-                let cpu_str = format!("CPU {} {}%", cpu_sparkline, block.stats.cpu_current);
+                let cpu_sparkline = sparkline_str(&block.stats().cpu_history, 16);
+                let ram_sparkline = sparkline_str(&block.stats().ram_history, 16);
+                let cpu_str = format!("CPU {} {}%", cpu_sparkline, block.stats().cpu_current);
                 // Only show peak in RAM line when running - when finished, peak is in the Finished
                 // line
-                let is_finished = block.stats.final_rows_read.is_some();
+                let is_finished = block.stats().final_rows_read.is_some();
                 let ram_str = if is_finished {
-                    format!("RAM {} {}", ram_sparkline, format_bytes(block.stats.ram_current))
+                    format!("RAM {} {}", ram_sparkline, format_bytes(block.stats().ram_current))
                 } else {
                     format!(
                         "RAM {} {}, peak {}",
                         ram_sparkline,
-                        format_bytes(block.stats.ram_current),
-                        format_bytes(block.stats.peak_ram_current)
+                        format_bytes(block.stats().ram_current),
+                        format_bytes(block.stats().peak_ram_current)
                     )
                 };
                 let metrics_line = format!("  {} | {}", cpu_str, ram_str);
@@ -971,9 +1065,9 @@ fn render_stats_pane(
                     f.render_widget(gauge, chunks[1]);
                 } else {
                     // No total known - show reading indicator
-                    let dots = ".".repeat((block.stats.rows_read as usize / 1000) % 4);
+                    let dots = ".".repeat((block.stats().rows_read as usize / 1000) % 4);
                     let progress_text =
-                        format!("Reading{} {} rows", dots, format_number(block.stats.rows_read));
+                        format!("Reading{} {} rows", dots, format_number(block.stats().rows_read));
                     let para =
                         Paragraph::new(progress_text).style(Style::default().fg(Color::Yellow));
                     f.render_widget(para, chunks[1]);
@@ -985,16 +1079,16 @@ fn render_stats_pane(
         }
     } else {
         // Collapsed: single line summary with rates + optional progress gauge
-        let cpu_pct = block.stats.cpu_current;
-        let ram_str = format_bytes(block.stats.ram_current);
-        let peak_ram_str = format_bytes(block.stats.peak_ram_current);
+        let cpu_pct = block.stats().cpu_current;
+        let ram_str = format_bytes(block.stats().ram_current);
+        let peak_ram_str = format_bytes(block.stats().peak_ram_current);
 
         // Prefer final values if available, otherwise use current
-        let (rows, bytes, label) = match (block.stats.final_rows_read, block.stats.final_bytes_read)
-        {
-            (Some(r), Some(b)) => (r, b, "Finished"),
-            _ => (block.stats.rows_read, block.stats.bytes_read, "Running"),
-        };
+        let (rows, bytes, label) =
+            match (block.stats().final_rows_read, block.stats().final_bytes_read) {
+                (Some(r), Some(b)) => (r, b, "Finished"),
+                _ => (block.stats().rows_read, block.stats().bytes_read, "Running"),
+            };
 
         let text = if has_writes {
             format!(
@@ -1003,7 +1097,7 @@ fn render_stats_pane(
                 label,
                 format_number(rows),
                 format_bytes(bytes),
-                format_number(block.stats.rows_written),
+                format_number(block.stats().rows_written),
                 format_rate(write_rows_rate),
                 cpu_pct,
                 ram_str,
@@ -1048,7 +1142,7 @@ fn render_stats_pane(
 
 /// Render the grouped metrics table view
 fn render_stats_metrics_table(f: &mut Frame, area: Rect, block: &mut QueryBlock, style: Style) {
-    let metric_count = block.stats.metric_count();
+    let metric_count = block.stats().metric_count();
 
     if metric_count == 0 {
         let empty = Paragraph::new("No profile events").style(Style::default().fg(Color::DarkGray));
@@ -1058,21 +1152,21 @@ fn render_stats_metrics_table(f: &mut Frame, area: Rect, block: &mut QueryBlock,
 
     // Calculate visible height (area height - 3 for borders and header row)
     let visible_height = area.height.saturating_sub(3) as usize;
-    block.stats.visible_height = visible_height.max(1);
+    block.stats_mut().visible_height = visible_height.max(1);
 
-    let scroll_offset = block.stats.scroll_offset;
-    let selected_row = block.stats.selected_row;
+    let scroll_offset = block.stats().scroll_offset;
+    let selected_row = block.stats().selected_row;
 
     // Build only visible rows (skip to scroll_offset, take visible_height)
-    let rows: Vec<Row> = block
-        .stats
+    let stats = block.stats();
+    let rows: Vec<Row> = stats
         .metric_names
         .iter()
         .enumerate()
         .skip(scroll_offset)
         .take(visible_height)
         .filter_map(|(i, name)| {
-            let metric = block.stats.metrics.get(name)?;
+            let metric = stats.metrics.get(name)?;
             let sparkline = sparkline_str_i64(&metric.history, 16);
             let current = format_metric_value(metric.current);
             let min_str = format_metric_value(metric.min);
@@ -1119,7 +1213,7 @@ fn render_stats_metric_expanded(
     index: usize,
     style: Style,
 ) {
-    let metric_name = match block.stats.metric_names.get(index) {
+    let metric_name = match block.stats().metric_names.get(index) {
         Some(name) => name,
         None => {
             let empty = Paragraph::new("Metric not found").style(Style::default().fg(Color::Red));
@@ -1128,7 +1222,7 @@ fn render_stats_metric_expanded(
         }
     };
 
-    let metric = match block.stats.metrics.get(metric_name) {
+    let metric = match block.stats().metrics.get(metric_name) {
         Some(m) => m,
         None => {
             let empty =
@@ -1917,10 +2011,10 @@ fn render_column_stats_modal_overlay(f: &mut Frame, area: Rect, app: &App) {
     };
 
     if let Some(block) = block {
-        if let Some(ref table) = block.results {
+        if let Some(table) = block.results() {
             if table.header_focused {
                 let column_name: &str =
-                    table.columns.get(table.focused_col).map(|s| s.as_str()).unwrap_or("Unknown");
+                    table.columns.get(table.focused_col).map(String::as_str).unwrap_or("Unknown");
 
                 match table.get_path_stats(table.focused_col, &vec![]) {
                     PathStatsState::Ready(stats) => {
