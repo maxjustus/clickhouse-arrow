@@ -586,10 +586,20 @@ fn output_pretty(data: &serde_json::Value) {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Initialize logging
-    let filter = if args.debug { "debug" } else { "info" };
+    // Determine if TUI mode will be used
+    // TUI is default when no specific mode is selected and stdout is a terminal
+    let will_use_tui = args.query.is_none()
+        && args.insert.is_none()
+        && !args.info
+        && !args.test_types
+        && !args.json
+        && atty::is(atty::Stream::Stdout);
 
-    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).json().init();
+    // Initialize logging - skip for TUI mode to prevent stderr corruption
+    if !will_use_tui {
+        let filter = if args.debug { "debug" } else { "info" };
+        tracing_subscriber::fmt().with_env_filter(filter).with_target(false).json().init();
+    }
 
     // Validate compression
     match args.compression.as_str() {
