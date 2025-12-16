@@ -593,6 +593,8 @@ fn render_selected_query(
                 let max_height = inner.height / 4;
                 Constraint::Length(sql_lines.min(max_height).max(3))
             }
+        } else if fullscreen {
+            Constraint::Length(0) // Hidden in fullscreen
         } else {
             Constraint::Length(1)
         },
@@ -603,6 +605,8 @@ fn render_selected_query(
             } else {
                 Constraint::Ratio(2, 4) // 50% in navigation mode
             }
+        } else if fullscreen {
+            Constraint::Length(0) // Hidden in fullscreen
         } else {
             Constraint::Length(1)
         },
@@ -613,6 +617,8 @@ fn render_selected_query(
             } else {
                 Constraint::Ratio(1, 4) // 25% in navigation mode
             }
+        } else if fullscreen {
+            Constraint::Length(0) // Hidden in fullscreen
         } else {
             Constraint::Length(1)
         },
@@ -623,6 +629,8 @@ fn render_selected_query(
             } else {
                 Constraint::Ratio(1, 4) // 25% in navigation mode
             }
+        } else if fullscreen {
+            Constraint::Length(0) // Hidden in fullscreen
         } else {
             Constraint::Length(1)
         },
