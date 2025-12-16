@@ -672,11 +672,27 @@ impl SortableTable {
     }
 
     /// Update selected_field based on visible headers and selected_visible_index.
-    /// Also sync focused_col to keep both views consistent.
+    /// Also sync focused_col to keep both views consistent, and scroll table to keep column
+    /// visible.
     fn sync_selected_field(&mut self) {
         let visible = self.compute_visible_headers();
         self.selected_field = visible.get(self.selected_visible_index).copied().unwrap_or(0);
         self.focused_col = self.selected_field; // Sync with table header
+        self.ensure_focused_col_visible(); // Keep table columns scrolled to show focused column
+    }
+
+    /// Ensure focused column is visible in table by adjusting col_offset
+    fn ensure_focused_col_visible(&mut self) {
+        let visible = self.visible_cols.max(1);
+
+        // If focused_col is left of visible area, scroll left
+        if self.focused_col < self.col_offset {
+            self.col_offset = self.focused_col;
+        }
+        // If focused_col is right of visible area, scroll right to keep it visible
+        else if self.focused_col >= self.col_offset + visible {
+            self.col_offset = self.focused_col.saturating_sub(visible - 1);
+        }
     }
 
     /// Ensure selected field is visible in detail pane by adjusting value_scroll
