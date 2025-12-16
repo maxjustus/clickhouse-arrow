@@ -21,19 +21,21 @@ pub struct QueryStoreIndex {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryStoreEntry {
-    pub id:          String, // "{timestamp}-{hash}" e.g. "1732645123-a3f2b1c9"
-    pub hash:        String, // Just the hash
-    pub sql_preview: String, // First 80 chars
-    pub timestamp:   u64,    // Unix timestamp
-    pub duration_ms: Option<u64>, // Execution time
-    pub row_count:   u64,    // Number of rows returned
-    pub error:       Option<String>, // Error message if failed
+    pub id:              String, // "{timestamp}-{hash}" e.g. "1732645123-a3f2b1c9"
+    pub hash:            String, // Just the hash
+    pub sql_preview:     String, // First 80 chars
+    pub timestamp:       u64,    // Unix timestamp
+    pub duration_ms:     Option<u64>, // Execution time
+    pub row_count:       u64,    // Number of rows returned
+    pub error:           Option<String>, // Error message if failed
     #[serde(default)]
-    pub rows_read:   Option<u64>, // Rows read from storage
+    pub rows_read:       Option<u64>, // Rows read from storage
     #[serde(default)]
-    pub bytes_read:  Option<u64>, // Bytes read from storage
+    pub bytes_read:      Option<u64>, // Bytes read from storage
     #[serde(default)]
-    pub peak_memory: Option<u64>, // Peak memory usage
+    pub peak_memory:     Option<u64>, // Peak memory usage
+    #[serde(default)]
+    pub sub_query_count: usize, // 0 or 1 = single format, >1 = multi-query format
 }
 
 pub struct QueryStore {
@@ -87,6 +89,16 @@ impl QueryStore {
         let archive_path = self.base_path.join(format!("{}.chc", id));
 
         QueryCacheWriter::new(id, hash, archive_path, sql).await
+    }
+
+    pub async fn start_query_multi(&self, statements: &[String]) -> Result<MultiQueryCacheWriter> {
+        let combined_sql = statements.join(";\n");
+        let hash = Self::hash_sql(&combined_sql);
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let id = format!("{}-{}", timestamp, hash);
+        let archive_path = self.base_path.join(format!("{}.chc", id));
+
+        MultiQueryCacheWriter::new(id, hash, archive_path, statements).await
     }
 
     pub async fn finish_query(&mut self, entry: QueryStoreEntry) -> Result<()> {
@@ -293,6 +305,241 @@ impl QueryCacheWriter {
             rows_read: if self.rows_read > 0 { Some(self.rows_read) } else { None },
             bytes_read: if self.bytes_read > 0 { Some(self.bytes_read) } else { None },
             peak_memory: if self.peak_memory > 0 { Some(self.peak_memory) } else { None },
+            sub_query_count: 1, // Single-query format
+        })
+    }
+}
+
+/// Per-sub-query data for multi-query caching
+struct SubQueryData {
+    sql:              String,
+    native_writer:    Option<FileStreamWriter<NativeFormat, BufWriter<tokio::fs::File>>>,
+    profile_buf:      Vec<u8>,
+    profile_info_buf: Vec<u8>,
+    row_count:        u64,
+    rows_read:        u64,
+    bytes_read:       u64,
+    peak_memory:      u64,
+}
+
+/// Cache writer for multi-query cells
+/// Stores each sub-query in a numbered subdirectory within the ZIP
+pub struct MultiQueryCacheWriter {
+    pub id:       String,
+    pub hash:     String,
+    archive_path: PathBuf,
+    temp_dir:     PathBuf,
+    sub_queries:  Vec<SubQueryData>,
+    logs_buf:     Vec<u8>, // Shared across all sub-queries
+    combined_sql: String,  // All statements joined for preview
+}
+
+impl MultiQueryCacheWriter {
+    pub async fn new(
+        id: String,
+        hash: String,
+        archive_path: PathBuf,
+        statements: &[String],
+    ) -> Result<Self> {
+        let temp_dir = std::env::temp_dir().join(format!("chc-{}", id));
+        fs::create_dir_all(&temp_dir).await?;
+
+        // Create subdirectories and writers for each statement
+        let mut sub_queries = Vec::with_capacity(statements.len());
+        for (idx, sql) in statements.iter().enumerate() {
+            let sub_dir = temp_dir.join(format!("{}", idx));
+            fs::create_dir_all(&sub_dir).await?;
+
+            let results_file = tokio::fs::File::create(sub_dir.join("results.native")).await?;
+            let native_writer = FileStreamWriter::<NativeFormat, _>::new(
+                BufWriter::new(results_file),
+                CompressionMethod::LZ4,
+                Default::default(),
+                None,
+            );
+
+            sub_queries.push(SubQueryData {
+                sql:              sql.clone(),
+                native_writer:    Some(native_writer),
+                profile_buf:      Vec::new(),
+                profile_info_buf: Vec::new(),
+                row_count:        0,
+                rows_read:        0,
+                bytes_read:       0,
+                peak_memory:      0,
+            });
+        }
+
+        let combined_sql = statements.join(";\n");
+
+        Ok(Self {
+            id,
+            hash,
+            archive_path,
+            temp_dir,
+            sub_queries,
+            logs_buf: Vec::new(),
+            combined_sql,
+        })
+    }
+
+    pub async fn write_block(&mut self, sub_idx: usize, block: Block) -> Result<()> {
+        if let Some(sq) = self.sub_queries.get_mut(sub_idx) {
+            sq.row_count += block.rows;
+            if let Some(ref mut writer) = sq.native_writer {
+                writer.write(block).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn write_profile_event(&mut self, sub_idx: usize, event: &serde_json::Value) {
+        if let Some(sq) = self.sub_queries.get_mut(sub_idx) {
+            // Track peak memory
+            if event.get("name").and_then(|v| v.as_str()) == Some("MemoryTrackerPeakUsage") {
+                if let Some(value) = event.get("value").and_then(|v| v.as_i64()) {
+                    sq.peak_memory = sq.peak_memory.max(value.unsigned_abs());
+                }
+            }
+
+            if let Ok(line) = serde_json::to_string(event) {
+                sq.profile_buf.extend_from_slice(line.as_bytes());
+                sq.profile_buf.push(b'\n');
+            }
+        }
+    }
+
+    pub fn write_log(&mut self, log: &serde_json::Value) {
+        // Logs are shared across all sub-queries
+        if let Ok(line) = serde_json::to_string(log) {
+            self.logs_buf.extend_from_slice(line.as_bytes());
+            self.logs_buf.push(b'\n');
+        }
+    }
+
+    pub fn write_profile_info(&mut self, sub_idx: usize, profile_info: &serde_json::Value) {
+        if let Some(sq) = self.sub_queries.get_mut(sub_idx) {
+            if let Some(rows) = profile_info.get("rows").and_then(|v| v.as_u64()) {
+                sq.rows_read = rows;
+            }
+            if let Some(bytes) = profile_info.get("bytes").and_then(|v| v.as_u64()) {
+                sq.bytes_read = bytes;
+            }
+
+            if sq.profile_info_buf.is_empty() {
+                if let Ok(line) = serde_json::to_string(profile_info) {
+                    sq.profile_info_buf.extend_from_slice(line.as_bytes());
+                    sq.profile_info_buf.push(b'\n');
+                }
+            }
+        }
+    }
+
+    /// Finish the native writer for a sub-query (call after execution completes)
+    pub async fn finish_sub_query(&mut self, sub_idx: usize) -> Result<()> {
+        if let Some(sq) = self.sub_queries.get_mut(sub_idx) {
+            if let Some(mut writer) = sq.native_writer.take() {
+                writer.finish().await?;
+            }
+
+            let sub_dir = self.temp_dir.join(format!("{}", sub_idx));
+
+            // Write SQL
+            fs::write(sub_dir.join("query.sql"), &sq.sql).await?;
+
+            // Write profile
+            if !sq.profile_buf.is_empty() {
+                let compressed = lz4_flex::compress_prepend_size(&sq.profile_buf);
+                fs::write(sub_dir.join("profile.lz4"), &compressed).await?;
+            }
+
+            // Write profile_info
+            if !sq.profile_info_buf.is_empty() {
+                let compressed = lz4_flex::compress_prepend_size(&sq.profile_info_buf);
+                fs::write(sub_dir.join("profile_info.lz4"), &compressed).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn finish(
+        self,
+        duration_ms: Option<u64>,
+        error: Option<String>,
+    ) -> Result<QueryStoreEntry> {
+        use zip::write::SimpleFileOptions;
+
+        // Write shared logs to temp root
+        if !self.logs_buf.is_empty() {
+            let compressed = lz4_flex::compress_prepend_size(&self.logs_buf);
+            fs::write(self.temp_dir.join("logs.lz4"), &compressed).await?;
+        }
+
+        // Compute totals
+        let total_row_count: u64 = self.sub_queries.iter().map(|sq| sq.row_count).sum();
+        let total_rows_read: u64 = self.sub_queries.iter().map(|sq| sq.rows_read).sum();
+        let total_bytes_read: u64 = self.sub_queries.iter().map(|sq| sq.bytes_read).sum();
+        let max_peak_memory: u64 =
+            self.sub_queries.iter().map(|sq| sq.peak_memory).max().unwrap_or(0);
+        let sub_query_count = self.sub_queries.len();
+
+        // Create ZIP with numbered directories
+        let archive_path = self.archive_path.clone();
+        let temp_dir = self.temp_dir.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let file = std::fs::File::create(&archive_path)?;
+            let mut zip = zip::ZipWriter::new(file);
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+            // Add shared logs at root level
+            let logs_path = temp_dir.join("logs.lz4");
+            if logs_path.exists() {
+                zip.start_file("logs.lz4", options)?;
+                let content = std::fs::read(&logs_path)?;
+                zip.write_all(&content)?;
+            }
+
+            // Add numbered subdirectories
+            for idx in 0..sub_query_count {
+                let sub_dir = temp_dir.join(format!("{}", idx));
+                if sub_dir.is_dir() {
+                    for entry in std::fs::read_dir(&sub_dir)? {
+                        let entry = entry?;
+                        let path = entry.path();
+                        if path.is_file() {
+                            let name = path.file_name().unwrap().to_string_lossy();
+                            let zip_path = format!("{}/{}", idx, name);
+                            zip.start_file(&zip_path, options)?;
+                            let content = std::fs::read(&path)?;
+                            zip.write_all(&content)?;
+                        }
+                    }
+                }
+            }
+
+            zip.finish()?;
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            Ok(())
+        })
+        .await??;
+
+        let sql_preview: String =
+            self.combined_sql.chars().take(500).collect::<String>().replace('\n', " ");
+        let timestamp = self.id.split('-').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+        Ok(QueryStoreEntry {
+            id: self.id,
+            hash: self.hash,
+            sql_preview,
+            timestamp,
+            duration_ms,
+            row_count: total_row_count,
+            error,
+            rows_read: if total_rows_read > 0 { Some(total_rows_read) } else { None },
+            bytes_read: if total_bytes_read > 0 { Some(total_bytes_read) } else { None },
+            peak_memory: if max_peak_memory > 0 { Some(max_peak_memory) } else { None },
+            sub_query_count,
         })
     }
 }
@@ -355,5 +602,88 @@ impl QueryArchiveReader {
         }
 
         Ok(Self { sql, results, profile, profile_info, logs })
+    }
+
+    /// Open a specific sub-query from a multi-query archive
+    /// The sub_idx is used to prefix file paths (e.g., "0/query.sql")
+    pub fn open_multi(path: &PathBuf, sub_idx: usize) -> Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let mut archive = zip::ZipArchive::new(file)?;
+
+        let prefix = format!("{}/", sub_idx);
+        let mut sql = String::new();
+        let mut results = Vec::new();
+        let mut profile = Vec::new();
+        let mut profile_info = Vec::new();
+        let mut logs = Vec::new();
+
+        // Read SQL from numbered directory
+        if let Ok(mut file) = archive.by_name(&format!("{}query.sql", prefix)) {
+            file.read_to_string(&mut sql)?;
+        }
+
+        // Read results.native
+        if let Ok(mut file) = archive.by_name(&format!("{}results.native", prefix)) {
+            file.read_to_end(&mut results)?;
+        }
+
+        // Read and decompress profile
+        if let Ok(mut file) = archive.by_name(&format!("{}profile.lz4", prefix)) {
+            let mut compressed = Vec::new();
+            file.read_to_end(&mut compressed)?;
+            if let Ok(decompressed) = lz4_flex::decompress_size_prepended(&compressed) {
+                profile = decompressed;
+            }
+        }
+
+        // Read and decompress profile_info
+        if let Ok(mut file) = archive.by_name(&format!("{}profile_info.lz4", prefix)) {
+            let mut compressed = Vec::new();
+            file.read_to_end(&mut compressed)?;
+            if let Ok(decompressed) = lz4_flex::decompress_size_prepended(&compressed) {
+                profile_info = decompressed;
+            }
+        }
+
+        // Read shared logs from root (only for first sub-query)
+        if sub_idx == 0 {
+            if let Ok(mut file) = archive.by_name("logs.lz4") {
+                let mut compressed = Vec::new();
+                file.read_to_end(&mut compressed)?;
+                if let Ok(decompressed) = lz4_flex::decompress_size_prepended(&compressed) {
+                    logs = decompressed;
+                }
+            }
+        }
+
+        Ok(Self { sql, results, profile, profile_info, logs })
+    }
+
+    /// Count the number of sub-queries in an archive
+    /// Returns 1 for old flat format, >1 for multi-query format
+    pub fn sub_query_count(path: &PathBuf) -> Result<usize> {
+        let file = std::fs::File::open(path)?;
+        let mut archive = zip::ZipArchive::new(file)?;
+
+        // Check if this is the new multi-query format by looking for "0/query.sql"
+        let mut max_idx: Option<usize> = None;
+
+        for i in 0..archive.len() {
+            if let Ok(file) = archive.by_index(i) {
+                let name = file.name();
+                // Look for pattern "N/query.sql" where N is a number
+                if name.ends_with("/query.sql") {
+                    if let Some(idx_str) = name.strip_suffix("/query.sql") {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            max_idx = Some(max_idx.map_or(idx, |m| m.max(idx)));
+                        }
+                    }
+                }
+            }
+        }
+
+        // If we found numbered directories, return count (max + 1)
+        // Otherwise it's old format, return 1
+        Ok(max_idx.map_or(1, |m| m + 1))
     }
 }

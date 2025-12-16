@@ -47,9 +47,6 @@ pub struct ViewState {
 
     // SQL
     pub sql_scroll: u16,
-
-    // Fullscreen state
-    pub fullscreen: bool,
 }
 
 /// Aggregated metric data (grouped by name)
@@ -722,6 +719,7 @@ pub enum QueryStatus {
     Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 /// Combined stats data (progress + profile metrics)
@@ -1349,7 +1347,6 @@ impl QueryBlock {
             logs_scroll_offset: self.logs_data.scroll_offset,
             logs_view_mode: self.logs_data.view_mode.clone(),
             sql_scroll: sq.sql_scroll,
-            fullscreen: false,
         }
     }
 

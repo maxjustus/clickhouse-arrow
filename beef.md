@@ -78,3 +78,13 @@ like seconds instead of microseconds, MB instead of bytes, etc.
 - make sure we have roundrip named tuple and nested tests. Plus UInt256 serialization test.
 - add generateRandomStructure based tests to fuzz test serialize and deserialize.
 - add read Native dump from clickhouse client and write Native dump to clickhouse client tests
+
+- JSON insert via pipe idea if it doesn't already work this way:
+  - start an insert with an identifier in the CLI and a timeout by pushing a json object saying { action: "insert", database: "db", table: "table", timeout: n, session_id: "uuid" }
+  - then stream json objects to stdin
+  - then send a final json object { action: "finish", session_id: "uuid" }
+  - the client should batch up json objects and send them as Native format insert blocks to the server. It could also connect to the server async while reading stdin and batching.
+    - if it did that then you could do away with the fancy session api and just start an insert, close the CLI when you're done.
+- save / display host / connection string used for query
+
+- other thought: we can query system.query_log when query starts to get more metadata about the query like tables, functions, etc.

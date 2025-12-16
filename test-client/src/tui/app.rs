@@ -161,9 +161,20 @@ impl App {
                         self.handle_key(key).await?;
                     }
                     Event::Paste(text) => {
-                        // Always paste into new query editor and open it
-                        self.session.new_query.insert_str(&text);
-                        self.session.focus = Focus::QueryEditor;
+                        if matches!(self.session.focus, Focus::QueryEditor) {
+                            // Already editing - normal paste at cursor
+                            self.session.new_query.insert_str(&text);
+                        } else {
+                            // From other views - format and replace
+                            let formatted = sqlformat::format(
+                                &text,
+                                &sqlformat::QueryParams::None,
+                                &sqlformat::FormatOptions::default(),
+                            );
+                            let formatted = format_clickhouse(&formatted);
+                            self.set_new_query_text(&formatted);
+                            self.session.focus = Focus::QueryEditor;
+                        }
                     }
                     _ => {}
                 }
@@ -590,10 +601,6 @@ impl App {
                             block.select_query(n.saturating_sub(1));
                         }
                     }
-                    KeyCode::Char('f') | KeyCode::Char('F') => {
-                        // Toggle fullscreen for current pane
-                        self.session.fullscreen = !self.session.fullscreen;
-                    }
                     _ => {}
                 }
             }
@@ -762,6 +769,16 @@ impl App {
             return Ok(());
         }
 
+        // Handle fullscreen exit before block borrow to avoid borrow conflict
+        if matches!(pane, SubPane::Results)
+            && matches!(key.code, KeyCode::Left | KeyCode::Char('h'))
+            && !key.modifiers.contains(KeyModifiers::ALT)
+            && self.session.fullscreen
+        {
+            self.session.fullscreen = false;
+            return Ok(());
+        }
+
         let block = match self.session.displayed_block_mut() {
             Some(b) => b,
             None => return Ok(()),
@@ -837,9 +854,13 @@ impl App {
                                 }
                             }
                             (KeyCode::Right | KeyCode::Char('l'), false) => {
-                                table.expand();
+                                if !table.expand() && !self.session.fullscreen {
+                                    // Can't expand further in table, go fullscreen
+                                    self.session.fullscreen = true;
+                                }
                             }
                             (KeyCode::Left | KeyCode::Char('h'), false) => {
+                                // Fullscreen exit handled above before block borrow
                                 if !table.collapse() {
                                     // At top level, exit edit mode
                                     self.session.mode = Mode::Navigation;
@@ -938,20 +959,6 @@ impl App {
         self.query_map.get(&query_id).copied()
     }
 
-    /// Clean up a finished query (completed or failed) from running_queries and query_map
-    fn cleanup_finished_query(&mut self, query_id: usize, hist_idx: usize) {
-        // Remove from running_queries and move to current_block if user is viewing this query
-        if let Some(block) = self.session.running_queries.remove(&hist_idx) {
-            if self.session.selected_card == Some(hist_idx) {
-                self.session.current_block = Some(block);
-            }
-            // If not viewing, block is already archived - let it drop
-        }
-
-        // Clean up query_map
-        self.query_map.retain(|&qid, _| qid != query_id);
-    }
-
     pub fn handle_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::QueryStarted { query_id, sub_idx } => {
@@ -968,9 +975,13 @@ impl App {
             AppEvent::QueryComplete { query_id, sub_idx } => {
                 if let Some(hist_idx) = self.lookup_query(query_id) {
                     if let Some(block) = self.session.get_running_mut(hist_idx) {
-                        // Update sub-query status
+                        // Update sub-query status based on whether cancellation was requested
                         if let Some(sq) = block.queries.get_mut(sub_idx) {
-                            sq.status = crate::tui::session::QueryStatus::Completed;
+                            if block.cancel_requested {
+                                sq.status = crate::tui::session::QueryStatus::Cancelled;
+                            } else {
+                                sq.status = crate::tui::session::QueryStatus::Completed;
+                            }
                         }
                         // Check if all sub-queries are done
                         let all_done = block.queries.iter().all(|sq| {
@@ -978,17 +989,12 @@ impl App {
                                 sq.status,
                                 crate::tui::session::QueryStatus::Completed
                                     | crate::tui::session::QueryStatus::Failed
+                                    | crate::tui::session::QueryStatus::Cancelled
                             )
                         });
                         if all_done {
                             block.running = false;
                             block.cancel_requested = false;
-                        }
-                    }
-                    // Clean up after all sub-queries are done
-                    if let Some(block) = self.session.running_queries.get(&hist_idx) {
-                        if !block.running {
-                            self.cleanup_finished_query(query_id, hist_idx);
                         }
                     }
                 }
@@ -1005,9 +1011,6 @@ impl App {
                     if let Some(entry) = self.session.history.get_mut(hist_idx) {
                         entry.error = Some(error);
                     }
-
-                    // Clean up running_queries and query_map
-                    self.cleanup_finished_query(query_id, hist_idx);
                 }
             }
             AppEvent::RowReceived { query_id, sub_idx, row } => {
@@ -1110,14 +1113,10 @@ impl App {
             return;
         };
 
-        // If it's ACTIVELY running, data is already in running_queries
-        if let Some(block) = self.session.running_queries.get(&hist_idx) {
-            if block.running {
-                self.session.loading_entry_id = None;
-                return;
-            }
-            // Query exists in map but not running - this shouldn't happen after cleanup fix
-            // but handle gracefully by falling through to archive load
+        // If it's a running query, data is already in running_queries
+        if self.session.running_queries.contains_key(&hist_idx) {
+            self.session.loading_entry_id = None;
+            return;
         }
 
         // Get entry to load

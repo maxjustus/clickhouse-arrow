@@ -408,6 +408,7 @@ fn render_query_sidebar(f: &mut Frame, area: Rect, block: &QueryBlock) {
                 QueryStatus::Running => Span::styled(">", Style::default().fg(Color::Blue)),
                 QueryStatus::Completed => Span::styled("*", Style::default().fg(Color::Green)),
                 QueryStatus::Failed => Span::styled("!", Style::default().fg(Color::Red)),
+                QueryStatus::Cancelled => Span::styled("X", Style::default().fg(Color::Yellow)),
             };
 
             // Truncated SQL preview (first line, max 15 chars)
@@ -791,6 +792,16 @@ fn render_results_pane(
             let block_widget = Block::default()
                 .borders(Borders::ALL)
                 .title(format!("{} Results (loading...)", expand_char))
+                .border_style(style);
+            f.render_widget(block_widget, area);
+        } else if block
+            .queries
+            .iter()
+            .any(|sq| sq.status == crate::tui::session::QueryStatus::Cancelled)
+        {
+            let block_widget = Block::default()
+                .borders(Borders::ALL)
+                .title(format!("{} Results (cancelled)", expand_char))
                 .border_style(style);
             f.render_widget(block_widget, area);
         } else {

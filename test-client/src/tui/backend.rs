@@ -9,11 +9,19 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 use crate::client::ConnectionParams;
 use crate::tui::app::{AppEvent, QueryCommand};
-use crate::tui::query_store::{QueryCacheWriter, QueryStore};
+use crate::tui::query_store::{MultiQueryCacheWriter, QueryCacheWriter, QueryStore};
 
-type QidMap = Arc<RwLock<HashMap<Qid, usize>>>;
+/// Maps Qid -> (query_id, sub_idx) for routing events to correct sub-query
+type QidMap = Arc<RwLock<HashMap<Qid, (usize, usize)>>>;
 type TaskMap = Arc<RwLock<HashMap<usize, tokio::task::JoinHandle<()>>>>;
-type CacheWriterMap = Arc<RwLock<HashMap<usize, Arc<Mutex<Option<QueryCacheWriter>>>>>>;
+
+/// Cache writer that can handle single or multi-query formats
+pub enum CacheWriter {
+    Single(QueryCacheWriter),
+    Multi(MultiQueryCacheWriter),
+}
+
+type CacheWriterMap = Arc<RwLock<HashMap<usize, Arc<Mutex<Option<CacheWriter>>>>>>;
 
 /// Check if an error message indicates a connection problem (vs query error)
 fn is_connection_error(error: &str) -> bool {
@@ -120,11 +128,11 @@ pub fn spawn_backend(
     let cache_writers_clone = cache_writers.clone();
     tokio::spawn(async move {
         while let Some(event) = buffer_rx.recv().await {
-            // Look up query_id from Qid
-            let query_id = {
+            // Look up (query_id, sub_idx) from Qid
+            let (query_id, sub_idx) = {
                 let map = qid_map_clone.read().await;
                 match map.get(&event.qid) {
-                    Some(&id) => id,
+                    Some(&ids) => ids,
                     None => continue, // Unknown query, skip
                 }
             };
@@ -144,12 +152,15 @@ pub fn spawn_backend(
                             cache_writers_clone.read().await.get(&query_id).cloned()
                         {
                             if let Some(writer) = writer_arc.lock().await.as_mut() {
-                                writer.write_profile_event(&json);
+                                match writer {
+                                    CacheWriter::Single(w) => w.write_profile_event(&json),
+                                    CacheWriter::Multi(w) => w.write_profile_event(sub_idx, &json),
+                                }
                             }
                         }
 
                         let _ = event_tx_clone
-                            .send(AppEvent::ProfileEvent { query_id, event: json })
+                            .send(AppEvent::ProfileEvent { query_id, sub_idx, event: json })
                             .await;
                     }
                 }
@@ -174,12 +185,15 @@ pub fn spawn_backend(
                             "text": log.text,
                         });
 
-                        // Write to cache
+                        // Write to cache (logs are shared)
                         if let Some(writer_arc) =
                             cache_writers_clone.read().await.get(&query_id).cloned()
                         {
                             if let Some(writer) = writer_arc.lock().await.as_mut() {
-                                writer.write_log(&json);
+                                match writer {
+                                    CacheWriter::Single(w) => w.write_log(&json),
+                                    CacheWriter::Multi(w) => w.write_log(&json),
+                                }
                             }
                         }
 
@@ -197,7 +211,7 @@ pub fn spawn_backend(
                         "elapsed_ns": progress.elapsed_ns,
                     });
                     let _ = event_tx_clone
-                        .send(AppEvent::ProgressEvent { query_id, progress: json })
+                        .send(AppEvent::ProgressEvent { query_id, sub_idx, progress: json })
                         .await;
                 }
                 ClickHouseEvent::ProfileInfo(profile_info) => {
@@ -212,12 +226,15 @@ pub fn spawn_backend(
                         cache_writers_clone.read().await.get(&query_id).cloned()
                     {
                         if let Some(writer) = writer_arc.lock().await.as_mut() {
-                            writer.write_profile_info(&json);
+                            match writer {
+                                CacheWriter::Single(w) => w.write_profile_info(&json),
+                                CacheWriter::Multi(w) => w.write_profile_info(sub_idx, &json),
+                            }
                         }
                     }
 
                     let _ = event_tx_clone
-                        .send(AppEvent::ProfileInfoEvent { query_id, profile_info: json })
+                        .send(AppEvent::ProfileInfoEvent { query_id, sub_idx, profile_info: json })
                         .await;
                 }
             }
@@ -227,7 +244,7 @@ pub fn spawn_backend(
     tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
-                QueryCommand::Execute { query_id, sql } => {
+                QueryCommand::Execute { query_id, statements } => {
                     let client = client.clone();
                     let params = params.clone();
                     let event_tx = event_tx.clone();
@@ -240,7 +257,7 @@ pub fn spawn_backend(
                             &client,
                             &params,
                             query_id,
-                            &sql,
+                            &statements,
                             &event_tx,
                             &qid_map,
                             &task_map_clone,
@@ -257,8 +274,9 @@ pub fn spawn_backend(
                     cache_writers.write().await.remove(&query_id);
                     if let Some(handle) = task_map.write().await.remove(&query_id) {
                         handle.abort();
-                        // Send completion event so UI updates
-                        let _ = event_tx.send(AppEvent::QueryComplete { query_id }).await;
+                        // Send completion event so UI updates (sub_idx: 0 for cancel)
+                        let _ =
+                            event_tx.send(AppEvent::QueryComplete { query_id, sub_idx: 0 }).await;
                     }
                 }
             }
@@ -266,48 +284,58 @@ pub fn spawn_backend(
     })
 }
 
+/// Execute one or more SQL statements sequentially on the same connection.
+/// Stops on first error.
 async fn execute_query(
     client: &Arc<RwLock<Client<NativeFormat>>>,
     params: &Arc<ConnectionParams>,
     query_id: usize,
-    sql: &str,
+    statements: &[String],
     event_tx: &mpsc::Sender<AppEvent>,
     qid_map: &QidMap,
     task_map: &TaskMap,
     cache_writers: &CacheWriterMap,
     query_store: &Arc<Mutex<Option<QueryStore>>>,
 ) {
-    let qid = Qid::new();
     let start_time = std::time::Instant::now();
-
-    // Register the Qid -> query_id mapping
-    {
-        let mut map = qid_map.write().await;
-        map.insert(qid, query_id);
-    }
+    let is_multi = statements.len() > 1;
 
     // Create cache writer if store is available
-    let cache_writer: Option<Arc<Mutex<Option<QueryCacheWriter>>>> =
+    let cache_writer: Option<Arc<Mutex<Option<CacheWriter>>>> =
         if let Some(store) = query_store.lock().await.as_ref() {
-            match store.start_query(sql).await {
-                Ok(writer) => {
-                    let writer_arc = Arc::new(Mutex::new(Some(writer)));
-                    cache_writers.write().await.insert(query_id, writer_arc.clone());
-                    Some(writer_arc)
+            if is_multi {
+                // Multi-query: use folder-based archive
+                match store.start_query_multi(statements).await {
+                    Ok(writer) => {
+                        let writer_arc = Arc::new(Mutex::new(Some(CacheWriter::Multi(writer))));
+                        cache_writers.write().await.insert(query_id, writer_arc.clone());
+                        Some(writer_arc)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create multi-query cache writer: {}", e);
+                        None
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to create cache writer: {}", e);
-                    None
+            } else {
+                // Single query: use flat archive
+                let combined_sql = statements.join(";\n");
+                match store.start_query(&combined_sql).await {
+                    Ok(writer) => {
+                        let writer_arc = Arc::new(Mutex::new(Some(CacheWriter::Single(writer))));
+                        cache_writers.write().await.insert(query_id, writer_arc.clone());
+                        Some(writer_arc)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create cache writer: {}", e);
+                        None
+                    }
                 }
             }
         } else {
             None
         };
 
-    // Send query started event
-    let _ = event_tx.send(AppEvent::QueryStarted { query_id }).await;
-
-    // Execute query with settings for logs, profile events, and progress
+    // Settings for all queries
     let settings = Settings::default()
         .with_setting("send_logs_level", "trace")
         .with_setting("log_queries", 1)
@@ -315,92 +343,46 @@ async fn execute_query(
         .with_setting("output_format_native_use_flattened_dynamic_and_json_serialization", 1)
         .with_setting("limit", 100_000);
 
-    let stream = match client
-        .read()
-        .await
-        .query_raw_with_settings::<clickhouse_arrow::QueryParams, Settings>(
-            sql.to_string(),
-            None,
-            Some(settings.clone()),
-            qid,
-        )
-        .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            let error_msg = e.to_string();
+    // Execute each statement sequentially
+    for (sub_idx, sql) in statements.iter().enumerate() {
+        let qid = Qid::new();
 
-            // Check if this is a connection error
-            if is_connection_error(&error_msg) {
-                let _ = event_tx.send(AppEvent::ConnectionLost { error: error_msg.clone() }).await;
+        // Register the Qid -> (query_id, sub_idx) mapping
+        qid_map.write().await.insert(qid, (query_id, sub_idx));
 
-                // Reconnect with backoff
-                let new_client = reconnect_with_backoff(params, event_tx).await;
-                *client.write().await = new_client;
-            }
+        // Send query started event for this sub-query
+        let _ = event_tx.send(AppEvent::QueryStarted { query_id, sub_idx }).await;
 
-            // Still send query error (user needs to retry manually)
-            let _ =
-                event_tx.send(AppEvent::QueryError { query_id, error: error_msg.clone() }).await;
-
-            // Finish cache with error
-            finish_cache(
-                cache_writer,
-                cache_writers,
-                query_store,
-                query_id,
-                start_time,
-                Some(error_msg),
-                event_tx,
+        // Execute this statement
+        let stream = match client
+            .read()
+            .await
+            .query_raw_with_settings::<clickhouse_arrow::QueryParams, Settings>(
+                sql.clone(),
+                None,
+                Some(settings.clone()),
+                qid,
             )
-            .await;
-
-            // Clean up mappings
-            qid_map.write().await.remove(&qid);
-            task_map.write().await.remove(&query_id);
-            return;
-        }
-    };
-
-    futures::pin_mut!(stream);
-
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(mut block) => {
-                // Write block to cache before converting to rows
-                if let Some(ref writer_arc) = cache_writer {
-                    if let Some(writer) = writer_arc.lock().await.as_mut() {
-                        // Clone block for cache (block will be consumed by take_iter_rows)
-                        let cache_block = block.clone();
-                        if let Err(e) = writer.write_block(cache_block).await {
-                            tracing::warn!("Failed to write block to cache: {}", e);
-                        }
-                    }
-                }
-
-                for row in block.take_iter_rows() {
-                    let json_row = row_to_json(row);
-                    let _ = event_tx.send(AppEvent::RowReceived { query_id, row: json_row }).await;
-                }
-            }
+            .await
+        {
+            Ok(s) => s,
             Err(e) => {
                 let error_msg = e.to_string();
 
-                // Check if this is a connection error during streaming
+                // Check if this is a connection error
                 if is_connection_error(&error_msg) {
                     let _ =
                         event_tx.send(AppEvent::ConnectionLost { error: error_msg.clone() }).await;
-
-                    // Reconnect with backoff
                     let new_client = reconnect_with_backoff(params, event_tx).await;
                     *client.write().await = new_client;
                 }
 
+                // Send error for this sub-query
                 let _ = event_tx
-                    .send(AppEvent::QueryError { query_id, error: error_msg.clone() })
+                    .send(AppEvent::QueryError { query_id, sub_idx, error: error_msg.clone() })
                     .await;
 
-                // Finish cache with error
+                // Finish cache with error and return (stop on first error)
                 finish_cache(
                     cache_writer,
                     cache_writers,
@@ -412,27 +394,100 @@ async fn execute_query(
                 )
                 .await;
 
-                // Clean up mappings
                 qid_map.write().await.remove(&qid);
                 task_map.write().await.remove(&query_id);
                 return;
             }
+        };
+
+        futures::pin_mut!(stream);
+
+        // Process results for this statement
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(mut block) => {
+                    // Write block to cache
+                    if let Some(ref writer_arc) = cache_writer {
+                        if let Some(writer) = writer_arc.lock().await.as_mut() {
+                            let cache_block = block.clone();
+                            let write_result = match writer {
+                                CacheWriter::Single(w) => w.write_block(cache_block).await,
+                                CacheWriter::Multi(w) => w.write_block(sub_idx, cache_block).await,
+                            };
+                            if let Err(e) = write_result {
+                                tracing::warn!("Failed to write block to cache: {}", e);
+                            }
+                        }
+                    }
+
+                    for row in block.take_iter_rows() {
+                        let json_row = row_to_json(row);
+                        let _ = event_tx
+                            .send(AppEvent::RowReceived { query_id, sub_idx, row: json_row })
+                            .await;
+                    }
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+
+                    if is_connection_error(&error_msg) {
+                        let _ = event_tx
+                            .send(AppEvent::ConnectionLost { error: error_msg.clone() })
+                            .await;
+                        let new_client = reconnect_with_backoff(params, event_tx).await;
+                        *client.write().await = new_client;
+                    }
+
+                    let _ = event_tx
+                        .send(AppEvent::QueryError { query_id, sub_idx, error: error_msg.clone() })
+                        .await;
+
+                    finish_cache(
+                        cache_writer,
+                        cache_writers,
+                        query_store,
+                        query_id,
+                        start_time,
+                        Some(error_msg),
+                        event_tx,
+                    )
+                    .await;
+
+                    qid_map.write().await.remove(&qid);
+                    task_map.write().await.remove(&query_id);
+                    return;
+                }
+            }
         }
+
+        // This sub-query completed successfully
+        let _ = event_tx.send(AppEvent::QueryComplete { query_id, sub_idx }).await;
+
+        // Finish this sub-query's archive (for multi-query)
+        if let Some(ref writer_arc) = cache_writer {
+            if let Some(writer) = writer_arc.lock().await.as_mut() {
+                if let CacheWriter::Multi(w) = writer {
+                    if let Err(e) = w.finish_sub_query(sub_idx).await {
+                        tracing::warn!("Failed to finish sub-query {}: {}", sub_idx, e);
+                    }
+                }
+            }
+        }
+
+        // Clean up QID mapping for this statement
+        qid_map.write().await.remove(&qid);
     }
 
-    let _ = event_tx.send(AppEvent::QueryComplete { query_id }).await;
-
-    // Finish cache successfully
+    // All statements completed successfully - finish cache
     finish_cache(cache_writer, cache_writers, query_store, query_id, start_time, None, event_tx)
         .await;
 
-    // Clean up mappings after query completes
-    qid_map.write().await.remove(&qid);
+    // Clean up task mapping
     task_map.write().await.remove(&query_id);
 }
 
 async fn finish_cache(
-    cache_writer: Option<Arc<Mutex<Option<QueryCacheWriter>>>>,
+    cache_writer: Option<Arc<Mutex<Option<CacheWriter>>>>,
     cache_writers: &CacheWriterMap,
     query_store: &Arc<Mutex<Option<QueryStore>>>,
     query_id: usize,
@@ -447,7 +502,11 @@ async fn finish_cache(
     if let Some(writer_arc) = cache_writer {
         if let Some(writer) = writer_arc.lock().await.take() {
             let duration_ms = Some(start_time.elapsed().as_millis() as u64);
-            match writer.finish(duration_ms, error).await {
+            let finish_result = match writer {
+                CacheWriter::Single(w) => w.finish(duration_ms, error).await,
+                CacheWriter::Multi(w) => w.finish(duration_ms, error).await,
+            };
+            match finish_result {
                 Ok(entry) => {
                     // Save entry to store
                     if let Some(store) = query_store.lock().await.as_mut() {
