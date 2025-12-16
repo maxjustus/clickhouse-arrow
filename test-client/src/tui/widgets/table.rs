@@ -600,10 +600,12 @@ impl SortableTable {
     pub fn header_left(&mut self) {
         if self.focused_col > 0 {
             self.focused_col -= 1;
+            self.selected_field = self.focused_col; // Sync with detail pane
             // Scroll columns if needed
             if self.focused_col < self.col_offset {
                 self.col_offset = self.focused_col;
             }
+            self.ensure_selected_field_visible(); // Keep detail pane scroll synced
             self.maybe_start_stats_computation(self.focused_col, vec![]);
         }
     }
@@ -612,12 +614,14 @@ impl SortableTable {
     pub fn header_right(&mut self) {
         if self.focused_col < self.columns.len().saturating_sub(1) {
             self.focused_col += 1;
+            self.selected_field = self.focused_col; // Sync with detail pane
             // Scroll right if focused column would be off-screen
             // Use visible_cols as estimate (updated elsewhere or use conservative default)
             let visible = self.visible_cols.max(1);
             if self.focused_col >= self.col_offset + visible {
                 self.col_offset = self.focused_col.saturating_sub(visible - 1);
             }
+            self.ensure_selected_field_visible(); // Keep detail pane scroll synced
             self.maybe_start_stats_computation(self.focused_col, vec![]);
         }
     }
@@ -668,9 +672,39 @@ impl SortableTable {
     }
 
     /// Update selected_field based on visible headers and selected_visible_index.
+    /// Also sync focused_col to keep both views consistent.
     fn sync_selected_field(&mut self) {
         let visible = self.compute_visible_headers();
         self.selected_field = visible.get(self.selected_visible_index).copied().unwrap_or(0);
+        self.focused_col = self.selected_field; // Sync with table header
+    }
+
+    /// Ensure selected field is visible in detail pane by adjusting value_scroll
+    fn ensure_selected_field_visible(&mut self) {
+        let field_start_line =
+            self.detail_field_positions.borrow().get(self.selected_field).copied();
+        if let Some(field_start_line) = field_start_line {
+            // Compute the expected end line of this field (approximately)
+            let field_end_line = self
+                .detail_field_positions
+                .borrow()
+                .get(self.selected_field + 1)
+                .copied()
+                .unwrap_or_else(|| self.detail_total_height.get());
+
+            let visible_height = self.detail_visible_height.get() as usize;
+
+            // Adjust scroll to ensure field is visible
+            if field_start_line < self.value_scroll {
+                // Field is above visible area - scroll up
+                self.value_scroll = field_start_line;
+            } else if field_end_line > self.value_scroll + visible_height {
+                // Field is below visible area - scroll down
+                self.value_scroll = field_end_line.saturating_sub(visible_height);
+            }
+
+            self.clamp_value_scroll();
+        }
     }
 
     /// Clamp value_scroll to valid range (prevent scrolling past content)
@@ -1588,12 +1622,13 @@ impl SortableTable {
 
             let value = row_data.and_then(|r| r.get(i));
 
-            // Highlight selected field name when detail is focused
-            let name_style = if self.detail_focused && i == self.selected_field {
-                Style::default().fg(Color::Yellow).bg(Color::DarkGray)
-            } else {
-                Style::default().fg(Color::Yellow)
-            };
+            // Highlight selected field name when detail or header is focused and column matches
+            let name_style =
+                if (self.detail_focused || self.header_focused) && i == self.selected_field {
+                    Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                };
 
             // Field name line
             lines.push(Line::from(Span::styled(format!("{}:", col_name), name_style)));

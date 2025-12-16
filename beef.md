@@ -88,3 +88,5 @@ like seconds instead of microseconds, MB instead of bytes, etc.
 - save / display host / connection string used for query
 
 - other thought: we can query system.query_log when query starts to get more metadata about the query like tables, functions, etc.
+
+- idea: right pane (row inspect) column focus follows selected column in the table view and vice versa.
