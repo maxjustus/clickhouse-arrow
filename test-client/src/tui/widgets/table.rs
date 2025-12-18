@@ -402,6 +402,9 @@ pub struct SortableTable {
     saved_value_scroll:           Option<usize>,
     saved_selected_field:         Option<usize>,
     saved_selected_visible_index: Option<usize>,
+
+    // Detail pane width toggle (false = 67/33, true = 33/67)
+    pub detail_wide: bool,
 }
 
 impl SortableTable {
@@ -435,6 +438,7 @@ impl SortableTable {
             saved_value_scroll: None,
             saved_selected_field: None,
             saved_selected_visible_index: None,
+            detail_wide: false,
         }
     }
 
@@ -1048,6 +1052,18 @@ impl SortableTable {
                 false
             }
         }
+    }
+
+    /// Check if currently viewing a scalar value (not Array/Object) in FieldValue mode
+    pub fn is_at_scalar(&self) -> bool {
+        if let ResultsViewMode::FieldValue { row, field, path, .. } = &self.view_mode {
+            if let Some(cell) = self.get_cell_value(*row, *field) {
+                if let Some(current) = resolve_path(cell, path) {
+                    return !matches!(current, Value::Array(_) | Value::Object(_));
+                }
+            }
+        }
+        false
     }
 
     /// Collapse/go back. Returns false if at top level (should exit edit mode).

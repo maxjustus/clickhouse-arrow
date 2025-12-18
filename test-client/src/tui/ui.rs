@@ -12,10 +12,7 @@ use crate::tui::app::App;
 use crate::tui::session::{
     Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, QueryStatus, SubPane,
 };
-use crate::tui::widgets::table::{
-    NumericStats, PathStats, PathStatsState, PathValueType, ResultsViewMode, SortableTable,
-    UniqueSample,
-};
+use crate::tui::widgets::table::{PathStatsState, PathValueType, ResultsViewMode};
 
 pub fn render(f: &mut Frame, app: &mut App) {
     if app.show_help {
@@ -56,9 +53,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
         f.render_widget(Clear, toast_area);
         f.render_widget(toast, toast_area);
     }
-
-    // Render column stats modal overlay (on top of content, below toasts)
-    render_column_stats_modal_overlay(f, chunks[0], app);
 
     // Render app-level error modal (on top of everything, below toasts)
     if let Some(ref error) = app.session.app_error {
@@ -645,7 +639,15 @@ fn render_selected_query(
 
     let results_focused = matches!(focus, Focus::SubPane(SubPane::Results));
     let results_expanded = is_pane_expanded(SubPane::Results, focused);
-    render_results_pane(f, sub_chunks[1], block, results_focused, results_expanded, mode);
+    render_results_pane(
+        f,
+        sub_chunks[1],
+        block,
+        results_focused,
+        results_expanded,
+        mode,
+        fullscreen,
+    );
 
     let stats_focused = matches!(focus, Focus::SubPane(SubPane::Stats));
     let stats_expanded = is_pane_expanded(SubPane::Stats, focused);
@@ -700,6 +702,7 @@ fn render_results_pane(
     focused: bool,
     expanded: bool,
     mode: Mode,
+    fullscreen: bool,
 ) {
     let style = pane_style(focused, mode);
     let dimmed_style = Style::default().fg(Color::DarkGray);
@@ -742,10 +745,15 @@ fn render_results_pane(
 
             match &table.view_mode {
                 ResultsViewMode::Table => {
-                    // Split view: table left (67%), selected row detail right (33%)
+                    // Split view: table/detail width toggled with Tab
+                    let (table_pct, detail_pct) =
+                        if table.detail_wide { (33, 67) } else { (67, 33) };
                     let chunks = Layout::default()
                         .direction(Direction::Horizontal)
-                        .constraints([Constraint::Percentage(67), Constraint::Percentage(33)])
+                        .constraints([
+                            Constraint::Percentage(table_pct),
+                            Constraint::Percentage(detail_pct),
+                        ])
                         .split(area);
 
                     // Style depends on which panel is focused
@@ -758,42 +766,88 @@ fn render_results_pane(
                     let table_widget = table.render(&title, chunks[0].width, table_style);
                     f.render_widget(table_widget, chunks[0]);
 
-                    // Tell the table how tall the detail panel is for scroll calculations
-                    table.set_detail_visible_height(chunks[1].height);
-                    let detail_widget =
-                        table.render_selected_row_detail(&title, chunks[1].width, detail_style);
-                    f.render_widget(detail_widget, chunks[1]);
+                    // Right side: detail panel with stats at bottom when focused
+                    if table.detail_focused {
+                        let selected_field = table.selected_field;
+                        let v_chunks = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([Constraint::Min(0), Constraint::Length(6)])
+                            .split(chunks[1]);
+
+                        table.set_detail_visible_height(v_chunks[0].height);
+                        let detail_widget = table.render_selected_row_detail(
+                            &title,
+                            v_chunks[0].width,
+                            detail_style,
+                        );
+                        f.render_widget(detail_widget, v_chunks[0]);
+
+                        render_path_stats_panel(
+                            f,
+                            v_chunks[1],
+                            table.get_path_stats(selected_field, &vec![]),
+                            detail_style,
+                        );
+                    } else {
+                        table.set_detail_visible_height(chunks[1].height);
+                        let detail_widget =
+                            table.render_selected_row_detail(&title, chunks[1].width, detail_style);
+                        f.render_widget(detail_widget, chunks[1]);
+                    }
                 }
                 ResultsViewMode::FieldValue { field, path, .. } => {
-                    // Split view: table left (67%), detail with stats right (33%)
                     let field = *field;
                     let path = path.clone();
 
-                    let h_chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Percentage(67), Constraint::Percentage(33)])
-                        .split(area);
+                    if fullscreen {
+                        // Fullscreen: detail only with stats panel at bottom
+                        let v_chunks = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([Constraint::Min(0), Constraint::Length(6)])
+                            .split(area);
 
-                    // Left: table view (dimmed)
-                    let table_widget = table.render_widget(&title, h_chunks[0].width, dimmed_style);
-                    f.render_widget(table_widget, h_chunks[0]);
+                        let detail_widget = table.render_detail(&title, v_chunks[0].width, style);
+                        f.render_widget(detail_widget, v_chunks[0]);
 
-                    // Right: detail view with stats panel at bottom
-                    let v_chunks = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([Constraint::Min(0), Constraint::Length(5)])
-                        .split(h_chunks[1]);
+                        render_path_stats_panel(
+                            f,
+                            v_chunks[1],
+                            table.get_path_stats(field, &path),
+                            style,
+                        );
+                    } else {
+                        // Split view: table/detail width toggled with Tab
+                        let (table_pct, detail_pct) =
+                            if table.detail_wide { (33, 67) } else { (67, 33) };
+                        let h_chunks = Layout::default()
+                            .direction(Direction::Horizontal)
+                            .constraints([
+                                Constraint::Percentage(table_pct),
+                                Constraint::Percentage(detail_pct),
+                            ])
+                            .split(area);
 
-                    let detail_widget = table.render_detail(&title, v_chunks[0].width, style);
-                    f.render_widget(detail_widget, v_chunks[0]);
+                        // Left: table view (dimmed)
+                        let table_widget =
+                            table.render_widget(&title, h_chunks[0].width, dimmed_style);
+                        f.render_widget(table_widget, h_chunks[0]);
 
-                    // Stats panel
-                    render_path_stats_panel(
-                        f,
-                        v_chunks[1],
-                        table.get_path_stats(field, &path),
-                        style,
-                    );
+                        // Right: detail view with stats panel at bottom
+                        let v_chunks = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([Constraint::Min(0), Constraint::Length(6)])
+                            .split(h_chunks[1]);
+
+                        let detail_widget = table.render_detail(&title, v_chunks[0].width, style);
+                        f.render_widget(detail_widget, v_chunks[0]);
+
+                        render_path_stats_panel(
+                            f,
+                            v_chunks[1],
+                            table.get_path_stats(field, &path),
+                            style,
+                        );
+                    }
                 }
             }
         } else if block.running {
@@ -893,25 +947,32 @@ fn render_path_stats_panel(
                 )));
             }
 
-            // Second line: unique value sample
+            // Unique values as vertical list
             if let Some(ref sample) = stats.unique_sample {
                 let truncated = if sample.truncated { "+" } else { "" };
-                let mut spans = vec![Span::styled(
-                    format!("Top of {} unique{}: ", sample.total_unique, truncated),
+                lines.push(Line::from(Span::styled(
+                    format!("{} unique{}", sample.total_unique, truncated),
                     Style::default().fg(Color::Gray),
-                )];
-                for (i, (val, count)) in sample.values.iter().take(5).enumerate() {
-                    if i > 0 {
-                        spans.push(Span::raw(", "));
-                    }
-                    let display_val: String = val.chars().take(15).collect();
-                    let ellipsis = if val.len() > 15 { ".." } else { "" };
-                    spans.push(Span::styled(
-                        format!("\"{}{}\"({})", display_val, ellipsis, count),
-                        Style::default().fg(Color::White),
-                    ));
+                )));
+                // Show up to 2 values (fits in 6-line panel: 2 border + 1 type + 1 header + 2 vals)
+                for (val, count) in sample.values.iter().take(2) {
+                    let display_val: String = val.chars().take(40).collect();
+                    let ellipsis = if val.chars().count() > 40 { ".." } else { "" };
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            format!("\"{}{}\"", display_val, ellipsis),
+                            Style::default().fg(Color::White),
+                        ),
+                        Span::styled(format!(" ({})", count), Style::default().fg(Color::DarkGray)),
+                    ]));
                 }
-                lines.push(Line::from(spans));
+                if sample.values.len() > 2 {
+                    lines.push(Line::from(Span::styled(
+                        format!("  ...{} more", sample.values.len() - 2),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
             }
 
             let para = Paragraph::new(lines);
@@ -1820,11 +1881,12 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 parts.push("C: cancel");
             }
 
-            // Copy hint when in Results pane + Edit mode
+            // Hints when in Results pane + Edit mode
             if matches!(
                 (&app.session.focus, &app.session.mode),
                 (Focus::SubPane(SubPane::Results), Mode::Edit)
             ) {
+                parts.push("Tab: layout");
                 parts.push("y: copy");
             }
 
@@ -1869,6 +1931,7 @@ fn render_help(f: &mut Frame) {
         Line::from("  h/Left/Esc        Collapse / go back"),
         Line::from("  Alt+h/l           Scroll columns"),
         Line::from("  PgUp/PgDown       Page navigation"),
+        Line::from("  Tab               Toggle detail pane width"),
         Line::from("  s                 Sort by column"),
         Line::from("  y                 Copy to clipboard"),
         Line::from("  C                 Cancel running query"),
@@ -1903,171 +1966,4 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
-}
-
-fn bottom_right_rect(percent_width: u16, percent_height: u16, full_area: Rect) -> Rect {
-    let width = (full_area.width * percent_width / 100).max(30);
-    let height = (full_area.height * percent_height / 100).max(12);
-
-    Rect {
-        x: full_area.width.saturating_sub(width + 1),
-        y: full_area.height.saturating_sub(height + 1),
-        width,
-        height,
-    }
-}
-
-fn render_column_stats_modal(
-    f: &mut Frame,
-    area: Rect,
-    _table: &SortableTable,
-    column_name: &str,
-    stats: &PathStats,
-) {
-    let modal_area = bottom_right_rect(25, 25, area);
-    f.render_widget(Clear, modal_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(format!(" {} ", column_name));
-
-    let inner = block.inner(modal_area);
-    f.render_widget(block, modal_area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(0)])
-        .split(inner);
-
-    let null_pct = if stats.total_rows > 0 {
-        (stats.null_count as f64 / stats.total_rows as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    let header_text = format!(
-        "Rows: {}  Nulls: {} ({:.1}%)\nType: {:?}",
-        stats.total_rows, stats.null_count, null_pct, stats.value_type,
-    );
-
-    let header_para = Paragraph::new(header_text).style(Style::default().fg(Color::Gray));
-    f.render_widget(header_para, chunks[0]);
-
-    if let Some(ref num) = stats.numeric {
-        render_numeric_column_viz(f, chunks[1], num);
-    } else if let Some(ref sample) = stats.unique_sample {
-        render_categorical_column_viz(f, chunks[1], sample);
-    } else {
-        let placeholder =
-            Paragraph::new("No data to visualize").style(Style::default().fg(Color::DarkGray));
-        f.render_widget(placeholder, chunks[1]);
-    }
-}
-
-fn render_numeric_column_viz(f: &mut Frame, area: Rect, num_stats: &NumericStats) {
-    let sparkline = sparkline_f64(&num_stats.values);
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("Min: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:.2}", num_stats.min), Style::default().fg(Color::White)),
-            Span::raw("  "),
-            Span::styled("Max: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:.2}", num_stats.max), Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::styled("Avg: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:.2}", num_stats.avg()), Style::default().fg(Color::Cyan)),
-            Span::raw("  "),
-            Span::styled("Distribution: ", Style::default().fg(Color::Gray)),
-            Span::styled(sparkline, Style::default().fg(Color::Green)),
-        ]),
-    ];
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
-}
-
-fn render_categorical_column_viz(f: &mut Frame, area: Rect, unique_sample: &UniqueSample) {
-    let mut lines = vec![Line::from(Span::styled(
-        format!("Unique values: {}", unique_sample.total_unique),
-        Style::default().fg(Color::Gray),
-    ))];
-
-    let max_count = unique_sample.values.iter().map(|(_, c)| c).max().unwrap_or(&1);
-
-    for (val, count) in unique_sample.values.iter().take(5) {
-        let bar_width =
-            if *max_count > 0 { ((*count as f64 / *max_count as f64) * 20.0) as usize } else { 0 };
-        let bar = "█".repeat(bar_width);
-
-        let display_val: String = val.chars().take(40).collect();
-        let ellipsis = if val.len() > 40 { ".." } else { "" };
-
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:40}{}: ", display_val, ellipsis),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled(bar, Style::default().fg(Color::Cyan)),
-            Span::raw(format!(" {}", count)),
-        ]));
-    }
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
-}
-
-fn render_column_stats_modal_overlay(f: &mut Frame, area: Rect, app: &App) {
-    let session = &app.session;
-
-    let block = if let Some(idx) = session.selected_card {
-        // Check running query first, then current block
-        session.running_queries.get(&idx).or(session.current_block.as_ref())
-    } else {
-        session.current_block.as_ref()
-    };
-
-    if let Some(block) = block {
-        if let Some(table) = block.results() {
-            if table.header_focused {
-                let column_name: &str =
-                    table.columns.get(table.focused_col).map(String::as_str).unwrap_or("Unknown");
-
-                match table.get_path_stats(table.focused_col, &vec![]) {
-                    PathStatsState::Ready(stats) => {
-                        // Skip if only one unique value (no variation to show)
-                        if let Some(ref sample) = stats.unique_sample {
-                            if sample.total_unique <= 1 {
-                                return;
-                            }
-                        }
-
-                        // Skip if no visualizable data (Array, Object, AllNull types)
-                        if stats.numeric.is_none() && stats.unique_sample.is_none() {
-                            return;
-                        }
-
-                        render_column_stats_modal(f, area, table, column_name, stats);
-                    }
-                    PathStatsState::Computing => {
-                        let modal_area = bottom_right_rect(25, 25, area);
-                        f.render_widget(Clear, modal_area);
-
-                        let loading = Paragraph::new("Computing stats...")
-                            .style(Style::default().fg(Color::Yellow))
-                            .block(
-                                Block::default()
-                                    .borders(Borders::ALL)
-                                    .border_style(Style::default().fg(Color::Yellow))
-                                    .title(" Column Stats "),
-                            );
-                        f.render_widget(loading, modal_area);
-                    }
-                    PathStatsState::NotStarted => {}
-                }
-            }
-        }
-    }
 }

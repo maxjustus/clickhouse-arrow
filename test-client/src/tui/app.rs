@@ -770,13 +770,13 @@ impl App {
         }
 
         // Handle fullscreen exit before block borrow to avoid borrow conflict
+        // Don't return - let collapse handler run too so we exit fullscreen AND pop a level
         if matches!(pane, SubPane::Results)
             && matches!(key.code, KeyCode::Left | KeyCode::Char('h'))
             && !key.modifiers.contains(KeyModifiers::ALT)
             && self.session.fullscreen
         {
             self.session.fullscreen = false;
-            return Ok(());
         }
 
         let block = match self.session.displayed_block_mut() {
@@ -854,8 +854,13 @@ impl App {
                                 }
                             }
                             (KeyCode::Right | KeyCode::Char('l'), false) => {
-                                if !table.expand() && !self.session.fullscreen {
-                                    // Can't expand further in table, go fullscreen
+                                if table.expand() {
+                                    // Expanded - check if we landed on a scalar
+                                    if table.is_at_scalar() && !self.session.fullscreen {
+                                        self.session.fullscreen = true;
+                                    }
+                                } else if !self.session.fullscreen {
+                                    // Can't expand (already at scalar), go fullscreen
                                     self.session.fullscreen = true;
                                 }
                             }
@@ -898,6 +903,10 @@ impl App {
                             (KeyCode::Char(']') | KeyCode::Char('J'), _) => table.next_detail_row(),
                             (KeyCode::Char('{'), _) => table.prev_detail_row_jump(ROW_JUMP_COUNT),
                             (KeyCode::Char('}'), _) => table.next_detail_row_jump(ROW_JUMP_COUNT),
+                            // Toggle detail pane width
+                            (KeyCode::Tab, _) => {
+                                table.detail_wide = !table.detail_wide;
+                            }
                             _ => {}
                         }
                     }

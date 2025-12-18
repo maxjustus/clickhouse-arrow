@@ -813,18 +813,22 @@ impl StatsData {
         bytes_written: u64,
         elapsed_ns: u64,
     ) {
-        self.rows_read = rows;
-        self.bytes_read = bytes;
+        // Progress values are deltas from ClickHouse protocol and must be accumulated
+        self.rows_read += rows;
+        self.bytes_read += bytes;
 
         // Track max values
-        self.max_rows_read = self.max_rows_read.max(rows);
-        self.max_bytes_read = self.max_bytes_read.max(bytes);
+        self.max_rows_read = self.max_rows_read.max(self.rows_read);
+        self.max_bytes_read = self.max_bytes_read.max(self.bytes_read);
 
+        // Accumulate written values as well
+        self.rows_written += rows_written;
+        self.bytes_written += bytes_written;
+
+        // Update total rows estimate (not a delta)
         if total_rows.is_some() {
             self.total_rows = total_rows;
         }
-        self.rows_written = rows_written;
-        self.bytes_written = bytes_written;
         self.elapsed_ns = elapsed_ns;
     }
 
