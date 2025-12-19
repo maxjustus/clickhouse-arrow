@@ -19,8 +19,9 @@ pub enum SortOrder {
 /// A segment in a navigation path into nested JSON values
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathSegment {
-    Index(usize), // Array index: [0], [1], ...
-    Key(String),  // Object key or map key
+    Index(usize),   // Array index: [0], [1], ...
+    Key(String),    // Object key
+    MapKey(String), // Map key (navigates to the value in a key-value pair)
 }
 
 /// Full navigation path into a nested value
@@ -329,6 +330,22 @@ fn resolve_path<'a>(value: &'a Value, path: &ValuePath) -> Option<&'a Value> {
         current = match segment {
             PathSegment::Index(i) => current.as_array()?.get(*i)?,
             PathSegment::Key(k) => current.as_object()?.get(k)?,
+            PathSegment::MapKey(key) => {
+                // Find the map entry with this key and return its value
+                let arr = current.as_array()?;
+                let entry = arr.iter().find(|pair| {
+                    if let Value::Array(kv) = pair
+                        && kv.len() == 2
+                    {
+                        let k = format_cell_value(&kv[0], 100);
+                        k == *key
+                    } else {
+                        false
+                    }
+                })?;
+                // Return the value (index 1) of the key-value pair
+                entry.as_array()?.get(1)?
+            }
         };
     }
     Some(current)
@@ -344,6 +361,7 @@ fn format_breadcrumb(field_name: &str, path: &ValuePath) -> String {
         match seg {
             PathSegment::Index(i) => parts.push(format!("[{}]", i)),
             PathSegment::Key(k) => parts.push(k.clone()),
+            PathSegment::MapKey(k) => parts.push(format!("{{{}}}", k)),
         }
     }
     parts.join(" > ")
@@ -992,13 +1010,14 @@ impl SortableTable {
                 {
                     match current {
                         Value::Array(arr) if is_map_like(arr) => {
-                            // Map-like: drill into value (index 1 of the pair)
+                            // Map-like: drill into value using the key
                             if let Some(pair) = arr.get(selected)
                                 && let Value::Array(kv) = pair
                                 && kv.len() == 2
                             {
-                                new_path.push(PathSegment::Index(selected));
-                                new_path.push(PathSegment::Index(1));
+                                // Extract key as string for the path
+                                let key_str = format_cell_value(&kv[0], 100);
+                                new_path.push(PathSegment::MapKey(key_str));
                                 let stats_path = new_path.clone();
                                 self.view_mode = ResultsViewMode::FieldValue {
                                     row,

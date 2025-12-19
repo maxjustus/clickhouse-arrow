@@ -17,6 +17,7 @@ use crate::tui::session::{
     Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, ROW_JUMP_COUNT, Session, SubPane,
     ViewState,
 };
+use crate::tui::sql_format::format_sql;
 use crate::tui::ui::render;
 use crate::tui::widgets::table::ResultsViewMode;
 
@@ -166,12 +167,7 @@ impl App {
                             self.session.new_query.insert_str(&text);
                         } else {
                             // From other views - format and replace
-                            let formatted = sqlformat::format(
-                                &text,
-                                &sqlformat::QueryParams::None,
-                                &sqlformat::FormatOptions::default(),
-                            );
-                            let formatted = format_clickhouse(&formatted);
+                            let formatted = format_sql(&text);
                             self.set_new_query_text(&formatted);
                             self.session.focus = Focus::QueryEditor;
                         }
@@ -198,6 +194,34 @@ impl App {
             && !key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N'))
         {
+            // Cancel any running queries first
+            let running: Vec<_> = self
+                .session
+                .running_queries
+                .iter()
+                .filter(|(_, block)| block.running && !block.cancel_requested)
+                .map(|(hist_idx, _)| *hist_idx)
+                .collect();
+
+            if !running.is_empty() {
+                for hist_idx in &running {
+                    if let Some(block) = self.session.running_queries.get_mut(hist_idx) {
+                        block.cancel_requested = true;
+                    }
+                    if let Some((&query_id, _)) =
+                        self.query_map.iter().find(|&(_, &idx)| idx == *hist_idx)
+                    {
+                        let _ = self.cmd_tx.send(QueryCommand::Cancel { query_id }).await;
+                    }
+                }
+                let msg = if running.len() == 1 {
+                    "Cancelled running query".to_string()
+                } else {
+                    format!("Cancelled {} running queries", running.len())
+                };
+                self.session.show_toast(msg);
+            }
+
             self.show_help = false;
 
             // Clear editor first
@@ -462,13 +486,7 @@ impl App {
             // Format SQL with Ctrl+L
             (KeyCode::Char('l'), true, _) => {
                 let sql = self.session.new_query.lines().join("\n");
-                let formatted = sqlformat::format(
-                    &sql,
-                    &sqlformat::QueryParams::None,
-                    &sqlformat::FormatOptions::default(),
-                );
-                // ClickHouse-specific: format SETTINGS clause
-                let formatted = format_clickhouse(&formatted);
+                let formatted = format_sql(&sql);
                 self.set_new_query_text(&formatted);
                 self.session.show_toast("SQL formatted");
             }
@@ -1401,33 +1419,4 @@ impl App {
             }
         }
     }
-}
-
-/// ClickHouse keywords that should start on their own line
-const CLICKHOUSE_NEWLINE_KEYWORDS: &[&str] =
-    &["PREWHERE", "GLOBAL", "FINAL", "SAMPLE", "ARRAY JOIN"];
-
-/// Apply ClickHouse-specific formatting after sqlformat
-fn format_clickhouse(sql: &str) -> String {
-    let mut result = sql.to_string();
-
-    // Put certain keywords on their own line
-    for kw in CLICKHOUSE_NEWLINE_KEYWORDS {
-        let pattern = format!(" {} ", kw);
-        let replacement = format!("\n{} ", kw);
-        result = result.replace(&pattern, &replacement);
-    }
-
-    // SETTINGS gets special treatment: each setting on its own indented line
-    if let Some(pos) = result.find(" SETTINGS ") {
-        let (before, rest) = result.split_at(pos);
-        let settings_part = &rest[10..]; // skip " SETTINGS "
-
-        let settings: Vec<&str> = settings_part.split(',').map(|s| s.trim()).collect();
-        let formatted_settings = settings.join(",\n  ");
-
-        result = format!("{}\nSETTINGS\n  {}", before, formatted_settings);
-    }
-
-    result
 }

@@ -353,50 +353,54 @@ async fn execute_query(
         // Send query started event for this sub-query
         let _ = event_tx.send(AppEvent::QueryStarted { query_id, sub_idx }).await;
 
-        // Execute this statement
-        let stream = match client
-            .read()
-            .await
-            .query_raw_with_settings::<clickhouse_arrow::QueryParams, Settings>(
-                sql.clone(),
-                None,
-                Some(settings.clone()),
-                qid,
-            )
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                let error_msg = e.to_string();
+        // Execute this statement (retry once on connection error after reconnect)
+        let stream = loop {
+            match client
+                .read()
+                .await
+                .query_raw_with_settings::<clickhouse_arrow::QueryParams, Settings>(
+                    sql.clone(),
+                    None,
+                    Some(settings.clone()),
+                    qid,
+                )
+                .await
+            {
+                Ok(s) => break s,
+                Err(e) => {
+                    let error_msg = e.to_string();
 
-                // Check if this is a connection error
-                if is_connection_error(&error_msg) {
-                    let _ =
-                        event_tx.send(AppEvent::ConnectionLost { error: error_msg.clone() }).await;
-                    let new_client = reconnect_with_backoff(params, event_tx).await;
-                    *client.write().await = new_client;
-                }
+                    // Check if this is a connection error - reconnect and retry
+                    if is_connection_error(&error_msg) {
+                        let _ = event_tx
+                            .send(AppEvent::ConnectionLost { error: error_msg.clone() })
+                            .await;
+                        let new_client = reconnect_with_backoff(params, event_tx).await;
+                        *client.write().await = new_client;
+                        continue; // Retry the query
+                    }
 
-                // Send error for this sub-query
-                let _ = event_tx
-                    .send(AppEvent::QueryError { query_id, sub_idx, error: error_msg.clone() })
+                    // Non-connection error - report and return
+                    let _ = event_tx
+                        .send(AppEvent::QueryError { query_id, sub_idx, error: error_msg.clone() })
+                        .await;
+
+                    // Finish cache with error and return (stop on first error)
+                    finish_cache(
+                        cache_writer,
+                        cache_writers,
+                        query_store,
+                        query_id,
+                        start_time,
+                        Some(error_msg),
+                        event_tx,
+                    )
                     .await;
 
-                // Finish cache with error and return (stop on first error)
-                finish_cache(
-                    cache_writer,
-                    cache_writers,
-                    query_store,
-                    query_id,
-                    start_time,
-                    Some(error_msg),
-                    event_tx,
-                )
-                .await;
-
-                qid_map.write().await.remove(&qid);
-                task_map.write().await.remove(&query_id);
-                return;
+                    qid_map.write().await.remove(&qid);
+                    task_map.write().await.remove(&query_id);
+                    return;
+                }
             }
         };
 

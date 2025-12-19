@@ -3,6 +3,7 @@ mod backend;
 mod history;
 pub mod query_store;
 mod session;
+mod sql_format;
 mod sql_split;
 mod ui;
 mod widgets;

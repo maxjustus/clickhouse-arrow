@@ -12,6 +12,7 @@ use crate::tui::app::App;
 use crate::tui::session::{
     Focus, LogsViewMode, MetricsViewMode, Mode, QueryBlock, QueryStatus, SubPane,
 };
+use crate::tui::sql_format::format_sql;
 use crate::tui::widgets::table::{PathStatsState, PathValueType, ResultsViewMode};
 
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -670,11 +671,7 @@ fn render_sql_pane(
     let expand_char = if expanded { "▼" } else { "▶" };
 
     // Format SQL for display
-    let formatted_sql = sqlformat::format(
-        block.sql(),
-        &sqlformat::QueryParams::None,
-        &sqlformat::FormatOptions::default(),
-    );
+    let formatted_sql = format_sql(block.sql());
 
     if expanded {
         let sql_block = Block::default()
