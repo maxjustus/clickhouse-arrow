@@ -257,6 +257,17 @@ impl App {
         // Global keys work in all modes
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // In query editor with text: clear input instead of quitting
+                if self.session.focus == Focus::QueryEditor {
+                    let has_text = !self.session.new_query.lines().join("").is_empty();
+                    if has_text {
+                        self.session.new_query = tui_textarea::TextArea::default();
+                        self.session
+                            .new_query
+                            .set_placeholder_text("Enter SQL query... (Cmd+Enter to execute)");
+                        return Ok(());
+                    }
+                }
                 self.should_quit = true;
                 return Ok(());
             }
