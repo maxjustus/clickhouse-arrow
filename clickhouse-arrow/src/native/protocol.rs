@@ -292,14 +292,14 @@ pub struct LogData {
 impl LogData {
     fn update_value(&mut self, name: &str, value: Value, type_: &Type) -> Result<()> {
         match name {
-            "event_time" => self.time = value.to_string(),
+            "event_time" => self.time = value.to_value(type_)?,
             "event_time_microseconds" => self.time_microseconds = value.to_value(type_)?,
-            "host_name" => self.host_name = value.to_string(),
-            "query_id" => self.query_id = value.to_string(),
+            "host_name" => self.host_name = value.to_value(type_)?,
+            "query_id" => self.query_id = value.to_value(type_)?,
             "thread_id" => self.thread_id = value.to_value(type_)?,
             "priority" => self.priority = value.to_value(type_)?,
-            "source" => self.source = value.to_string(),
-            "text" => self.text = value.to_string(),
+            "source" => self.source = value.to_value(type_)?,
+            "text" => self.text = value.to_value(type_)?,
             _ => {}
         }
         Ok(())
