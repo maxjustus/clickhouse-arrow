@@ -166,10 +166,12 @@ impl App {
                             // Already editing - normal paste at cursor
                             self.session.new_query.insert_str(&text);
                         } else {
-                            // From other views - format and replace
+                            // From other views - format, set, and execute immediately
                             let formatted = format_sql(&text);
                             self.set_new_query_text(&formatted);
-                            self.session.focus = Focus::QueryEditor;
+                            self.execute_current_query().await;
+                            // Stay in history view to see all queries
+                            self.session.focus = Focus::HistoryView;
                         }
                     }
                     _ => {}
@@ -413,71 +415,7 @@ impl App {
             }
             // Execute query
             (KeyCode::Enter, true, _) | (KeyCode::Enter, _, true) => {
-                let sql = self.session.new_query.lines().join("\n");
-                if sql.trim().is_empty() {
-                    return Ok(());
-                }
-
-                // Save to command history
-                let _ = self.history.add(sql.clone(), None);
-                self.history.reset_nav();
-
-                // Create history entry (metadata)
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let hash = QueryStore::hash_sql(&sql);
-                let id = format!("{}-{}", timestamp, hash);
-                let sql_preview: String = sql.chars().take(500).collect();
-
-                // Split SQL into statements for multi-query support
-                let statements = crate::tui::sql_split::split_statements(&sql);
-
-                let entry = QueryStoreEntry {
-                    id: id.clone(),
-                    hash,
-                    sql_preview,
-                    timestamp,
-                    duration_ms: None,
-                    row_count: 0,
-                    error: None,
-                    rows_read: None,
-                    bytes_read: None,
-                    peak_memory: None,
-                    sub_query_count: statements.len(),
-                };
-
-                // Insert entry at end of history (newest last)
-                let hist_idx = self.session.add_history_entry(entry);
-
-                // Create QueryBlock for execution (multi-query if needed)
-                let mut block = if statements.len() > 1 {
-                    QueryBlock::new_multi(statements.clone())
-                } else {
-                    QueryBlock::new(sql.clone())
-                };
-                block.running = true;
-                self.session.running_queries.insert(hist_idx, block);
-
-                // Select this new entry and show it
-                self.session.selected_card = Some(hist_idx);
-                self.session.focus = Focus::SubPane(SubPane::Results);
-                self.session.mode = Mode::Navigation;
-
-                // Clear editor
-                self.session.new_query = tui_textarea::TextArea::default();
-                self.session
-                    .new_query
-                    .set_placeholder_text("Enter SQL query... (Cmd+Enter to execute)");
-
-                // Send execute command
-                let query_id = self.next_query_id;
-                self.next_query_id += 1;
-                self.query_map.insert(query_id, hist_idx);
-
-                let cmd = QueryCommand::Execute { query_id, statements };
-                let _ = self.cmd_tx.send(cmd).await;
+                self.execute_current_query().await;
             }
             // Navigate to previous history entry
             (KeyCode::Char('p'), true, _) => {
@@ -747,6 +685,72 @@ impl App {
         self.session.new_query.insert_str(text);
         // reset cursor to start
         self.session.new_query.move_cursor(tui_textarea::CursorMove::Jump(0, 0));
+    }
+
+    async fn execute_current_query(&mut self) {
+        let sql = self.session.new_query.lines().join("\n");
+        if sql.trim().is_empty() {
+            return;
+        }
+
+        // Save to command history
+        let _ = self.history.add(sql.clone(), None);
+        self.history.reset_nav();
+
+        // Create history entry (metadata)
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let hash = QueryStore::hash_sql(&sql);
+        let id = format!("{}-{}", timestamp, hash);
+        let sql_preview: String = sql.chars().take(500).collect();
+
+        // Split SQL into statements for multi-query support
+        let statements = crate::tui::sql_split::split_statements(&sql);
+
+        let entry = QueryStoreEntry {
+            id: id.clone(),
+            hash,
+            sql_preview,
+            timestamp,
+            duration_ms: None,
+            row_count: 0,
+            error: None,
+            rows_read: None,
+            bytes_read: None,
+            peak_memory: None,
+            sub_query_count: statements.len(),
+        };
+
+        // Insert entry at end of history (newest last)
+        let hist_idx = self.session.add_history_entry(entry);
+
+        // Create QueryBlock for execution (multi-query if needed)
+        let mut block = if statements.len() > 1 {
+            QueryBlock::new_multi(statements.clone())
+        } else {
+            QueryBlock::new(sql.clone())
+        };
+        block.running = true;
+        self.session.running_queries.insert(hist_idx, block);
+
+        // Select this new entry and show it
+        self.session.selected_card = Some(hist_idx);
+        self.session.focus = Focus::SubPane(SubPane::Results);
+        self.session.mode = Mode::Navigation;
+
+        // Clear editor
+        self.session.new_query = tui_textarea::TextArea::default();
+        self.session.new_query.set_placeholder_text("Enter SQL query... (Cmd+Enter to execute)");
+
+        // Send execute command
+        let query_id = self.next_query_id;
+        self.next_query_id += 1;
+        self.query_map.insert(query_id, hist_idx);
+
+        let cmd = QueryCommand::Execute { query_id, statements };
+        let _ = self.cmd_tx.send(cmd).await;
     }
 
     async fn cancel_selected_query(&mut self) {
