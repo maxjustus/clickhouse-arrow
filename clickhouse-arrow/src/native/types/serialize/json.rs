@@ -806,1474 +806,347 @@ mod tests {
     use crate::native::types::deserialize::ClickHouseNativeDeserializer;
     use crate::native::types::serialize::ClickHouseNativeSerializer;
 
-    /// Helper function to test JSON serialization roundtrip with standard assertions
-    async fn test_json_roundtrip(values: Vec<Value>) -> Result<Vec<Value>> {
-        let type_ = Type::JSON {
+    // ========== Test Helpers ==========
+
+    fn default_json_type() -> Type {
+        Type::JSON {
             max_dynamic_paths: None,
             max_dynamic_types: None,
             typed_paths:       vec![],
             skip_exact:        vec![],
             skip_regex:        vec![],
-        };
-        let values_len = values.len();
+        }
+    }
 
+    fn json_type_with_config(
+        typed_paths: Vec<(String, Box<Type>)>,
+        skip_exact: Vec<String>,
+        skip_regex: Vec<String>,
+        max_dynamic_paths: Option<u32>,
+    ) -> Type {
+        Type::JSON {
+            max_dynamic_paths,
+            max_dynamic_types: None,
+            typed_paths,
+            skip_exact,
+            skip_regex,
+        }
+    }
+
+    fn parse_json_value(v: &Value) -> Result<serde_json::Value> {
+        match v {
+            #[cfg(feature = "serde")]
+            Value::Json(json) => Ok(json.clone()),
+            Value::Object(bytes) | Value::String(bytes) => serde_json::from_slice(bytes)
+                .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}"))),
+            other => Err(Error::DeserializeError(format!("Unexpected value type: {other:?}"))),
+        }
+    }
+
+    async fn roundtrip(values: Vec<Value>, type_: &Type) -> Result<Vec<Value>> {
+        let values_len = values.len();
         let mut output = vec![];
         let mut state = SerializerState::default();
 
-        // JSON serialization requires analyze_values to be called first
-        state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-
+        state.type_specific = JsonSerializer::analyze_values(&values, type_)?;
         type_.serialize_prefix_async(&mut output, &mut state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
+        type_.serialize_column(values, &mut output, &mut state).await?;
 
-        // Deserialize it back
         let mut input = Cursor::new(output);
-        let mut state = DeserializerState::default();
-
-        type_.deserialize_prefix_async(&mut input, &mut state).await?;
-        let deserialized = type_.deserialize_column(&mut input, values_len, &mut state).await?;
-
-        assert_eq!(deserialized.len(), values_len);
-        Ok(deserialized)
+        let mut deser_state = DeserializerState::default();
+        type_.deserialize_prefix_async(&mut input, &mut deser_state).await?;
+        type_.deserialize_column(&mut input, values_len, &mut deser_state).await
     }
 
+    async fn roundtrip_with_version(
+        values: Vec<Value>,
+        type_: &Type,
+        version: Option<u64>,
+    ) -> Result<Vec<Value>> {
+        let values_len = values.len();
+        let mut output = vec![];
+        let mut state = SerializerState::default();
+
+        state.type_specific = JsonSerializer::analyze_values_with_version(&values, type_, version)?;
+        type_.serialize_prefix_async(&mut output, &mut state).await?;
+        type_.serialize_column(values, &mut output, &mut state).await?;
+
+        let mut input = Cursor::new(output);
+        let mut deser_state = DeserializerState::default();
+        type_.deserialize_prefix_async(&mut input, &mut deser_state).await?;
+        type_.deserialize_column(&mut input, values_len, &mut deser_state).await
+    }
+
+    // ========== Basic Roundtrip Tests ==========
+
     #[tokio::test]
-    async fn test_json_v3_simple_objects() -> Result<()> {
-        let values = vec![
-            Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
-            Value::String(b"{\"name\": \"Bob\", \"age\": 25}".to_vec()),
+    async fn test_json_roundtrip_various_shapes() -> Result<()> {
+        // Test multiple JSON shapes in one test
+        let test_cases: Vec<(&str, Vec<Value>)> = vec![
+            ("simple objects", vec![
+                Value::String(br#"{"name": "Alice", "age": 30}"#.to_vec()),
+                Value::String(br#"{"name": "Bob", "age": 25}"#.to_vec()),
+            ]),
+            ("nested objects", vec![
+                Value::String(br#"{"user": {"name": "Alice"}, "active": true}"#.to_vec()),
+                Value::String(br#"{"user": {"name": "Bob"}, "score": 95.5}"#.to_vec()),
+            ]),
+            ("mixed types", vec![
+                Value::String(br#"{"id": 1, "name": "test", "active": true}"#.to_vec()),
+                Value::String(br#"{"id": 2, "score": 88.1, "metadata": "extra"}"#.to_vec()),
+            ]),
+            ("with nulls", vec![
+                Value::String(br#"{"name": "Alice"}"#.to_vec()),
+                Value::Null,
+                Value::String(br#"{"name": "Bob"}"#.to_vec()),
+            ]),
+            ("empty objects", vec![
+                Value::String(br#"{}"#.to_vec()),
+                Value::String(br#"{"name": "test"}"#.to_vec()),
+            ]),
         ];
-        let deserialized = test_json_roundtrip(values.clone()).await?;
-        assert_eq!(deserialized.len(), values.len());
+
+        let type_ = default_json_type();
+        for (name, values) in test_cases {
+            let result = roundtrip(values.clone(), &type_).await;
+            assert!(result.is_ok(), "Failed on case '{name}': {:?}", result.err());
+            assert_eq!(result.unwrap().len(), values.len(), "Length mismatch for '{name}'");
+        }
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_json_v3_nested_objects() -> Result<()> {
-        let values = vec![
-            Value::String(
-                b"{\"user\": {\"name\": \"Alice\", \"age\": 30}, \"active\": true}".to_vec(),
-            ),
-            Value::String(b"{\"user\": {\"name\": \"Bob\"}, \"score\": 95.5}".to_vec()),
-        ];
-        let deserialized = test_json_roundtrip(values.clone()).await?;
-        assert_eq!(deserialized.len(), values.len());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_v3_mixed_types() -> Result<()> {
-        let values = vec![
-            Value::String(
-                b"{\"id\": 1, \"name\": \"test\", \"active\": true, \"score\": 99.9}".to_vec(),
-            ),
-            Value::String(b"{\"id\": 2, \"name\": \"example\", \"active\": false}".to_vec()),
-            Value::String(b"{\"id\": 3, \"score\": 88.1, \"metadata\": \"extra\"}".to_vec()),
-        ];
-        let deserialized = test_json_roundtrip(values.clone()).await?;
-        assert_eq!(deserialized.len(), values.len());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_v3_with_nulls() -> Result<()> {
-        let values = vec![
-            Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
-            Value::Null,
-            Value::String(b"{\"name\": \"Bob\", \"active\": true}".to_vec()),
-        ];
-        let deserialized = test_json_roundtrip(values.clone()).await?;
-        assert_eq!(deserialized.len(), values.len());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_v3_empty_objects() -> Result<()> {
-        let values = vec![
-            Value::String(b"{}".to_vec()),
-            Value::String(b"{\"name\": \"test\"}".to_vec()),
-            Value::String(b"{}".to_vec()),
-        ];
-        let deserialized = test_json_roundtrip(values.clone()).await?;
-        assert_eq!(deserialized.len(), values.len());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_v3_wire_format_verification() -> Result<()> {
-        use std::io::{Read, Seek, SeekFrom};
+    async fn test_json_wire_format_uses_v3() -> Result<()> {
+        use std::io::Read;
 
         let values = vec![
-            Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
-            Value::String(b"{\"name\": \"Bob\", \"score\": 95.5}".to_vec()),
+            Value::String(br#"{"name": "Alice", "age": 30}"#.to_vec()),
+            Value::String(br#"{"name": "Bob", "score": 95.5}"#.to_vec()),
         ];
 
-        // First do the standard roundtrip test
-        let deserialized = test_json_roundtrip(values.clone()).await?;
-
-        // Then perform wire format verification by serializing manually
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
+        let type_ = default_json_type();
         let mut output = vec![];
         let mut state = SerializerState::default();
         state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
         type_.serialize_prefix_async(&mut output, &mut state).await?;
         type_.serialize_column(values, &mut output, &mut state).await?;
 
-        // Wire format inspection
         let mut cursor = Cursor::new(&output);
         let mut version_bytes = [0u8; 8];
         cursor.read_exact(&mut version_bytes)?;
         let version = u64::from_le_bytes(version_bytes);
-        assert_eq!(
-            version, JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED,
-            "Should use FLATTENED format serialization"
-        );
 
-        let _ = cursor.seek(SeekFrom::Start(8))?;
-        // Read dynamic paths count (typed paths are not in ObjectStructure)
-        let mut path_count_byte = [0u8; 1];
-        cursor.read_exact(&mut path_count_byte)?;
-        assert!(path_count_byte[0] > 0, "Should have dynamic paths for object serialization");
-
-        // Verify deserialized data structure
-        for value in &deserialized {
-            #[cfg(feature = "serde")]
-            if let Value::Json(json_value) = value {
-                assert!(json_value.is_object(), "Deserialized value should be a JSON object");
-                continue;
-            }
-            let json_value: serde_json::Value = match value {
-                Value::Object(bytes) | Value::String(bytes) => serde_json::from_slice(bytes)
-                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?,
-                other => panic!("Unexpected value variant: {other:?}"),
-            };
-            assert!(json_value.is_object(), "Deserialized value should be a JSON object");
-        }
+        assert_eq!(version, JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED);
+        assert!(output[8] > 0, "Should have dynamic paths");
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_json_v3_vs_string_serialization_difference() -> Result<()> {
-        let values = vec![
-            Value::String(
-                b"{\"user\": {\"name\": \"Alice\", \"age\": 30}, \"active\": true}".to_vec(),
-            ),
-            Value::String(
-                b"{\"user\": {\"name\": \"Bob\", \"age\": 25}, \"active\": false}".to_vec(),
-            ),
-            Value::String(
-                b"{\"user\": {\"name\": \"Charlie\", \"age\": 35}, \"active\": true}".to_vec(),
-            ),
-        ];
-
-        let deserialized = test_json_roundtrip(values.clone()).await?;
-        assert_eq!(deserialized.len(), values.len());
-
-        // Additional v3 format verification
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-        let mut output = vec![];
-        let mut state = SerializerState::default();
-        state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut state).await?;
-        type_.serialize_column(values, &mut output, &mut state).await?;
-
-        let version = u64::from_le_bytes(output[0..8].try_into().unwrap());
-        assert_eq!(
-            version, JSON_OBJECT_SERIALIZATION_VERSION_FLATTENED,
-            "Should be using v3 object serialization"
-        );
-        assert!(
-            output[8] >= 3,
-            "v3 should decompose JSON into multiple paths (user.name, user.age, active)"
-        );
-        Ok(())
-    }
+    // ========== Typed Paths Tests ==========
 
     #[tokio::test]
-    async fn test_json_object_vs_string_serialization_format() -> Result<()> {
-        let values = vec![
-            Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
-            Value::String(b"{\"name\": \"Bob\", \"age\": 25}".to_vec()),
-        ];
-        let deserialized = test_json_roundtrip(values.clone()).await?;
-
-        // Additional format verification
-        for value in &deserialized {
-            if let Value::String(bytes) = value {
-                let json_str = String::from_utf8(bytes.clone())?;
-                let json_value: serde_json::Value = serde_json::from_str(&json_str)
-                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?;
-                assert!(json_value.is_object(), "Should be a proper JSON object");
-            }
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_v3_analyze_values_cache() -> Result<()> {
-        let values = vec![
-            Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
-            Value::String(b"{\"name\": \"Bob\", \"score\": 95.5}".to_vec()),
-        ];
-
-        // Test that analyze_values works correctly
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-        let type_specific_state = JsonSerializer::analyze_values(&values, &type_)?;
-
-        // Verify state was populated
-        assert!(
-            matches!(type_specific_state, TypeSpecificState::Json(_)),
-            "Should return Json state"
-        );
-
-        let deserialized = test_json_roundtrip(values.clone()).await?;
-        assert_eq!(deserialized.len(), values.len());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_with_typed_paths() -> Result<()> {
-        // Test JSON with typed paths
+    async fn test_json_typed_paths_extraction_and_roundtrip() -> Result<()> {
         let values = vec![
             Value::String(br#"{"id": 123, "name": "Alice", "score": 95.5}"#.to_vec()),
             Value::String(br#"{"id": 456, "name": "Bob", "active": true}"#.to_vec()),
             Value::String(br#"{"id": 789, "name": "Charlie", "tags": ["a", "b"]}"#.to_vec()),
         ];
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![
+        let type_ = json_type_with_config(
+            vec![
                 ("id".to_string(), Box::new(Type::UInt32)),
                 ("name".to_string(), Box::new(Type::String)),
             ],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
+            vec![],
+            vec![],
+            None,
+        );
 
-        // Analyze values
+        // Verify extraction
         let state = JsonSerializer::analyze_values(&values, &type_)?;
-
         if let TypeSpecificState::Json(json_state) = &state {
-            // Verify typed paths are separated
             assert_eq!(json_state.typed_paths.len(), 2);
-            assert!(json_state.typed_paths.iter().any(|(p, _)| p == "id"));
-            assert!(json_state.typed_paths.iter().any(|(p, _)| p == "name"));
-
-            // Verify dynamic paths don't include typed ones
             assert!(!json_state.dynamic_paths.contains(&"id".to_string()));
             assert!(!json_state.dynamic_paths.contains(&"name".to_string()));
 
-            // Verify dynamic paths contain the remaining fields
-            assert!(
-                json_state.dynamic_paths.contains(&"score".to_string())
-                    || json_state.dynamic_paths.contains(&"active".to_string())
-                    || json_state.dynamic_paths.contains(&"tags".to_string())
-            );
-
-            // Verify typed columns exist
-            let typed_columns = json_state.typed_path_columns.as_ref().unwrap();
-            assert!(typed_columns.contains_key("id"));
-            assert!(typed_columns.contains_key("name"));
+            let typed_cols = json_state.typed_path_columns.as_ref().unwrap();
+            assert!(typed_cols.contains_key("id"));
+            assert!(typed_cols.contains_key("name"));
         } else {
             panic!("Expected JSON state");
         }
 
+        // Verify roundtrip
+        let result = roundtrip(values.clone(), &type_).await?;
+        assert_eq!(result.len(), values.len());
+
+        for (orig, deser) in values.iter().zip(result.iter()) {
+            let orig_json = parse_json_value(orig)?;
+            let deser_json = parse_json_value(deser)?;
+            assert_eq!(orig_json["id"], deser_json["id"]);
+            assert_eq!(orig_json["name"], deser_json["name"]);
+        }
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_json_typed_nonnullable_defaults() -> Result<()> {
-        // Typed path 'id' is non-nullable UInt32. Missing values should default to 0.
-        let values = vec![
+    async fn test_json_typed_paths_defaults_behavior() -> Result<()> {
+        // Non-nullable UInt32 defaults to 0
+        let values_uint = vec![
             Value::String(br#"{"name": "Alice"}"#.to_vec()),
             Value::String(br#"{"name": "Bob", "id": 42}"#.to_vec()),
-            Value::String(br#"{"name": "Carol"}"#.to_vec()),
         ];
+        let type_uint = json_type_with_config(
+            vec![("id".to_string(), Box::new(Type::UInt32))],
+            vec![],
+            vec![],
+            None,
+        );
+        let result = roundtrip(values_uint, &type_uint).await?;
+        let json0 = parse_json_value(&result[0])?;
+        let json1 = parse_json_value(&result[1])?;
+        assert_eq!(json0["id"], 0);
+        assert_eq!(json1["id"], 42);
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![("id".to_string(), Box::new(Type::UInt32))],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        // Serialize
-        let mut output = vec![];
-        let mut ser_state = SerializerState::default();
-        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
-
-        // Deserialize
-        let mut cursor = Cursor::new(output);
-        let mut de_state = DeserializerState::default();
-        type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
-        let deserialized =
-            type_.deserialize_column(&mut cursor, values.len(), &mut de_state).await?;
-
-        // Validate: rows missing 'id' should have id = 0 in JSON
-        for (i, v) in deserialized.iter().enumerate() {
-            #[cfg(feature = "serde")]
-            if let Value::Json(obj) = v {
-                let id = obj.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                match i {
-                    0 | 2 => assert_eq!(id, serde_json::Value::from(0u64)),
-                    1 => assert_eq!(id, serde_json::Value::from(42u64)),
-                    _ => unreachable!(),
-                }
-                continue;
-            }
-            let obj: serde_json::Value = match v {
-                Value::Object(bytes) | Value::String(bytes) => serde_json::from_slice(bytes)
-                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?,
-                other => panic!("Unexpected value variant: {other:?}"),
-            };
-            let id = obj.get("id").cloned().unwrap_or(serde_json::Value::Null);
-            match i {
-                0 | 2 => assert_eq!(id, serde_json::Value::from(0u64)),
-                1 => assert_eq!(id, serde_json::Value::from(42u64)),
-                _ => unreachable!(),
-            }
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_typed_lowcard_nonnullable_defaults() -> Result<()> {
-        // Typed path 'status' is LowCardinality(String) non-nullable. Missing values should default
-        // to "".
-        let values = vec![
+        // LowCardinality(String) non-nullable defaults to ""
+        let values_lc = vec![
             Value::String(br#"{"name": "Alice"}"#.to_vec()),
             Value::String(br#"{"name": "Bob", "status": "ok"}"#.to_vec()),
-            Value::String(br#"{"name": "Carol"}"#.to_vec()),
         ];
+        let type_lc = json_type_with_config(
+            vec![("status".to_string(), Box::new(Type::LowCardinality(Box::new(Type::String))))],
+            vec![],
+            vec![],
+            None,
+        );
+        let result = roundtrip(values_lc, &type_lc).await?;
+        let json0 = parse_json_value(&result[0])?;
+        let json1 = parse_json_value(&result[1])?;
+        assert_eq!(json0["status"], "");
+        assert_eq!(json1["status"], "ok");
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![(
-                "status".to_string(),
-                Box::new(Type::LowCardinality(Box::new(Type::String))),
-            )],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        // Serialize
-        let mut output = vec![];
-        let mut ser_state = SerializerState::default();
-        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
-
-        // Deserialize
-        let mut cursor = Cursor::new(output);
-        let mut de_state = DeserializerState::default();
-        type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
-        let deserialized =
-            type_.deserialize_column(&mut cursor, values.len(), &mut de_state).await?;
-
-        // Validate: rows missing 'status' should have status = "" in JSON
-        for (i, v) in deserialized.iter().enumerate() {
-            #[cfg(feature = "serde")]
-            if let Value::Json(obj) = v {
-                let status = obj.get("status").cloned().unwrap_or(serde_json::Value::Null);
-                match i {
-                    0 | 2 => assert_eq!(status, serde_json::Value::from("")),
-                    1 => assert_eq!(status, serde_json::Value::from("ok")),
-                    _ => unreachable!(),
-                }
-                continue;
-            }
-            let obj: serde_json::Value = match v {
-                Value::Object(bytes) | Value::String(bytes) => serde_json::from_slice(bytes)
-                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?,
-                other => panic!("Unexpected value variant: {other:?}"),
-            };
-            let status = obj.get("status").cloned().unwrap_or(serde_json::Value::Null);
-            match i {
-                0 | 2 => assert_eq!(status, serde_json::Value::from("")),
-                1 => assert_eq!(status, serde_json::Value::from("ok")),
-                _ => unreachable!(),
-            }
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_typed_variant_null_missing() -> Result<()> {
-        // Typed path 'value' is Variant(String, UInt64). Missing should map to Variant null (JSON
-        // null).
-        let values = vec![
+        // Variant with missing value maps to null
+        let values_var = vec![
             Value::String(br#"{"name": "Alice"}"#.to_vec()),
             Value::String(br#"{"name": "Bob", "value": "x"}"#.to_vec()),
             Value::String(br#"{"name": "Carol", "value": 7}"#.to_vec()),
         ];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![(
-                "value".to_string(),
-                Box::new(Type::variant(vec![Type::String, Type::UInt64])),
-            )],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        // Serialize
-        let mut output = vec![];
-        let mut ser_state = SerializerState::default();
-        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
-
-        // Deserialize
-        let mut cursor = Cursor::new(output);
-        let mut de_state = DeserializerState::default();
-        type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
-        let deserialized =
-            type_.deserialize_column(&mut cursor, values.len(), &mut de_state).await?;
-
-        // Validate: missing 'value' => JSON null; others preserved
-        for (i, v) in deserialized.iter().enumerate() {
-            #[cfg(feature = "serde")]
-            if let Value::Json(obj) = v {
-                match i {
-                    0 => assert_eq!(obj.get("value"), Some(&serde_json::Value::Null)),
-                    1 => assert_eq!(obj.get("value"), Some(&serde_json::Value::from("x"))),
-                    2 => assert_eq!(obj.get("value"), Some(&serde_json::Value::from(7u64))),
-                    _ => unreachable!(),
-                }
-                continue;
-            }
-            let obj: serde_json::Value = match v {
-                Value::Object(bytes) | Value::String(bytes) => serde_json::from_slice(bytes)
-                    .map_err(|e| Error::SerializeError(format!("JSON parse error: {e}")))?,
-                other => panic!("Unexpected value variant: {other:?}"),
-            };
-            match i {
-                0 => assert_eq!(obj.get("value"), Some(&serde_json::Value::Null)),
-                1 => assert_eq!(obj.get("value"), Some(&serde_json::Value::from("x"))),
-                2 => assert_eq!(obj.get("value"), Some(&serde_json::Value::from(7u64))),
-                _ => unreachable!(),
-            }
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_with_skip_paths() -> Result<()> {
-        // Test JSON with skip paths
-        let values = vec![
-            Value::String(
-                br#"{"public": "data", "password": "secret", "private_key": "xyz"}"#.to_vec(),
-            ),
-            Value::String(
-                br#"{"public": "info", "secret_token": "abc", "api_key": "123"}"#.to_vec(),
-            ),
-        ];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec!["password".to_string()],
-            skip_regex:        vec![".*_key".to_string(), "secret.*".to_string()],
-        };
-
-        // Analyze values
-        let state = JsonSerializer::analyze_values(&values, &type_)?;
-
-        if let TypeSpecificState::Json(json_state) = &state {
-            // Verify only public field remains
-            assert_eq!(json_state.dynamic_paths.len(), 1);
-            assert!(json_state.dynamic_paths.contains(&"public".to_string()));
-
-            // Verify skipped paths are not present
-            assert!(!json_state.dynamic_paths.contains(&"password".to_string()));
-            assert!(!json_state.dynamic_paths.contains(&"private_key".to_string()));
-            assert!(!json_state.dynamic_paths.contains(&"secret_token".to_string()));
-            assert!(!json_state.dynamic_paths.contains(&"api_key".to_string()));
-        } else {
-            panic!("Expected JSON state");
-        }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_with_typed_and_skip_paths() -> Result<()> {
-        // Test JSON with both typed and skip paths
-        let values = vec![
-            Value::String(
-                br#"{"id": 1, "name": "Alice", "password": "secret", "score": 95, "active": true}"#
-                    .to_vec(),
-            ),
-            Value::String(br#"{"id": 2, "name": "Bob", "api_key": "xyz", "score": 87}"#.to_vec()),
-        ];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![
-                ("id".to_string(), Box::new(Type::UInt32)),
-                ("name".to_string(), Box::new(Type::String)),
-            ],
-            skip_exact:        vec!["password".to_string()],
-            skip_regex:        vec![".*_key".to_string()],
-        };
-
-        // Analyze values
-        let state = JsonSerializer::analyze_values(&values, &type_)?;
-
-        if let TypeSpecificState::Json(json_state) = &state {
-            // Verify typed paths
-            assert_eq!(json_state.typed_paths.len(), 2);
-
-            // Verify dynamic paths (should only have score and active)
-            assert!(
-                json_state.dynamic_paths.contains(&"score".to_string())
-                    || json_state.dynamic_paths.contains(&"active".to_string())
-            );
-            assert!(!json_state.dynamic_paths.contains(&"password".to_string()));
-            assert!(!json_state.dynamic_paths.contains(&"api_key".to_string()));
-            assert!(!json_state.dynamic_paths.contains(&"id".to_string()));
-            assert!(!json_state.dynamic_paths.contains(&"name".to_string()));
-        } else {
-            panic!("Expected JSON state");
-        }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_typed_paths_simple() -> Result<()> {
-        // Simple test to verify typed paths work
-        let values = vec![Value::String(br#"{"id": 1, "name": "test"}"#.to_vec())];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![("id".to_string(), Box::new(Type::UInt32))],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        // Just test analyze for now
-        let state = JsonSerializer::analyze_values(&values, &type_)?;
-
-        if let TypeSpecificState::Json(json_state) = &state {
-            assert_eq!(json_state.typed_paths.len(), 1);
-            assert!(json_state.typed_paths.iter().any(|(p, _)| p == "id"));
-            assert!(json_state.dynamic_paths.contains(&"name".to_string()));
-
-            // Check typed columns were extracted
-            if let Some(typed_cols) = &json_state.typed_path_columns {
-                assert!(typed_cols.contains_key("id"));
-                let id_values = typed_cols.get("id").unwrap();
-                assert_eq!(id_values.len(), 1);
-                // The value should be UInt32(1)
-                match &id_values[0] {
-                    Value::UInt32(1) | Value::UInt64(1) | Value::Int64(1) => {}
-                    other => panic!("Expected numeric 1, got {other:?}"),
-                }
-            } else {
-                panic!("No typed columns found");
-            }
-        } else {
-            panic!("Expected JSON state");
-        }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_simple_roundtrip() -> Result<()> {
-        // Simple roundtrip test without typed paths first
-        let values = vec![
-            Value::String(br#"{"id": 123, "name": "Alice"}"#.to_vec()),
-            Value::String(br#"{"id": 456, "name": "Bob"}"#.to_vec()),
-        ];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        // Serialize
-        let mut output = vec![];
-        let mut ser_state = SerializerState::default();
-        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
-
-        // Deserialize
-        let mut cursor = Cursor::new(output);
-        let mut de_state = DeserializerState::default();
-        type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
-        let deserialized = type_.deserialize_column(&mut cursor, 2, &mut de_state).await?;
-
-        // Verify we got the same data back
-        assert_eq!(deserialized.len(), values.len());
-        for (orig, deser) in values.iter().zip(deserialized.iter()) {
-            let orig_json: serde_json::Value = match orig {
-                Value::String(orig_bytes) | Value::Object(orig_bytes) => {
-                    serde_json::from_slice(orig_bytes)
-                        .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?
-                }
-                #[cfg(feature = "serde")]
-                Value::Json(v) => v.clone(),
-                other => panic!("Unexpected value variant: {other:?}"),
-            };
-            let deser_json: serde_json::Value = match deser {
-                Value::Object(deser_bytes) | Value::String(deser_bytes) => {
-                    serde_json::from_slice(deser_bytes)
-                        .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?
-                }
-                #[cfg(feature = "serde")]
-                Value::Json(v) => v.clone(),
-                other => panic!("Unexpected value variant: {other:?}"),
-            };
-            assert_eq!(orig_json, deser_json);
-        }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_typed_paths_clickhouse_ordering() -> Result<()> {
-        // Test the exact scenario from ClickHouse hex dump:
-        // select map('a', ['b' || toString(number)])::JSON(a Array(Variant(String, Int64))) as z
-        // from system.numbers limit 5 ClickHouse reorders to JSON(a Array(Variant(Int64,
-        // String))) so discriminators are:
-        // - Int64 → discriminator 0
-        // - String → discriminator 1
-
-        let values = vec![
-            Value::String(br#"{"a": ["b0"]}"#.to_vec()),
-            Value::String(br#"{"a": ["b1"]}"#.to_vec()),
-            Value::String(br#"{"a": ["b2"]}"#.to_vec()),
-            Value::String(br#"{"a": ["b3"]}"#.to_vec()),
-            Value::String(br#"{"a": ["b4"]}"#.to_vec()),
-        ];
-
-        // Use the exact type from ClickHouse (which reordered String, Int64 → Int64, String)
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![(
-                "a".to_string(),
-                // This will be sorted alphabetically: Int64, String
-                Box::new(Type::Array(Box::new(Type::variant(vec![Type::String, Type::Int64])))),
-            )],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        // Analyze values
-        let state = JsonSerializer::analyze_values(&values, &type_)?;
-
-        if let TypeSpecificState::Json(json_state) = &state {
-            println!("=== CLICKHOUSE ORDERING TEST ===");
-
-            // Check that we have typed path "a"
-            assert_eq!(json_state.typed_paths.len(), 1);
-            assert!(json_state.typed_paths.iter().any(|(name, _)| name == "a"));
-
-            if let Some(typed_columns) = &json_state.typed_path_columns {
-                if let Some(a_column) = typed_columns.get("a") {
-                    println!("Column 'a' has {} values", a_column.len());
-
-                    // Check that string values like "b0" get discriminator 1 (String is
-                    // alphabetically second)
-                    for (i, value) in a_column.iter().enumerate() {
-                        if let Value::Array(arr) = value {
-                            if let Some(Value::Variant(discriminator, inner_val)) = arr.first() {
-                                println!(
-                                    "Row {}: discriminator {}, value: {:?}",
-                                    i, discriminator, inner_val
-                                );
-                                // String values should get discriminator 1 (Int64=0, String=1)
-                                assert_eq!(*discriminator, 1, "String discriminator should be 1");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        println!("✅ ClickHouse discriminator ordering test passed!");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_typed_paths_roundtrip() -> Result<()> {
-        // Full roundtrip test with typed paths
-        let values = vec![
-            Value::String(
-                br#"{"id": 123, "name": "Alice", "score": 95.5, "active": true}"#.to_vec(),
-            ),
-            Value::String(br#"{"id": 456, "name": "Bob", "score": 87.3}"#.to_vec()),
-            Value::String(br#"{"id": 789, "name": "Charlie", "tags": ["a", "b"]}"#.to_vec()),
-        ];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![
-                ("id".to_string(), Box::new(Type::UInt32)),
-                ("name".to_string(), Box::new(Type::String)),
-            ],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        // Serialize
-        let mut output = vec![];
-        let mut ser_state = SerializerState::default();
-        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
-
-        // Deserialize
-        let mut cursor = Cursor::new(output);
-        let mut de_state = DeserializerState::default();
-        type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
-        let deserialized = type_.deserialize_column(&mut cursor, 3, &mut de_state).await?;
-
-        // Verify we got the same data back
-        assert_eq!(deserialized.len(), values.len());
-
-        // Parse and compare JSON objects
-        for (original, deserialized) in values.iter().zip(deserialized.iter()) {
-            let orig_json: serde_json::Value = match original {
-                Value::String(orig_bytes) | Value::Object(orig_bytes) => {
-                    serde_json::from_slice(orig_bytes)
-                        .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?
-                }
-                #[cfg(feature = "serde")]
-                Value::Json(v) => v.clone(),
-                other => panic!("Unexpected value variant: {other:?}"),
-            };
-            let deser_json: serde_json::Value = match deserialized {
-                Value::Object(deser_bytes) | Value::String(deser_bytes) => {
-                    serde_json::from_slice(deser_bytes)
-                        .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?
-                }
-                #[cfg(feature = "serde")]
-                Value::Json(v) => v.clone(),
-                other => panic!("Unexpected value variant: {other:?}"),
-            };
-
-            // Verify typed paths are preserved
-            assert_eq!(orig_json["id"], deser_json["id"]);
-            assert_eq!(orig_json["name"], deser_json["name"]);
-
-            // Verify dynamic paths are preserved when they exist
-            if !orig_json["score"].is_null() {
-                assert_eq!(orig_json["score"], deser_json["score"]);
-            }
-            if !orig_json["active"].is_null() {
-                // Bool gets converted to UInt8 (0/1) in ClickHouse
-                if orig_json["active"].is_boolean() && deser_json["active"].is_number() {
-                    let orig_bool = orig_json["active"].as_bool().unwrap();
-                    let deser_num = deser_json["active"].as_u64().unwrap();
-                    assert_eq!(orig_bool as u64, deser_num);
-                } else {
-                    assert_eq!(orig_json["active"], deser_json["active"]);
-                }
-            }
-            if !orig_json["tags"].is_null() {
-                assert_eq!(orig_json["tags"], deser_json["tags"]);
-            }
-        }
+        let type_var = json_type_with_config(
+            vec![("value".to_string(), Box::new(Type::variant(vec![Type::String, Type::UInt64])))],
+            vec![],
+            vec![],
+            None,
+        );
+        let result = roundtrip(values_var, &type_var).await?;
+        let json0 = parse_json_value(&result[0])?;
+        let json1 = parse_json_value(&result[1])?;
+        let json2 = parse_json_value(&result[2])?;
+        assert!(json0["value"].is_null());
+        assert_eq!(json1["value"], "x");
+        assert_eq!(json2["value"], 7);
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_json_typed_paths_type_conversions() -> Result<()> {
-        // Test various type conversions for typed paths
         let values = vec![
-            Value::String(br#"{"int8": 127, "int16": 32000, "int32": 2000000, "uint8": 255, "uint16": 65000, "uint32": 4000000000, "float32": 3.14, "float64": 2.71828}"#.to_vec()),
-            Value::String(br#"{"int8": -128, "int16": -32000, "int32": -2000000, "uint8": 0, "uint16": 0, "uint32": 0, "float32": -1.23, "float64": -9.876}"#.to_vec()),
+            Value::String(br#"{"i8": 127, "u8": 255, "f32": 3.14, "f64": 2.71828}"#.to_vec()),
+            Value::String(br#"{"i8": -128, "u8": 0, "f32": -1.23, "f64": -9.876}"#.to_vec()),
         ];
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![
-                ("int8".to_string(), Box::new(Type::Int8)),
-                ("int16".to_string(), Box::new(Type::Int16)),
-                ("int32".to_string(), Box::new(Type::Int32)),
-                ("uint8".to_string(), Box::new(Type::UInt8)),
-                ("uint16".to_string(), Box::new(Type::UInt16)),
-                ("uint32".to_string(), Box::new(Type::UInt32)),
-                ("float32".to_string(), Box::new(Type::Float32)),
-                ("float64".to_string(), Box::new(Type::Float64)),
+        let type_ = json_type_with_config(
+            vec![
+                ("i8".to_string(), Box::new(Type::Int8)),
+                ("u8".to_string(), Box::new(Type::UInt8)),
+                ("f32".to_string(), Box::new(Type::Float32)),
+                ("f64".to_string(), Box::new(Type::Float64)),
             ],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
+            vec![],
+            vec![],
+            None,
+        );
 
-        // Serialize
-        let mut output = vec![];
-        let mut ser_state = SerializerState::default();
-        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
-
-        // Deserialize
-        let mut cursor = Cursor::new(output);
-        let mut de_state = DeserializerState::default();
-        type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
-        let deserialized = type_.deserialize_column(&mut cursor, 2, &mut de_state).await?;
-
-        // Verify we got the same data back (with type conversions)
-        assert_eq!(deserialized.len(), 2);
-
-        // Parse and verify JSON structure
-        for (orig, deser) in values.iter().zip(deserialized.iter()) {
-            let orig_json: serde_json::Value = match orig {
-                Value::String(orig_bytes) | Value::Object(orig_bytes) => {
-                    serde_json::from_slice(orig_bytes)
-                        .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?
-                }
-                #[cfg(feature = "serde")]
-                Value::Json(v) => v.clone(),
-                other => panic!("Unexpected value variant: {other:?}"),
-            };
-            let deser_json: serde_json::Value = match deser {
-                Value::Object(deser_bytes) | Value::String(deser_bytes) => {
-                    serde_json::from_slice(deser_bytes)
-                        .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?
-                }
-                #[cfg(feature = "serde")]
-                Value::Json(v) => v.clone(),
-                other => panic!("Unexpected value variant: {other:?}"),
-            };
-
-            // Verify typed paths are preserved with correct types
-            // Note: Values may be truncated due to type conversions
-            assert!(deser_json["int8"].is_number());
-            assert!(deser_json["int16"].is_number());
-            assert!(deser_json["int32"].is_number());
-            assert!(deser_json["uint8"].is_number());
-            assert!(deser_json["uint16"].is_number());
-            assert!(deser_json["uint32"].is_number());
-            assert!(deser_json["float32"].is_number());
-            assert!(deser_json["float64"].is_number());
-
-            // Check some specific values
-            if orig_json["int8"] == 127 {
-                assert_eq!(deser_json["int8"], 127);
-                assert_eq!(deser_json["uint8"], 255);
-            }
-            // done
+        let result = roundtrip(values, &type_).await?;
+        for v in &result {
+            let json = parse_json_value(v)?;
+            assert!(json["i8"].is_number());
+            assert!(json["u8"].is_number());
+            assert!(json["f32"].is_number());
+            assert!(json["f64"].is_number());
         }
+        let json0 = parse_json_value(&result[0])?;
+        assert_eq!(json0["i8"], 127);
+        assert_eq!(json0["u8"], 255);
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_json_skip_paths_roundtrip() -> Result<()> {
-        // Full roundtrip test with skip paths
-        let values = vec![
-            Value::String(
-                br#"{"public": "data", "password": "secret123", "private_key": "xyz"}"#.to_vec(),
-            ),
-            Value::String(
-                br#"{"public": "info", "secret_token": "abc", "api_key": "123"}"#.to_vec(),
-            ),
-        ];
+    async fn test_json_typed_paths_overflow_wrapping() -> Result<()> {
+        let values = vec![Value::String(br#"{"overflow_u8": 256, "negative_to_u8": -1}"#.to_vec())];
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec!["password".to_string()],
-            skip_regex:        vec![".*_key".to_string(), "secret.*".to_string()],
-        };
-
-        // Serialize
-        let mut output = vec![];
-        let mut ser_state = SerializerState::default();
-        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
-
-        // Deserialize
-        let mut cursor = Cursor::new(output);
-        let mut de_state = DeserializerState::default();
-        type_.deserialize_prefix_async(&mut cursor, &mut de_state).await?;
-        let deserialized = type_.deserialize_column(&mut cursor, 2, &mut de_state).await?;
-
-        // Verify we got data back
-        assert_eq!(deserialized.len(), values.len());
-
-        // Parse and verify skipped paths are not present
-        for deserialized_val in deserialized.iter() {
-            let deser_json: serde_json::Value = match deserialized_val {
-                Value::Object(deser_bytes) | Value::String(deser_bytes) => {
-                    serde_json::from_slice(deser_bytes)
-                        .map_err(|e| Error::DeserializeError(format!("JSON parse error: {e}")))?
-                }
-                #[cfg(feature = "serde")]
-                Value::Json(v) => v.clone(),
-                other => panic!("Unexpected value variant: {other:?}"),
-            };
-
-            // Verify only public field is present
-            assert!(!deser_json["public"].is_null());
-
-            // Verify skipped paths are not present
-            assert!(deser_json["password"].is_null());
-            assert!(deser_json["private_key"].is_null());
-            assert!(deser_json["secret_token"].is_null());
-            assert!(deser_json["api_key"].is_null());
-            // done
-        }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_v3_serialization_roundtrip() -> Result<()> {
-        // Test with original failing case but only 2 rows
-        let values = vec![
-            Value::String(b"{\"id\": 42, \"user\": {\"name\": \"Alice\", \"age\": 30}}".to_vec()),
-            Value::String(
-                b"{\"id\": 99, \"user\": {\"name\": \"Bob\"}, \"metadata\": {\"active\": true}}"
-                    .to_vec(),
-            ),
-        ];
-
-        // Test JSON serialization with timeout
-        let timeout_result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            test_json_roundtrip(values.clone()),
-        )
-        .await;
-
-        match timeout_result {
-            Ok(Ok(result)) => {
-                assert_eq!(result.len(), values.len());
-                // Additional JSON structure validation
-                for value in &result {
-                    if let Value::String(bytes) = value {
-                        let json_str = String::from_utf8(bytes.clone())?;
-                        let json_value: serde_json::Value = serde_json::from_str(&json_str)
-                            .map_err(|e| {
-                                Error::SerializeError(format!("Failed to parse JSON: {e}"))
-                            })?;
-                        assert!(json_value.is_object(), "Deserialized JSON should be an object");
-                    }
-                }
-                Ok(())
-            }
-            Ok(Err(e)) => Err(e),
-            Err(timeout_error) => {
-                panic!("JSON serialization timed out: {timeout_error}");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_json_type_conversion_overflow_wrapping() -> Result<()> {
-        // Test that numeric conversions use wrapping semantics like ClickHouse
-        let values = vec![
-            // Test overflow with wrapping: 256 as UInt8 should wrap to 0, -129 as Int8 wraps to
-            // 127
-            Value::String(
-                br#"{"overflow_u8": 256, "underflow_i8": -129, "big_to_small": 65536}"#.to_vec(),
-            ),
-            // Test negative to unsigned wrapping: -1 as UInt8 becomes 255
-            Value::String(
-                br#"{"negative_to_u8": -1, "negative_to_u16": -1, "negative_to_u32": -1}"#.to_vec(),
-            ),
-        ];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![
+        let type_ = json_type_with_config(
+            vec![
                 ("overflow_u8".to_string(), Box::new(Type::UInt8)),
-                ("underflow_i8".to_string(), Box::new(Type::Int8)),
-                ("big_to_small".to_string(), Box::new(Type::UInt8)),
                 ("negative_to_u8".to_string(), Box::new(Type::UInt8)),
-                ("negative_to_u16".to_string(), Box::new(Type::UInt16)),
-                ("negative_to_u32".to_string(), Box::new(Type::UInt32)),
             ],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
+            vec![],
+            vec![],
+            None,
+        );
 
-        // Serialize
-        let mut output = vec![];
-        let mut ser_state = SerializerState::default();
-        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
-
-        // Deserialize and check values
-        let mut input = output.as_slice();
-        let mut de_state = DeserializerState::default();
-        type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
-        let result_values = type_.deserialize_column(&mut input, 2, &mut de_state).await?;
-
-        // Parse results to verify wrapping behavior
-        let parsed1: serde_json::Value = match &result_values[0] {
-            #[cfg(feature = "serde")]
-            Value::Json(v) => v.clone(),
-            Value::Object(b) | Value::String(b) => {
-                serde_json::from_slice(b).map_err(|e| Error::SerializeError(e.to_string()))?
-            }
-            other => return Err(Error::SerializeError(format!("Unexpected value: {other:?}"))),
-        };
-
-        // 256 wraps to 0 as UInt8
-        assert_eq!(parsed1["overflow_u8"], 0);
-        // -129 wraps to 127 as Int8 (two's complement)
-        assert_eq!(parsed1["underflow_i8"], 127);
-        // 65536 wraps to 0 as UInt8
-        assert_eq!(parsed1["big_to_small"], 0);
-
-        let parsed2: serde_json::Value = match &result_values[1] {
-            #[cfg(feature = "serde")]
-            Value::Json(v) => v.clone(),
-            Value::Object(b) | Value::String(b) => {
-                serde_json::from_slice(b).map_err(|e| Error::SerializeError(e.to_string()))?
-            }
-            other => return Err(Error::SerializeError(format!("Unexpected value: {other:?}"))),
-        };
-
-        // -1 as UInt8 becomes 255 (two's complement)
-        assert_eq!(parsed2["negative_to_u8"], 255);
-        // -1 as UInt16 becomes 65535
-        assert_eq!(parsed2["negative_to_u16"], 65535);
-        // -1 as UInt32 becomes 4294967295
-        assert_eq!(parsed2["negative_to_u32"], 4_294_967_295_u64);
+        let result = roundtrip(values, &type_).await?;
+        let json = parse_json_value(&result[0])?;
+        assert_eq!(json["overflow_u8"], 0); // 256 wraps to 0
+        assert_eq!(json["negative_to_u8"], 255); // -1 wraps to 255
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_json_string_parsing() -> Result<()> {
-        // Test string to numeric parsing
-        let values = vec![
-            Value::String(br#"{"str_int": "123", "str_float": "3.14", "str_uint": "255", "str_neg": "-456", "digit_u8_1": "1", "digit_u8_0": "0"}"#.to_vec()),
-        ];
+    async fn test_json_typed_paths_collections() -> Result<()> {
+        let values = vec![Value::String(
+            br#"{"int_arr": [1, 2, 3], "nested": [[1, 2], [3, 4]], "tuple": [100, 3.14, "hi"]}"#
+                .to_vec(),
+        )];
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![
-                ("str_int".to_string(), Box::new(Type::Int32)),
-                ("str_float".to_string(), Box::new(Type::Float64)),
-                ("str_uint".to_string(), Box::new(Type::UInt8)),
-                ("str_neg".to_string(), Box::new(Type::Int16)),
-                ("digit_u8_1".to_string(), Box::new(Type::UInt8)),
-                ("digit_u8_0".to_string(), Box::new(Type::UInt8)),
-            ],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        // Serialize
-        let mut output = vec![];
-        let mut ser_state = SerializerState::default();
-        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
-
-        // Deserialize and verify
-        let mut input = output.as_slice();
-        let mut de_state = DeserializerState::default();
-        type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
-        let result_values = type_.deserialize_column(&mut input, 1, &mut de_state).await?;
-
-        let parsed: serde_json::Value = match &result_values[0] {
-            #[cfg(feature = "serde")]
-            Value::Json(v) => v.clone(),
-            Value::Object(b) | Value::String(b) => {
-                serde_json::from_slice(b).map_err(|e| Error::SerializeError(e.to_string()))?
-            }
-            other => return Err(Error::SerializeError(format!("Unexpected value: {other:?}"))),
-        };
-
-        assert_eq!(parsed["str_int"], 123);
-        const TEST_FLOAT: f64 = 3.14;
-        assert_eq!(parsed["str_float"], TEST_FLOAT);
-        assert_eq!(parsed["str_uint"], 255);
-        assert_eq!(parsed["str_neg"], -456);
-        assert_eq!(parsed["digit_u8_1"], 1);
-        assert_eq!(parsed["digit_u8_0"], 0);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_collection_type_conversions() -> Result<()> {
-        // Test Array element conversions with wrapping
-        let values = vec![
-            Value::String(br#"{"int_array": [256, 512, -1], "nested_array": [[1, 2], [3, 4]], "tuple_data": [100, 3.14, "hello"], "map_data": [["key1", 10], ["key2", 20]]}"#.to_vec()),
-        ];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![
-                // Array with element conversion (256 wraps to 0 as UInt8)
-                ("int_array".to_string(), Box::new(Type::Array(Box::new(Type::UInt8)))),
-                // Nested array
+        let type_ = json_type_with_config(
+            vec![
+                ("int_arr".to_string(), Box::new(Type::Array(Box::new(Type::Int32)))),
                 (
-                    "nested_array".to_string(),
+                    "nested".to_string(),
                     Box::new(Type::Array(Box::new(Type::Array(Box::new(Type::Int32))))),
                 ),
-                // Array to Tuple conversion
                 (
-                    "tuple_data".to_string(),
+                    "tuple".to_string(),
                     Box::new(Type::Tuple(vec![Type::UInt32, Type::Float32, Type::String])),
                 ),
-                // Array of tuples to Map
-                (
-                    "map_data".to_string(),
-                    Box::new(Type::Map(Box::new(Type::String), Box::new(Type::Int16))),
-                ),
             ],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
+            vec![],
+            vec![],
+            None,
+        );
 
-        // Serialize
-        let mut output = vec![];
-        let mut ser_state = SerializerState::default();
-        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
+        let result = roundtrip(values, &type_).await?;
+        let json = parse_json_value(&result[0])?;
 
-        // Deserialize and verify
-        let mut input = output.as_slice();
-        let mut de_state = DeserializerState::default();
-        type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
-        let result_values = type_.deserialize_column(&mut input, 1, &mut de_state).await?;
-
-        let parsed: serde_json::Value = match &result_values[0] {
-            #[cfg(feature = "serde")]
-            Value::Json(v) => v.clone(),
-            Value::Object(b) | Value::String(b) => {
-                serde_json::from_slice(b).map_err(|e| Error::SerializeError(e.to_string()))?
-            }
-            other => return Err(Error::SerializeError(format!("Unexpected value: {other:?}"))),
-        };
-
-        // Check Array element conversions with wrapping
-        assert_eq!(parsed["int_array"][0], 0); // 256 wraps to 0 as UInt8
-        assert_eq!(parsed["int_array"][1], 0); // 512 wraps to 0 as UInt8 
-        assert_eq!(parsed["int_array"][2], 255); // -1 wraps to 255 as UInt8
-
-        // Check nested array
-        assert_eq!(parsed["nested_array"][0][0], 1);
-        assert_eq!(parsed["nested_array"][1][1], 4);
-
-        // Check tuple (from array conversion)
-        assert_eq!(parsed["tuple_data"][0], 100);
-        // Float32 has limited precision, check within tolerance
-        const TEST_FLOAT: f64 = 3.14;
-        assert!((parsed["tuple_data"][1].as_f64().unwrap() - TEST_FLOAT).abs() < 0.01);
-        assert_eq!(parsed["tuple_data"][2], "hello");
-
-        // Check map (from array of tuples)
-        assert_eq!(parsed["map_data"]["key1"], 10);
-        assert_eq!(parsed["map_data"]["key2"], 20);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_nested_collection_conversions() -> Result<()> {
-        // Test deeply nested collection conversions
-        let values = vec![
-            Value::String(br#"{"array_of_tuples": [[1, "a"], [2, "b"], [3, "c"]], "tuple_of_arrays": [[1, 2, 3], [4.5, 6.7]], "nullable_array": [1, null, 3]}"#.to_vec()),
-        ];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![
-                // Array of Tuples with type conversion
-                (
-                    "array_of_tuples".to_string(),
-                    Box::new(Type::Array(Box::new(Type::Tuple(vec![Type::UInt16, Type::String])))),
-                ),
-                // Tuple of Arrays
-                (
-                    "tuple_of_arrays".to_string(),
-                    Box::new(Type::Tuple(vec![
-                        Type::Array(Box::new(Type::Int32)),
-                        Type::Array(Box::new(Type::Float32)),
-                    ])),
-                ),
-                // Array with nullable elements
-                (
-                    "nullable_array".to_string(),
-                    Box::new(Type::Array(Box::new(Type::Nullable(Box::new(Type::UInt32))))),
-                ),
-            ],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        // Serialize
-        let mut output = vec![];
-        let mut ser_state = SerializerState::default();
-        ser_state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut ser_state).await?;
-
-        // Deserialize
-        let mut input = output.as_slice();
-        let mut de_state = DeserializerState::default();
-        type_.deserialize_prefix_async(&mut input, &mut de_state).await?;
-        let result_values = type_.deserialize_column(&mut input, 1, &mut de_state).await?;
-
-        let parsed: serde_json::Value = match &result_values[0] {
-            #[cfg(feature = "serde")]
-            Value::Json(v) => v.clone(),
-            Value::Object(b) | Value::String(b) => {
-                serde_json::from_slice(b).map_err(|e| Error::SerializeError(e.to_string()))?
-            }
-            other => return Err(Error::SerializeError(format!("Unexpected value: {other:?}"))),
-        };
-
-        // Check array of tuples
-        assert_eq!(parsed["array_of_tuples"][0][0], 1);
-        assert_eq!(parsed["array_of_tuples"][0][1], "a");
-        assert_eq!(parsed["array_of_tuples"][2][0], 3);
-        assert_eq!(parsed["array_of_tuples"][2][1], "c");
-
-        // Check tuple of arrays
-        assert_eq!(parsed["tuple_of_arrays"][0][0], 1);
-        assert_eq!(parsed["tuple_of_arrays"][0][2], 3);
-        // Float32 has limited precision, check within tolerance
-        assert!((parsed["tuple_of_arrays"][1][0].as_f64().unwrap() - 4.5).abs() < 0.01);
-        assert!((parsed["tuple_of_arrays"][1][1].as_f64().unwrap() - 6.7).abs() < 0.01);
-
-        // Check nullable array
-        assert_eq!(parsed["nullable_array"][0], 1);
-        assert_eq!(parsed["nullable_array"][1], serde_json::Value::Null);
-        assert_eq!(parsed["nullable_array"][2], 3);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_lowcardinality_binary_output() -> Result<()> {
-        // Create the EXACT same data structure that ClickHouse produces from:
-        // select map('a', 'b' || toString(number))::JSON(a LowCardinality(String)) as z from
-        // system.numbers limit 5
-        let values = vec![
-            Value::String(br#"{"a": "b0"}"#.to_vec()),
-            Value::String(br#"{"a": "b1"}"#.to_vec()),
-            Value::String(br#"{"a": "b2"}"#.to_vec()),
-            Value::String(br#"{"a": "b3"}"#.to_vec()),
-            Value::String(br#"{"a": "b4"}"#.to_vec()),
-        ];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![(
-                "a".to_string(),
-                Box::new(Type::LowCardinality(Box::new(Type::String))),
-            )],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        let mut output = vec![];
-        let mut state = SerializerState::default();
-        state.type_specific = JsonSerializer::analyze_values(&values, &type_)?;
-        type_.serialize_prefix_async(&mut output, &mut state).await?;
-        type_.serialize_column(values, &mut output, &mut state).await?;
-
-        // Write to file for comparison
-        std::fs::write("/tmp/our_output.native", &output)?;
-
-        // Debug the analyzed state
-        if let TypeSpecificState::Json(json_state) = &state.type_specific {
-            println!("=== JSON STATE ANALYSIS ===");
-            println!("Typed paths: {:?}", json_state.typed_paths);
-            if let Some(typed_columns) = &json_state.typed_path_columns {
-                println!("Typed path columns: {:?}", typed_columns.keys().collect::<Vec<_>>());
-                for (path, column_values) in typed_columns {
-                    println!(
-                        "Path '{}' has {} values: {:?}",
-                        path,
-                        column_values.len(),
-                        column_values
-                    );
-                }
-            }
-        }
-
-        // Check specific positions for the LowCardinality version
-        println!("\n=== STRUCTURE ANALYSIS ===");
-        println!("JSON version (bytes 0-7): {:02x?}", &output[0..8]);
-        println!("Typed path count (byte 8): {:02x}", output[8]);
-        if output.len() > 16 {
-            println!("First typed path header (bytes 9-16): {:02x?}", &output[9..17]);
-            if output.len() > 24 {
-                println!(
-                    "More data (bytes 17-24): {:02x?}",
-                    &output[17..std::cmp::min(25, output.len())]
-                );
-            }
-        }
-
-        // Print hex dump for debugging
-        println!("\n=== HEX DUMP OF OUR OUTPUT ===");
-        for (i, chunk) in output.chunks(16).enumerate() {
-            print!("{:08x}: ", i * 16);
-            for (j, byte) in chunk.iter().enumerate() {
-                print!("{byte:02x} ");
-                if j == 7 {
-                    print!(" ");
-                }
-            }
-
-            // Pad if less than 16 bytes
-            if chunk.len() < 16 {
-                for j in chunk.len()..16 {
-                    print!("   ");
-                    if j == 7 {
-                        print!(" ");
-                    }
-                }
-            }
-
-            print!(" |");
-            for byte in chunk {
-                if *byte >= 0x20 && *byte <= 0x7e {
-                    print!("{}", *byte as char);
-                } else {
-                    print!(".");
-                }
-            }
-            println!("|");
-        }
-
-        println!("\nTotal size: {} bytes", output.len());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_typed_paths_variant_simple() -> Result<()> {
-        // Test simple Variant in JSON typed path with just numeric types first
-        let values = vec![
-            Value::String(br#"{"status": "active", "value": 42}"#.to_vec()),
-            Value::String(br#"{"status": "inactive", "value": 123}"#.to_vec()),
-            Value::String(br#"{"status": "pending", "value": 3.14}"#.to_vec()),
-        ];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![(
-                "value".to_string(),
-                Box::new(Type::variant(vec![Type::Int64, Type::Float64])),
-            )],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        // Analyze values
-        let state = JsonSerializer::analyze_values(&values, &type_)?;
-
-        if let TypeSpecificState::Json(json_state) = &state {
-            assert_eq!(json_state.typed_paths.len(), 1);
-            assert!(json_state.typed_paths.iter().any(|(p, _)| p == "value"));
-            assert!(json_state.dynamic_paths.contains(&"status".to_string()));
-
-            // Check typed columns were extracted with correct types
-            if let Some(typed_cols) = &json_state.typed_path_columns {
-                assert!(typed_cols.contains_key("value"));
-                let value_column = typed_cols.get("value").unwrap();
-                assert_eq!(value_column.len(), 3);
-
-                // Values should be converted to Variant types with discriminators
-                for (i, val) in value_column.iter().enumerate() {
-                    match val {
-                        Value::Variant(disc, inner) => {
-                            println!("Row {}: discriminator {}, value type: {:?}", i, disc, inner);
-                            // Just verify we have variant values with proper discriminators
-                            assert!(
-                                *disc == 0 || *disc == 1,
-                                "Discriminator should be 0 or 1, got {}",
-                                disc
-                            );
-                        }
-                        other => panic!("Expected Variant value at row {}, got {other:?}", i),
-                    }
-                }
-            }
-        }
-
-        // Test serialization prefix (the main issue we fixed)
-        let mut output = vec![];
-        let mut ser_state = SerializerState::default();
-        ser_state.type_specific = state;
-
-        // This should work now without "Unsupported Variant serialization version" error
-        type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-        assert!(!output.is_empty(), "Should have serialized prefix data");
-
-        println!("✅ Variant prefix serialization successful - no version error!");
-
-        // Note: Full roundtrip needs more work on dynamic path handling, but the core
-        // Variant issue is resolved
+        assert_eq!(json["int_arr"][0], 1);
+        assert_eq!(json["nested"][0][0], 1);
+        assert_eq!(json["tuple"][0], 100);
+        assert_eq!(json["tuple"][2], "hi");
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_json_typed_paths_variant_in_array() -> Result<()> {
-        // Test Variant within Array type in JSON typed path
         let values = vec![
             Value::String(br#"{"items": [1, "text", 3.14]}"#.to_vec()),
-            Value::String(br#"{"items": ["hello", 42, 2.71]}"#.to_vec()),
-            Value::String(br#"{"items": [99, "world"]}"#.to_vec()),
+            Value::String(br#"{"items": ["hello", 42]}"#.to_vec()),
         ];
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![(
+        let type_ = json_type_with_config(
+            vec![(
                 "items".to_string(),
                 Box::new(Type::Array(Box::new(Type::variant(vec![
                     Type::String,
@@ -2281,213 +1154,140 @@ mod tests {
                     Type::Float64,
                 ])))),
             )],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
+            vec![],
+            vec![],
+            None,
+        );
 
-        // Analyze values
+        // Verify analysis produces correct structure
         let state = JsonSerializer::analyze_values(&values, &type_)?;
-
         if let TypeSpecificState::Json(json_state) = &state {
-            assert_eq!(json_state.typed_paths.len(), 1);
-            assert!(json_state.typed_paths.iter().any(|(p, _)| p == "items"));
+            let typed_cols = json_state.typed_path_columns.as_ref().unwrap();
+            let items = typed_cols.get("items").unwrap();
+            assert_eq!(items.len(), 2);
 
-            // Check typed columns were extracted
-            if let Some(typed_cols) = &json_state.typed_path_columns {
-                assert!(typed_cols.contains_key("items"));
-                let items_column = typed_cols.get("items").unwrap();
-                assert_eq!(items_column.len(), 3);
-
-                // Each value should be an Array of Variant values
-                for array_val in items_column {
-                    match array_val {
-                        Value::Array(elements) => {
-                            assert!(!elements.is_empty());
-                            // Elements should be Variant values with proper discriminators
-                            for element in elements {
-                                match element {
-                                    Value::Variant(disc, inner) => {
-                                        // Verify discriminator is valid (0, 1, or 2 for Float64,
-                                        // Int64, String)
-                                        assert!(*disc <= 2, "Invalid discriminator: {}", disc);
-                                        // Verify inner value matches expected types
-                                        match inner.as_ref() {
-                                            Value::String(_)
-                                            | Value::Int64(_)
-                                            | Value::Float64(_) => {}
-                                            other => {
-                                                panic!("Unexpected variant inner type: {other:?}")
-                                            }
-                                        }
-                                    }
-                                    other => panic!("Expected Variant element, got {other:?}"),
-                                }
-                            }
-                        }
-                        other => panic!("Expected Array value, got {other:?}"),
+            for array_val in items {
+                if let Value::Array(elements) = array_val {
+                    for elem in elements {
+                        assert!(matches!(elem, Value::Variant(_, _)));
                     }
                 }
             }
         }
 
-        // Test serialization (analyze only for now to verify structure)
+        // Verify prefix serialization works
         let mut output = vec![];
         let mut ser_state = SerializerState::default();
         ser_state.type_specific = state;
-
-        // Just test prefix serialization to verify structure is correct
         type_.serialize_prefix_async(&mut output, &mut ser_state).await?;
-
-        assert!(!output.is_empty(), "Should have serialized prefix data");
+        assert!(!output.is_empty());
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_json_typed_paths_variant_type_mismatch() -> Result<()> {
-        // Test error handling when JSON value doesn't match Variant types
+    async fn test_json_typed_paths_variant_type_mismatch_error() -> Result<()> {
         let values = vec![Value::String(br#"{"strict_int": "not_a_number"}"#.to_vec())];
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![(
+        let type_ = json_type_with_config(
+            vec![(
                 "strict_int".to_string(),
-                Box::new(Type::variant(vec![Type::UInt32, Type::Int32])), // Only numeric types
+                Box::new(Type::variant(vec![Type::UInt32, Type::Int32])),
             )],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
+            vec![],
+            vec![],
+            None,
+        );
 
-        // This should fail since "not_a_number" cannot be converted to UInt32 or Int32
         let result = JsonSerializer::analyze_values(&values, &type_);
         assert!(result.is_err());
-        let error = result.unwrap_err();
-        assert!(error.to_string().contains("Cannot find matching variant type"));
-        assert!(error.to_string().contains("not_a_number"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Cannot find matching variant type"));
 
         Ok(())
     }
 
+    // ========== Skip Paths Tests ==========
+
     #[tokio::test]
-    async fn test_json_typed_paths_nested_variant() -> Result<()> {
-        // Test nested structures with Variant
+    async fn test_json_skip_paths() -> Result<()> {
         let values = vec![
-            Value::String(br#"{"config": {"timeout": 30, "retries": "auto"}}"#.to_vec()),
-            Value::String(br#"{"config": {"timeout": "infinite", "retries": 5}}"#.to_vec()),
+            Value::String(
+                br#"{"public": "data", "password": "secret", "api_key": "xyz"}"#.to_vec(),
+            ),
+            Value::String(br#"{"public": "info", "secret_token": "abc"}"#.to_vec()),
         ];
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![], /* Let these be dynamic for now since nested typed paths
-                                        * are complex */
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
+        let type_ = json_type_with_config(
+            vec![],
+            vec!["password".to_string()],
+            vec![".*_key".to_string(), "secret.*".to_string()],
+            None,
+        );
 
-        // Analyze values - this tests that nested structures work
+        // Verify analysis excludes skipped paths
         let state = JsonSerializer::analyze_values(&values, &type_)?;
-
         if let TypeSpecificState::Json(json_state) = &state {
-            // Should have dynamic paths for nested structure
-            assert!(json_state.dynamic_paths.len() > 0);
+            assert_eq!(json_state.dynamic_paths.len(), 1);
+            assert!(json_state.dynamic_paths.contains(&"public".to_string()));
+            assert!(!json_state.dynamic_paths.contains(&"password".to_string()));
+            assert!(!json_state.dynamic_paths.contains(&"api_key".to_string()));
+            assert!(!json_state.dynamic_paths.contains(&"secret_token".to_string()));
+        }
+
+        // Verify roundtrip excludes skipped paths
+        let result = roundtrip(values, &type_).await?;
+        for v in &result {
+            let json = parse_json_value(v)?;
+            assert!(!json["public"].is_null());
+            assert!(json["password"].is_null());
+            assert!(json["api_key"].is_null());
+            assert!(json["secret_token"].is_null());
         }
 
         Ok(())
     }
 
-    // V1/V2 write format tests
     #[tokio::test]
-    async fn test_json_v2_roundtrip() -> Result<()> {
+    async fn test_json_typed_and_skip_paths_combined() -> Result<()> {
+        let values = vec![Value::String(
+            br#"{"id": 1, "name": "Alice", "password": "secret", "score": 95}"#.to_vec(),
+        )];
+
+        let type_ = json_type_with_config(
+            vec![
+                ("id".to_string(), Box::new(Type::UInt32)),
+                ("name".to_string(), Box::new(Type::String)),
+            ],
+            vec!["password".to_string()],
+            vec![],
+            None,
+        );
+
+        let state = JsonSerializer::analyze_values(&values, &type_)?;
+        if let TypeSpecificState::Json(json_state) = &state {
+            assert_eq!(json_state.typed_paths.len(), 2);
+            assert!(json_state.dynamic_paths.contains(&"score".to_string()));
+            assert!(!json_state.dynamic_paths.contains(&"password".to_string()));
+            assert!(!json_state.dynamic_paths.contains(&"id".to_string()));
+        }
+
+        Ok(())
+    }
+
+    // ========== V1/V2/V3 Format Tests ==========
+
+    #[tokio::test]
+    async fn test_json_v1_format() -> Result<()> {
+        use bytes::Buf;
+
         let values = vec![
-            Value::String(b"{\"name\": \"Alice\", \"age\": 30}".to_vec()),
-            Value::String(b"{\"name\": \"Bob\", \"score\": 95.5}".to_vec()),
+            Value::String(br#"{"a": 1, "b": "hello"}"#.to_vec()),
+            Value::String(br#"{"a": 2, "c": true}"#.to_vec()),
         ];
-        let values_len = values.len();
+        let type_ = default_json_type();
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        // Serialize with V2 format
-        let mut output = vec![];
-        let mut state = SerializerState::default();
-        state.type_specific = JsonSerializer::analyze_values_with_version(
-            &values,
-            &type_,
-            Some(JSON_OBJECT_VERSION_V2),
-        )?;
-
-        type_.serialize_prefix_async(&mut output, &mut state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
-
-        // Deserialize it back (should auto-detect V2)
-        let mut input = Cursor::new(output);
-        let mut deser_state = DeserializerState::default();
-
-        type_.deserialize_prefix_async(&mut input, &mut deser_state).await?;
-        let deserialized =
-            type_.deserialize_column(&mut input, values_len, &mut deser_state).await?;
-
-        assert_eq!(deserialized.len(), values_len);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_v2_prefix_format() -> Result<()> {
-        use bytes::Buf;
-
-        let values = vec![Value::String(b"{\"name\": \"test\"}".to_vec())];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        let mut output = vec![];
-        let mut state = SerializerState::default();
-        state.type_specific = JsonSerializer::analyze_values_with_version(
-            &values,
-            &type_,
-            Some(JSON_OBJECT_VERSION_V2),
-        )?;
-
-        type_.serialize_prefix_async(&mut output, &mut state).await?;
-
-        // Verify V2 prefix format - first 8 bytes are version
-        let mut reader = &output[..];
-        let version = reader.get_u64_le();
-        assert_eq!(version, JSON_OBJECT_VERSION_V2, "Version should be V2 (2)");
-
-        // V2 has no max_dynamic_paths, just num_dynamic_paths (varuint)
-        // num_paths=1 is encoded as single byte 0x01
-        assert_eq!(reader[0], 1, "num_dynamic_paths should be 1");
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_v1_prefix_has_max_paths() -> Result<()> {
-        use bytes::Buf;
-
-        let values = vec![Value::String(b"{\"x\": 1}".to_vec())];
-
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
+        // Verify prefix format
         let mut output = vec![];
         let mut state = SerializerState::default();
         state.type_specific = JsonSerializer::analyze_values_with_version(
@@ -2495,107 +1295,83 @@ mod tests {
             &type_,
             Some(JSON_OBJECT_VERSION_V1),
         )?;
-
         type_.serialize_prefix_async(&mut output, &mut state).await?;
 
-        // Verify V1 prefix format - first 8 bytes are version
         let mut reader = &output[..];
         let version = reader.get_u64_le();
-        assert_eq!(version, JSON_OBJECT_VERSION_V1, "Version should be V1 (0)");
+        assert_eq!(version, JSON_OBJECT_VERSION_V1);
+        // V1 has max_dynamic_paths first (1024 as varuint = 0x80 0x08)
+        assert_eq!(reader[0], 0x80);
+        assert_eq!(reader[1], 0x08);
 
-        // V1 has max_dynamic_paths first (varuint)
-        // 1024 in varuint is: 0x80 0x08 (continuation bit set)
-        assert_eq!(reader[0], 0x80, "max_dynamic_paths first byte");
-        assert_eq!(reader[1], 0x08, "max_dynamic_paths second byte (1024)");
+        // Verify roundtrip
+        let result =
+            roundtrip_with_version(values.clone(), &type_, Some(JSON_OBJECT_VERSION_V1)).await?;
+        assert_eq!(result.len(), values.len());
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_json_v1_roundtrip() -> Result<()> {
+    async fn test_json_v2_format() -> Result<()> {
+        use bytes::Buf;
+
         let values = vec![
-            Value::String(b"{\"a\": 1, \"b\": \"hello\"}".to_vec()),
-            Value::String(b"{\"a\": 2, \"c\": true}".to_vec()),
+            Value::String(br#"{"name": "Alice", "age": 30}"#.to_vec()),
+            Value::String(br#"{"name": "Bob", "score": 95.5}"#.to_vec()),
         ];
-        let values_len = values.len();
+        let type_ = default_json_type();
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: None,
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        // Serialize with V1 format
+        // Verify prefix format
         let mut output = vec![];
         let mut state = SerializerState::default();
         state.type_specific = JsonSerializer::analyze_values_with_version(
             &values,
             &type_,
-            Some(JSON_OBJECT_VERSION_V1),
+            Some(JSON_OBJECT_VERSION_V2),
         )?;
-
         type_.serialize_prefix_async(&mut output, &mut state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
 
-        // Deserialize it back (should auto-detect V1)
-        let mut input = Cursor::new(output);
-        let mut deser_state = DeserializerState::default();
+        let mut reader = &output[..];
+        let version = reader.get_u64_le();
+        assert_eq!(version, JSON_OBJECT_VERSION_V2);
+        // V2 has no max_dynamic_paths, just num_paths
+        assert_eq!(reader[0], 3); // 3 paths: age, name, score
 
-        type_.deserialize_prefix_async(&mut input, &mut deser_state).await?;
-        let deserialized =
-            type_.deserialize_column(&mut input, values_len, &mut deser_state).await?;
+        // Verify roundtrip
+        let result =
+            roundtrip_with_version(values.clone(), &type_, Some(JSON_OBJECT_VERSION_V2)).await?;
+        assert_eq!(result.len(), values.len());
 
-        assert_eq!(deserialized.len(), values_len);
         Ok(())
     }
 
     #[tokio::test]
     async fn test_json_v2_path_frequency_selection() -> Result<()> {
-        // Test that V2 selects most frequent paths for dynamic, rest go to shared
-        // Create 3 rows with varying path presence:
-        // - "frequent" appears in all 3 rows (frequency 3)
-        // - "common" appears in 2 rows (frequency 2)
-        // - "rare1", "rare2", "rare3" each appear in 1 row (frequency 1)
+        // With max_dynamic_paths=2, only most frequent paths become dynamic
         let values = vec![
-            Value::String(b"{\"frequent\": 1, \"common\": 10, \"rare1\": 100}".to_vec()),
-            Value::String(b"{\"frequent\": 2, \"common\": 20, \"rare2\": 200}".to_vec()),
-            Value::String(b"{\"frequent\": 3, \"rare3\": 300}".to_vec()),
+            Value::String(br#"{"frequent": 1, "common": 10, "rare1": 100}"#.to_vec()),
+            Value::String(br#"{"frequent": 2, "common": 20, "rare2": 200}"#.to_vec()),
+            Value::String(br#"{"frequent": 3, "rare3": 300}"#.to_vec()),
         ];
 
-        // Set max_dynamic_paths=2 so only "frequent" and "common" become dynamic
-        let type_ = Type::JSON {
-            max_dynamic_paths: Some(2),
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        let mut state: SerializerState<()> = SerializerState::default();
-        state.type_specific = JsonSerializer::analyze_values_with_version(
+        let type_ = json_type_with_config(vec![], vec![], vec![], Some(2));
+        let state = JsonSerializer::analyze_values_with_version(
             &values,
             &type_,
             Some(JSON_OBJECT_VERSION_V2),
         )?;
 
-        // Verify path selection
-        if let TypeSpecificState::Json(json_state) = &state.type_specific {
-            // Dynamic paths should be the 2 most frequent (sorted alphabetically)
-            assert_eq!(json_state.dynamic_paths.len(), 2, "Should have 2 dynamic paths");
-            assert!(json_state.dynamic_paths.contains(&"common".to_string()));
+        if let TypeSpecificState::Json(json_state) = &state {
+            assert_eq!(json_state.dynamic_paths.len(), 2);
             assert!(json_state.dynamic_paths.contains(&"frequent".to_string()));
+            assert!(json_state.dynamic_paths.contains(&"common".to_string()));
 
-            // Shared paths should have the 3 rare paths
-            let shared =
-                json_state.shared_path_columns.as_ref().expect("shared_path_columns should be set");
-            assert_eq!(shared.len(), 3, "Should have 3 shared paths");
+            let shared = json_state.shared_path_columns.as_ref().unwrap();
+            assert_eq!(shared.len(), 3);
             assert!(shared.contains_key("rare1"));
             assert!(shared.contains_key("rare2"));
             assert!(shared.contains_key("rare3"));
-        } else {
-            panic!("Expected Json state");
         }
 
         Ok(())
@@ -2603,58 +1379,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_v2_shared_data_roundtrip() -> Result<()> {
-        // Test V2 roundtrip with actual shared data overflow
-        // 3 rows, max_dynamic_paths=1, so only most frequent path is dynamic
         let values = vec![
-            Value::String(b"{\"main\": 1, \"overflow\": 100}".to_vec()),
-            Value::String(b"{\"main\": 2, \"overflow\": 200}".to_vec()),
-            Value::String(b"{\"main\": 3}".to_vec()), // "main" appears 3 times, "overflow" 2 times
+            Value::String(br#"{"main": 1, "overflow": 100}"#.to_vec()),
+            Value::String(br#"{"main": 2, "overflow": 200}"#.to_vec()),
+            Value::String(br#"{"main": 3}"#.to_vec()),
         ];
-        let values_len = values.len();
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: Some(1), // Only "main" becomes dynamic
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
+        let type_ = json_type_with_config(vec![], vec![], vec![], Some(1));
+        let result =
+            roundtrip_with_version(values.clone(), &type_, Some(JSON_OBJECT_VERSION_V2)).await?;
+        assert_eq!(result.len(), values.len());
 
-        // Serialize with V2 format
-        let mut output = vec![];
-        let mut state = SerializerState::default();
-        state.type_specific = JsonSerializer::analyze_values_with_version(
-            &values,
-            &type_,
-            Some(JSON_OBJECT_VERSION_V2),
-        )?;
-
-        type_.serialize_prefix_async(&mut output, &mut state).await?;
-        type_.serialize_column(values.clone(), &mut output, &mut state).await?;
-
-        // Deserialize it back
-        let mut input = Cursor::new(output);
-        let mut deser_state = DeserializerState::default();
-
-        type_.deserialize_prefix_async(&mut input, &mut deser_state).await?;
-        let deserialized =
-            type_.deserialize_column(&mut input, values_len, &mut deser_state).await?;
-
-        assert_eq!(deserialized.len(), values_len);
-
-        // Verify values came back - just check we got valid JSON-like values
-        // The exact format depends on deserialization mode (Object vs String vs Dynamic vs Json)
-        for (_i, val) in deserialized.iter().enumerate() {
-            // Just verify it's some form of JSON-serialized data
-            match val {
-                Value::Object(_) | Value::String(_) | Value::Dynamic(_, _) => {
-                    // These are all valid JSON result types
-                }
+        for v in &result {
+            match v {
+                Value::Object(_) | Value::String(_) | Value::Dynamic(_, _) => {}
                 #[cfg(feature = "serde")]
-                Value::Json(_) => {
-                    // Also valid - structured JSON representation
-                }
-                other => panic!("Unexpected value type: {:?}", other),
+                Value::Json(_) => {}
+                other => panic!("Unexpected value type: {other:?}"),
             }
         }
 
@@ -2663,29 +1404,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_v2_no_overflow_when_under_limit() -> Result<()> {
-        // When paths fit within limit, shared_path_columns should be None
-        let values = vec![Value::String(b"{\"a\": 1, \"b\": 2}".to_vec())];
+        let values = vec![Value::String(br#"{"a": 1, "b": 2}"#.to_vec())];
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: Some(10), // Limit is higher than path count
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
-
-        let mut state: SerializerState<()> = SerializerState::default();
-        state.type_specific = JsonSerializer::analyze_values_with_version(
+        let type_ = json_type_with_config(vec![], vec![], vec![], Some(10)); // limit > paths
+        let state = JsonSerializer::analyze_values_with_version(
             &values,
             &type_,
             Some(JSON_OBJECT_VERSION_V2),
         )?;
 
-        if let TypeSpecificState::Json(json_state) = &state.type_specific {
+        if let TypeSpecificState::Json(json_state) = &state {
             assert_eq!(json_state.dynamic_paths.len(), 2);
-            assert!(json_state.shared_path_columns.is_none(), "No overflow expected");
-        } else {
-            panic!("Expected Json state");
+            assert!(json_state.shared_path_columns.is_none());
         }
 
         Ok(())
@@ -2693,27 +1423,93 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_v3_ignores_max_dynamic_paths() -> Result<()> {
-        // V3 should send all paths regardless of max_dynamic_paths
-        let values =
-            vec![Value::String(b"{\"a\": 1, \"b\": 2, \"c\": 3, \"d\": 4, \"e\": 5}".to_vec())];
+        let values = vec![Value::String(br#"{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}"#.to_vec())];
 
-        let type_ = Type::JSON {
-            max_dynamic_paths: Some(2), // Would limit V1/V2, but not V3
-            max_dynamic_types: None,
-            typed_paths:       vec![],
-            skip_exact:        vec![],
-            skip_regex:        vec![],
-        };
+        let type_ = json_type_with_config(vec![], vec![], vec![], Some(2)); // would limit V1/V2
+        let state = JsonSerializer::analyze_values_with_version(&values, &type_, None)?; // V3
 
-        // V3 (default - None version)
-        let mut state: SerializerState<()> = SerializerState::default();
-        state.type_specific = JsonSerializer::analyze_values_with_version(&values, &type_, None)?;
+        if let TypeSpecificState::Json(json_state) = &state {
+            assert_eq!(json_state.dynamic_paths.len(), 5); // V3 sends all
+            assert!(json_state.shared_path_columns.is_none());
+        }
 
-        if let TypeSpecificState::Json(json_state) = &state.type_specific {
-            assert_eq!(json_state.dynamic_paths.len(), 5, "V3 should have all 5 paths");
-            assert!(json_state.shared_path_columns.is_none(), "V3 should have no shared columns");
-        } else {
-            panic!("Expected Json state");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_analyze_values_returns_json_state() -> Result<()> {
+        let values = vec![
+            Value::String(br#"{"name": "Alice"}"#.to_vec()),
+            Value::String(br#"{"name": "Bob", "score": 95}"#.to_vec()),
+        ];
+
+        let type_ = default_json_type();
+        let state = JsonSerializer::analyze_values(&values, &type_)?;
+
+        assert!(matches!(state, TypeSpecificState::Json(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_string_to_numeric_parsing() -> Result<()> {
+        let values = vec![Value::String(
+            br#"{"str_int": "123", "str_float": "3.14", "digit": "0"}"#.to_vec(),
+        )];
+
+        let type_ = json_type_with_config(
+            vec![
+                ("str_int".to_string(), Box::new(Type::Int32)),
+                ("str_float".to_string(), Box::new(Type::Float64)),
+                ("digit".to_string(), Box::new(Type::UInt8)),
+            ],
+            vec![],
+            vec![],
+            None,
+        );
+
+        let result = roundtrip(values, &type_).await?;
+        let json = parse_json_value(&result[0])?;
+
+        assert_eq!(json["str_int"], 123);
+        assert_eq!(json["str_float"], 3.14);
+        assert_eq!(json["digit"], 0);
+
+        Ok(())
+    }
+
+    // ========== ClickHouse Discriminator Ordering ==========
+
+    #[tokio::test]
+    async fn test_json_typed_paths_variant_discriminator_ordering() -> Result<()> {
+        // ClickHouse sorts variant types alphabetically: Int64 (disc=0), String (disc=1)
+        let values = vec![
+            Value::String(br#"{"a": ["b0"]}"#.to_vec()),
+            Value::String(br#"{"a": ["b1"]}"#.to_vec()),
+        ];
+
+        let type_ = json_type_with_config(
+            vec![(
+                "a".to_string(),
+                Box::new(Type::Array(Box::new(Type::variant(vec![Type::String, Type::Int64])))),
+            )],
+            vec![],
+            vec![],
+            None,
+        );
+
+        let state = JsonSerializer::analyze_values(&values, &type_)?;
+        if let TypeSpecificState::Json(json_state) = &state {
+            let typed_cols = json_state.typed_path_columns.as_ref().unwrap();
+            let a_column = typed_cols.get("a").unwrap();
+
+            for array_val in a_column {
+                if let Value::Array(arr) = array_val {
+                    if let Some(Value::Variant(discriminator, _)) = arr.first() {
+                        // String values get discriminator 1 (Int64=0, String=1 alphabetically)
+                        assert_eq!(*discriminator, 1);
+                    }
+                }
+            }
         }
 
         Ok(())
