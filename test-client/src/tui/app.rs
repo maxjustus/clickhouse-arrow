@@ -1007,10 +1007,15 @@ impl App {
                 if let Some(hist_idx) = self.lookup_query(query_id) {
                     if let Some(block) = self.session.get_running_mut(hist_idx) {
                         block.running = true;
-                        // Update sub-query status
+                        // Reset sub-query state (handles retries after reconnection)
                         if let Some(sq) = block.queries.get_mut(sub_idx) {
                             sq.status = crate::tui::session::QueryStatus::Running;
+                            sq.error = None; // Clear previous error if retrying
                         }
+                    }
+                    // Clear history entry error if retrying
+                    if let Some(entry) = self.session.history.get_mut(hist_idx) {
+                        entry.error = None;
                     }
                 }
             }
@@ -1042,17 +1047,24 @@ impl App {
                 }
             }
             AppEvent::QueryError { query_id, sub_idx, error } => {
+                tracing::debug!(query_id, sub_idx, %error, "QueryError event received");
                 if let Some(hist_idx) = self.lookup_query(query_id) {
+                    tracing::debug!(query_id, hist_idx, "found query in map");
                     if let Some(block) = self.session.get_running_mut(hist_idx) {
+                        tracing::debug!(query_id, hist_idx, "setting error on block");
                         block.set_error(sub_idx, Some(error.clone()));
                         block.running = false;
                         block.cancel_requested = false;
+                    } else {
+                        tracing::warn!(query_id, hist_idx, "block not found in running_queries");
                     }
 
                     // Update history entry with error
                     if let Some(entry) = self.session.history.get_mut(hist_idx) {
                         entry.error = Some(error);
                     }
+                } else {
+                    tracing::warn!(query_id, "query_id not found in query_map");
                 }
             }
             AppEvent::RowReceived { query_id, sub_idx, row } => {

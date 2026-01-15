@@ -23,19 +23,6 @@ pub enum CacheWriter {
 
 type CacheWriterMap = Arc<RwLock<HashMap<usize, Arc<Mutex<Option<CacheWriter>>>>>>;
 
-/// Check if an error message indicates a connection problem (vs query error)
-fn is_connection_error(error: &str) -> bool {
-    let lower = error.to_lowercase();
-    lower.contains("connection")
-        || lower.contains("io error")
-        || lower.contains("channel closed")
-        || lower.contains("timeout")
-        || lower.contains("eof")
-        || lower.contains("broken pipe")
-        || lower.contains("reset by peer")
-        || lower.contains("connection gone")
-}
-
 /// Reconnect with exponential backoff
 async fn reconnect_with_backoff(
     params: &ConnectionParams,
@@ -350,14 +337,16 @@ async fn execute_query(
         // Register the Qid -> (query_id, sub_idx) mapping
         qid_map.write().await.insert(qid, (query_id, sub_idx));
 
-        // Send query started event for this sub-query
-        let _ = event_tx.send(AppEvent::QueryStarted { query_id, sub_idx }).await;
-
-        // Execute this statement (retry once on connection error after reconnect)
+        // Execute this statement (retry on connection error after reconnect)
         let stream = loop {
-            match client
-                .read()
-                .await
+            // Send QueryStarted at the start of each attempt (handles retries)
+            let _ = event_tx.send(AppEvent::QueryStarted { query_id, sub_idx }).await;
+
+            tracing::debug!(query_id, sub_idx, "acquiring client read lock");
+            let client_guard = client.read().await;
+            tracing::debug!(query_id, sub_idx, "submitting query");
+
+            match client_guard
                 .query_raw_with_settings::<clickhouse_arrow::QueryParams, Settings>(
                     sql.clone(),
                     None,
@@ -366,24 +355,32 @@ async fn execute_query(
                 )
                 .await
             {
-                Ok(s) => break s,
+                Ok(s) => {
+                    drop(client_guard);
+                    tracing::debug!(query_id, sub_idx, "query submitted successfully");
+                    break s;
+                }
                 Err(e) => {
-                    let error_msg = e.to_string();
+                    drop(client_guard);
+                    tracing::debug!(query_id, sub_idx, error = %e, "query failed");
 
                     // Check if this is a connection error - reconnect and retry
-                    if is_connection_error(&error_msg) {
-                        let _ = event_tx
-                            .send(AppEvent::ConnectionLost { error: error_msg.clone() })
-                            .await;
+                    if e.is_connection_error() {
+                        tracing::info!(query_id, sub_idx, "connection error, reconnecting");
+                        let error_msg = e.to_string();
+                        let _ = event_tx.send(AppEvent::ConnectionLost { error: error_msg }).await;
                         let new_client = reconnect_with_backoff(params, event_tx).await;
                         *client.write().await = new_client;
                         continue; // Retry the query
                     }
 
-                    // Non-connection error - report and return
+                    // Non-connection error (query error) - report and return
+                    tracing::debug!(query_id, sub_idx, "sending QueryError event");
+                    let error_msg = e.to_string();
                     let _ = event_tx
                         .send(AppEvent::QueryError { query_id, sub_idx, error: error_msg.clone() })
                         .await;
+                    tracing::debug!(query_id, sub_idx, "QueryError event sent");
 
                     // Finish cache with error and return (stop on first error)
                     finish_cache(
@@ -432,16 +429,15 @@ async fn execute_query(
                     }
                 }
                 Err(e) => {
-                    let error_msg = e.to_string();
-
-                    if is_connection_error(&error_msg) {
-                        let _ = event_tx
-                            .send(AppEvent::ConnectionLost { error: error_msg.clone() })
-                            .await;
+                    // Only reconnect for actual connection errors
+                    if e.is_connection_error() {
+                        let error_msg = e.to_string();
+                        let _ = event_tx.send(AppEvent::ConnectionLost { error: error_msg }).await;
                         let new_client = reconnect_with_backoff(params, event_tx).await;
                         *client.write().await = new_client;
                     }
 
+                    let error_msg = e.to_string();
                     let _ = event_tx
                         .send(AppEvent::QueryError { query_id, sub_idx, error: error_msg.clone() })
                         .await;

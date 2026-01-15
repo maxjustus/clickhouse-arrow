@@ -97,4 +97,3 @@ like seconds instead of microseconds, MB instead of bytes, etc.
 - need an easier way to inspect schemas/available functions, settings.. both via like a searchable tree view and via autocomplete in the query editor
   - what if tree view was populated with everything and typing filtered down per tree as I type?
   - filtering should handle patterns like db_name.table.col.* , etc.
-- add run on paste mode - maybe that's a default?

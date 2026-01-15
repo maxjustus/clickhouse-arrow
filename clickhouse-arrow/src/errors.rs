@@ -113,6 +113,30 @@ impl Error {
             x => x,
         }
     }
+
+    /// Returns true if this error indicates a connection failure that may be recoverable
+    /// by reconnecting. Query errors (like syntax errors or table not found) return false.
+    #[must_use]
+    pub fn is_connection_error(&self) -> bool {
+        match self {
+            Error::Io(e) => matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NotConnected
+            ),
+            Error::ConnectionTimeout(_) => true,
+            Error::ConnectionGone(_) => true,
+            Error::ChannelClosed => true,
+            Error::InternalChannelError => true,
+            // Query errors - NOT connection errors
+            Error::ServerException(_) => false,
+            _ => false,
+        }
+    }
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
